@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import email_validator
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Permit local development domains (.local, .localhost, .internal) in EmailStr validation
@@ -23,6 +23,7 @@ for _d in ("local", "localhost", "internal"):
         email_validator.SPECIAL_USE_DOMAIN_NAMES.remove(_d)
 
 from app.api.v1.router import router as v1_router
+from app.core.authz import public_endpoint
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import TenantResolutionMiddleware
@@ -59,21 +60,20 @@ app = FastAPI(
 # (request_id, tenant_slug) are set when route dependencies execute.
 app.add_middleware(TenantResolutionMiddleware)
 
-# Configure CORS allowed origins with dev fallbacks
-_cors_origins = list(dict.fromkeys([
-    settings.FRONTEND_URL,
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]))
-
+# Configure CORS with an explicit origin whitelist
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=settings.cors_origins,
     allow_credentials=True,  # Required for the refresh-token cookie.
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Tenant-Slug",
+        "X-Request-ID",
+        "Accept",
+        "Origin",
+    ],
     expose_headers=["X-Request-ID"],
 )
 
@@ -84,7 +84,7 @@ app.include_router(v1_router)
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
-@app.get("/health", tags=["meta"])
+@app.get("/health", tags=["meta"], dependencies=[Depends(public_endpoint())])
 async def health() -> dict[str, str]:
     """Minimal liveness probe.  Does not hit the DB (k8s readiness is separate)."""
     return {"status": "ok", "version": "0.1.0"}

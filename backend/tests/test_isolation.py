@@ -22,7 +22,21 @@ import pytest
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.academic import (
+    Class,
+    ClassSubject,
+    Enrollment,
+    Subject,
+    TeacherAssignment,
+)
+from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
+from app.db.models.rbac import (
+    Permission,
+    Role,
+    RolePermission,
+    UserRole,
+)
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 
@@ -54,6 +68,26 @@ TENANT_TABLES = [
         "token_hash": lambda: uuid.uuid4().hex,
         "purpose": "verify_email",
         "expires_at": lambda: datetime(2099, 1, 1, tzinfo=UTC),
+    }),
+    (Role, {
+        "name": lambda: f"iso-role-{uuid.uuid4().hex[:8]}",
+        "description": "Isolation Role",
+        "is_system": False,
+    }),
+    (Class, {
+        "name": lambda: f"iso-class-{uuid.uuid4().hex[:8]}",
+        "kind": "section",
+        "description": "Isolation Class",
+    }),
+    (Subject, {
+        "name": lambda: f"iso-subject-{uuid.uuid4().hex[:8]}",
+        "code": "ISO101",
+        "description": "Isolation Subject",
+    }),
+    (AuditLog, {
+        "action": "iso:audit_test",
+        "target_type": "user",
+        "details": {"test": True},
     }),
 ]
 
@@ -112,17 +146,21 @@ async def test_update_cannot_affect_other_tenant_rows(
     result = await raw_db.execute(insert(model).values(**row_b).returning(model))
     inserted = result.scalar_one()
 
-    # Attempt UPDATE from tenant A's session — should match 0 rows due to RLS.
+    # Attempt UPDATE from tenant A's session — should match 0 rows due to RLS,
+    # or fail with permission denied if the table is append-only (like audit_log).
     pk_col = list(model.__table__.primary_key.columns)[0]
-    update_result = await tenant_a_session.execute(
-        update(model).where(pk_col == inserted.id).values(tenant_id=tenant_a.id)
-        if hasattr(inserted, "id") else
-        update(model).where(model.tenant_id == tenant_b.id).values()
-    )
-    assert update_result.rowcount == 0, (
-        f"{model.__tablename__}: UPDATE in tenant A's context affected "
-        f"{update_result.rowcount} row(s) belonging to tenant B."
-    )
+    try:
+        update_result = await tenant_a_session.execute(
+            update(model).where(pk_col == inserted.id).values(tenant_id=tenant_a.id)
+            if hasattr(inserted, "id") else
+            update(model).where(model.tenant_id == tenant_b.id).values()
+        )
+        assert update_result.rowcount == 0, (
+            f"{model.__tablename__}: UPDATE in tenant A's context affected "
+            f"{update_result.rowcount} row(s) belonging to tenant B."
+        )
+    except Exception as exc:
+        assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
 
 
 # ── 3. DELETE isolation ───────────────────────────────────────────────────────
@@ -144,15 +182,18 @@ async def test_delete_cannot_affect_other_tenant_rows(
     inserted = result.scalar_one()
 
     pk_col = list(model.__table__.primary_key.columns)[0]
-    del_result = await tenant_a_session.execute(
-        delete(model).where(pk_col == inserted.id)
-        if hasattr(inserted, "id") else
-        delete(model).where(model.tenant_id == tenant_b.id)
-    )
-    assert del_result.rowcount == 0, (
-        f"{model.__tablename__}: DELETE in tenant A's context removed "
-        f"{del_result.rowcount} row(s) belonging to tenant B."
-    )
+    try:
+        del_result = await tenant_a_session.execute(
+            delete(model).where(pk_col == inserted.id)
+            if hasattr(inserted, "id") else
+            delete(model).where(model.tenant_id == tenant_b.id)
+        )
+        assert del_result.rowcount == 0, (
+            f"{model.__tablename__}: DELETE in tenant A's context removed "
+            f"{del_result.rowcount} row(s) belonging to tenant B."
+        )
+    except Exception as exc:
+        assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
 
 
 # ── 4. INSERT WITH CHECK ──────────────────────────────────────────────────────
@@ -215,4 +256,91 @@ async def test_query_without_tenant_id_returns_no_rows(
         f"{model.__tablename__}: Expected 0 rows with no tenant_id set "
         f"but got {len(rows)} row(s). RLS is NOT fail-closed!"
     )
+
+
+# ── 6. Composite Junction Tables Isolation ────────────────────────────────────
+
+async def test_academic_and_rbac_junctions_isolation(
+    raw_db: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+    tenant_a_session: AsyncSession,
+    tenant_b_session: AsyncSession,
+    user_a: User,
+    user_b: User,
+) -> None:
+    """
+    Verify that junction tables (RolePermission, UserRole, ClassSubject, Enrollment,
+    TeacherAssignment) enforce tenant isolation and RLS boundaries.
+    """
+    # 1. Create parents for Tenant A
+    role_a = Role(tenant_id=tenant_a.id, name=f"role-a-{uuid.uuid4().hex[:6]}", is_system=False)
+    class_a = Class(tenant_id=tenant_a.id, name=f"class-a-{uuid.uuid4().hex[:6]}")
+    subject_a = Subject(tenant_id=tenant_a.id, name=f"sub-a-{uuid.uuid4().hex[:6]}")
+    raw_db.add_all([role_a, class_a, subject_a])
+    await raw_db.flush()
+
+    # 2. Create parents for Tenant B
+    role_b = Role(tenant_id=tenant_b.id, name=f"role-b-{uuid.uuid4().hex[:6]}", is_system=False)
+    class_b = Class(tenant_id=tenant_b.id, name=f"class-b-{uuid.uuid4().hex[:6]}")
+    subject_b = Subject(tenant_id=tenant_b.id, name=f"sub-b-{uuid.uuid4().hex[:6]}")
+    raw_db.add_all([role_b, class_b, subject_b])
+    await raw_db.flush()
+
+    # 3. Create junctions for Tenant A
+    rp_a = RolePermission(tenant_id=tenant_a.id, role_id=role_a.id, permission_id="chat:use")
+    ur_a = UserRole(tenant_id=tenant_a.id, user_id=user_a.id, role_id=role_a.id)
+    cs_a = ClassSubject(tenant_id=tenant_a.id, class_id=class_a.id, subject_id=subject_a.id)
+    raw_db.add_all([rp_a, ur_a, cs_a])
+    await raw_db.flush()
+
+    enr_a = Enrollment(tenant_id=tenant_a.id, user_id=user_a.id, class_id=class_a.id)
+    ta_a = TeacherAssignment(
+        tenant_id=tenant_a.id, user_id=user_a.id, class_id=class_a.id, subject_id=subject_a.id
+    )
+    raw_db.add_all([enr_a, ta_a])
+
+    # 4. Create junctions for Tenant B
+    rp_b = RolePermission(tenant_id=tenant_b.id, role_id=role_b.id, permission_id="chat:use")
+    ur_b = UserRole(tenant_id=tenant_b.id, user_id=user_b.id, role_id=role_b.id)
+    cs_b = ClassSubject(tenant_id=tenant_b.id, class_id=class_b.id, subject_id=subject_b.id)
+    raw_db.add_all([rp_b, ur_b, cs_b])
+    await raw_db.flush()
+
+    enr_b = Enrollment(tenant_id=tenant_b.id, user_id=user_b.id, class_id=class_b.id)
+    ta_b = TeacherAssignment(
+        tenant_id=tenant_b.id, user_id=user_b.id, class_id=class_b.id, subject_id=subject_b.id
+    )
+    raw_db.add_all([enr_b, ta_b])
+    await raw_db.commit()
+
+    # Query as Tenant A: must ONLY see Tenant A's junction records
+    res_enr = await tenant_a_session.execute(select(Enrollment))
+    enr_rows = res_enr.scalars().all()
+    assert len(enr_rows) >= 1
+    assert all(e.tenant_id == tenant_a.id for e in enr_rows)
+    assert not any(e.tenant_id == tenant_b.id for e in enr_rows)
+
+    res_ta = await tenant_a_session.execute(select(TeacherAssignment))
+    ta_rows = res_ta.scalars().all()
+    assert len(ta_rows) >= 1
+    assert all(t.tenant_id == tenant_a.id for t in ta_rows)
+    assert not any(t.tenant_id == tenant_b.id for t in ta_rows)
+
+    res_cs = await tenant_a_session.execute(select(ClassSubject))
+    cs_rows = res_cs.scalars().all()
+    assert all(c.tenant_id == tenant_a.id for c in cs_rows)
+    assert not any(c.tenant_id == tenant_b.id for c in cs_rows)
+
+    # Cross-tenant insert attempt in Tenant A's session using Tenant B's ID must fail
+    with pytest.raises(Exception):
+        await tenant_a_session.execute(
+            insert(Enrollment).values(
+                tenant_id=tenant_b.id,
+                user_id=user_b.id,
+                class_id=class_b.id,
+            )
+        )
+        await tenant_a_session.flush()
+
 

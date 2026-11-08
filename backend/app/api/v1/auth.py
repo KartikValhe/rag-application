@@ -16,6 +16,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.authz import public_endpoint
 from app.core.config import settings
 from app.core.security import hash_email_token, hash_refresh_token
 from app.core.tenant_db import get_platform_session, tenant_session_context
@@ -32,7 +33,7 @@ from app.services.auth import (
     verify_email,
 )
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[Depends(public_endpoint())])
 
 # Cookie name used for the refresh token.
 REFRESH_COOKIE = "refresh_token"
@@ -53,7 +54,13 @@ def _set_refresh_cookie(response: Response, raw_token: str) -> None:
 
 
 def _clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth")
+    response.delete_cookie(
+        key=REFRESH_COOKIE,
+        path="/api/v1/auth",
+        httponly=True,
+        secure=not settings.is_development,
+        samesite="lax",
+    )
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────

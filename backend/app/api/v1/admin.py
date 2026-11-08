@@ -24,10 +24,12 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AdminUser, TenantDB
+from app.core.authz import public_endpoint, require
 from app.core.tenant_db import get_platform_session
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.services.invitation import accept_invitation, bulk_import_users, create_invitation
+from app.services.rbac import deactivate_user_safely
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -91,7 +93,7 @@ class ImportResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.get("/users", response_model=UserListResponse)
+@router.get("/users", response_model=UserListResponse, dependencies=[Depends(require("user:manage"))])
 async def list_users(
     admin: AdminUser,
     db: TenantDB,
@@ -116,34 +118,23 @@ async def list_users(
     )
 
 
-@router.patch("/users/{user_id}/deactivate", response_model=UserResponse)
+@router.patch("/users/{user_id}/deactivate", response_model=UserResponse, dependencies=[Depends(require("user:manage"))])
 async def deactivate_user(
     user_id: uuid.UUID,
     admin: AdminUser,
     db: TenantDB,
 ) -> UserResponse:
-    """Deactivate a user (soft delete — they can be reactivated)."""
-    if user_id == admin.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "cannot_self_deactivate"},
-        )
-    result = await db.execute(
-        select(User).where(User.tenant_id == admin.tenant_id, User.id == user_id)
+    """Deactivate a user with last-admin and self-deactivation protection."""
+    user = await deactivate_user_safely(
+        tenant_id=admin.tenant_id,
+        caller=admin,
+        target_user_id=user_id,
+        db=db,
     )
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    await db.execute(
-        update(User)
-        .where(User.tenant_id == admin.tenant_id, User.id == user_id)
-        .values(status="deactivated")
-    )
-    await db.refresh(user)
     return _to_user_response(user)
 
 
-@router.post("/users/invite", response_model=InviteResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/users/invite", response_model=InviteResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require("user:manage"))])
 async def invite_user(
     body: InviteRequest,
     admin: AdminUser,
@@ -171,8 +162,8 @@ async def invite_user(
     )
 
 
-@router.post("/invitations/accept", response_model=dict)
-@router.get("/invitations/accept", response_model=dict)
+@router.post("/invitations/accept", response_model=dict, dependencies=[Depends(public_endpoint())])
+@router.get("/invitations/accept", response_model=dict, dependencies=[Depends(public_endpoint())])
 async def accept_invitation_route(
     token: str = Query(...),
     full_name: str = Query(..., min_length=1),
@@ -205,7 +196,7 @@ async def accept_invitation_route(
     return {"message": "Account created. You can now log in.", "user_id": str(user.id)}
 
 
-@router.post("/users/import", response_model=ImportResponse)
+@router.post("/users/import", response_model=ImportResponse, dependencies=[Depends(require("user:manage"))])
 async def import_users(
     admin: AdminUser,
     db: TenantDB,
@@ -247,7 +238,7 @@ async def import_users(
     )
 
 
-@router.get("/settings/registration-mode", response_model=RegistrationModeResponse)
+@router.get("/settings/registration-mode", response_model=RegistrationModeResponse, dependencies=[Depends(require("branding:manage"))])
 async def get_registration_mode(
     admin: AdminUser,
     platform_db: AsyncSession = Depends(get_platform_session),
@@ -259,7 +250,7 @@ async def get_registration_mode(
     return RegistrationModeResponse(registration_mode=tenant.registration_mode)
 
 
-@router.patch("/settings/registration-mode", response_model=RegistrationModeResponse)
+@router.patch("/settings/registration-mode", response_model=RegistrationModeResponse, dependencies=[Depends(require("branding:manage"))])
 async def set_registration_mode(
     body: RegistrationModeUpdateRequest,
     admin: AdminUser,
@@ -273,7 +264,7 @@ async def set_registration_mode(
     return RegistrationModeResponse(registration_mode=body.registration_mode)
 
 
-@router.get("/pending-approvals", response_model=UserListResponse)
+@router.get("/pending-approvals", response_model=UserListResponse, dependencies=[Depends(require("user:manage"))])
 async def list_pending_approvals(
     admin: AdminUser,
     db: TenantDB,
@@ -283,7 +274,7 @@ async def list_pending_approvals(
     return UserListResponse(items=[_to_user_response(u) for u in users], total=len(users))
 
 
-@router.post("/pending-approvals/{user_id}/approve", response_model=UserResponse)
+@router.post("/pending-approvals/{user_id}/approve", response_model=UserResponse, dependencies=[Depends(require("user:manage"))])
 async def approve_user(
     user_id: uuid.UUID,
     admin: AdminUser,
@@ -304,7 +295,7 @@ async def approve_user(
     return _to_user_response(user)
 
 
-@router.post("/pending-approvals/{user_id}/reject", response_model=UserResponse)
+@router.post("/pending-approvals/{user_id}/reject", response_model=UserResponse, dependencies=[Depends(require("user:manage"))])
 async def reject_user(
     user_id: uuid.UUID,
     admin: AdminUser,

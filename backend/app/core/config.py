@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # ── App ─────────────────────────────────────────────────────────────────
     PLATFORM_DOMAIN: str = "platform.local"
     FRONTEND_URL: str = "http://localhost:5173"
+    CORS_ALLOWED_ORIGINS: str = ""  # Comma-separated list of explicit allowed origins
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"
 
@@ -69,12 +70,36 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         return self.ENVIRONMENT.lower() == "development"
 
+    @property
+    def cors_origins(self) -> list[str]:
+        """Return an explicit, deduplicated list of allowed CORS origins."""
+        origins: list[str] = [self.FRONTEND_URL.rstrip("/")]
+        if self.CORS_ALLOWED_ORIGINS:
+            origins.extend(
+                origin.strip().rstrip("/")
+                for origin in self.CORS_ALLOWED_ORIGINS.split(",")
+                if origin.strip()
+            )
+        if self.is_development:
+            origins.extend([
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ])
+        # Return unique origins preserving order
+        return list(dict.fromkeys(origins))
+
     @field_validator("SECRET_KEY", "PLATFORM_SECRET_KEY", mode="before")
     @classmethod
-    def _not_empty(cls, v: str) -> str:
+    def _validate_secret(cls, v: str) -> str:
         if not v or v.startswith("change-me"):
             raise ValueError(
-                "SECRET_KEY and PLATFORM_SECRET_KEY must be set to real secrets."
+                "SECRET_KEY and PLATFORM_SECRET_KEY must be set to real secrets via environment variables."
+            )
+        if len(v.strip()) < 32:
+            raise ValueError(
+                "SECRET_KEY and PLATFORM_SECRET_KEY are too weak: must be at least 32 characters."
             )
         return v
 

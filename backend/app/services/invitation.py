@@ -18,9 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import generate_email_token, hash_email_token, hash_password
 from app.db.models.auth import Invitation
+from app.db.models.rbac import Role, UserRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.services.email import send_invitation_email
+from app.services.rbac import seed_tenant_system_roles
 
 logger = structlog.get_logger(__name__)
 
@@ -287,6 +289,14 @@ async def create_admin_user(
     )
     db.add(user)
     await db.flush()
+
+    await seed_tenant_system_roles(tenant.id, db)
+    admin_role_stmt = select(Role.id).where(Role.tenant_id == tenant.id, Role.name == "tenant_admin")
+    admin_role_id = (await db.execute(admin_role_stmt)).scalar_one_or_none()
+    if admin_role_id:
+        db.add(UserRole(tenant_id=tenant.id, user_id=user.id, role_id=admin_role_id))
+        await db.flush()
+
     logger.info("admin_user_created", user_id=str(user.id), tenant_id=str(tenant.id))
     return user, temp_password
 

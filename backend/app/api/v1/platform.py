@@ -14,11 +14,12 @@ Routes:
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select, update
 
 from app.api.deps import PlatformAdminUser, PlatformDB
+from app.core.authz import platform_endpoint, public_endpoint
 from app.core.security import create_platform_access_token, verify_password
 from app.db.engine import SessionLocal
 from app.db.models.tenant import PlatformAdmin, Tenant
@@ -81,7 +82,7 @@ class CreateAdminResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("/auth/login", response_model=PlatformLoginResponse)
+@router.post("/auth/login", response_model=PlatformLoginResponse, dependencies=[Depends(public_endpoint())])
 async def platform_login(
     body: PlatformLoginRequest,
     db: PlatformDB,
@@ -103,7 +104,7 @@ async def platform_login(
     return PlatformLoginResponse(access_token=token)
 
 
-@router.get("/tenants", response_model=TenantListResponse)
+@router.get("/tenants", response_model=TenantListResponse, dependencies=[Depends(platform_endpoint())])
 async def list_tenants(
     db: PlatformDB,
     _admin: PlatformAdminUser,
@@ -125,7 +126,7 @@ async def list_tenants(
     )
 
 
-@router.post("/tenants", response_model=TenantResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/tenants", response_model=TenantResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(platform_endpoint())])
 async def create_tenant(
     body: TenantCreateRequest,
     db: PlatformDB,
@@ -150,7 +151,7 @@ async def create_tenant(
     return _to_tenant_response(tenant)
 
 
-@router.patch("/tenants/{tenant_id}", response_model=TenantResponse)
+@router.patch("/tenants/{tenant_id}", response_model=TenantResponse, dependencies=[Depends(platform_endpoint())])
 async def update_tenant(
     tenant_id: uuid.UUID,
     body: TenantUpdateRequest,
@@ -181,6 +182,7 @@ async def update_tenant(
     "/tenants/{tenant_id}/admins",
     response_model=CreateAdminResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(platform_endpoint())],
 )
 async def create_tenant_admin(
     tenant_id: uuid.UUID,

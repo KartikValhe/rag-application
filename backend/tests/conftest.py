@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Set test env vars before importing app modules.
@@ -38,9 +38,11 @@ os.environ.setdefault("ENVIRONMENT", "development")
 from app.core.security import hash_password
 from app.db.engine import SessionLocal
 from app.db.models import Base
+from app.db.models.rbac import Role, UserRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import app
+from app.services.rbac import seed_tenant_system_roles
 
 # ── Database setup ────────────────────────────────────────────────────────────
 
@@ -79,6 +81,8 @@ async def tenant_a(raw_db: AsyncSession) -> Tenant:
     t = Tenant(slug=f"tenant-a-{uuid.uuid4().hex[:6]}", name="Tenant A", kind="school")
     raw_db.add(t)
     await raw_db.commit()
+    await seed_tenant_system_roles(t.id, raw_db)
+    await raw_db.commit()
     return t
 
 
@@ -86,6 +90,8 @@ async def tenant_a(raw_db: AsyncSession) -> Tenant:
 async def tenant_b(raw_db: AsyncSession) -> Tenant:
     t = Tenant(slug=f"tenant-b-{uuid.uuid4().hex[:6]}", name="Tenant B", kind="college")
     raw_db.add(t)
+    await raw_db.commit()
+    await seed_tenant_system_roles(t.id, raw_db)
     await raw_db.commit()
     return t
 
@@ -118,6 +124,13 @@ async def admin_a(raw_db: AsyncSession, tenant_a: Tenant) -> User:
         is_admin=True,
     )
     raw_db.add(u)
+    await raw_db.flush()
+    admin_role_res = await raw_db.execute(
+        select(Role.id).where(Role.tenant_id == tenant_a.id, Role.name == "tenant_admin")
+    )
+    admin_role_id = admin_role_res.scalar_one_or_none()
+    if admin_role_id:
+        raw_db.add(UserRole(tenant_id=tenant_a.id, user_id=u.id, role_id=admin_role_id))
     await raw_db.commit()
     return u
 

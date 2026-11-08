@@ -55,7 +55,7 @@ async def test_non_admin_cannot_access_admin_routes(
         headers=_auth_headers(token, tenant_a.slug),
     )
     assert resp.status_code == 403
-    assert resp.json()["detail"]["code"] == "admin_required"
+    assert resp.json()["detail"]["code"] in ("admin_required", "permission_denied")
 
 
 async def test_admin_deactivate_user(
