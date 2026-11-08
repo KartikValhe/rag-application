@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { adminApi } from "@/api/admin";
-import { Button, Input, Alert } from "@/components/ui";
+import { Button, Input, Alert, ThemeToggle } from "@/components/ui";
 
 const acceptSchema = z
   .object({
@@ -52,7 +52,10 @@ export const AcceptInvitationPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12">
+    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12 relative">
+      <div className="fixed top-4 right-4 z-50">
+        <ThemeToggle />
+      </div>
       <div className="w-full max-w-md space-y-6 bg-surface p-8 rounded-xl border border-border shadow-sm">
         <div className="text-center space-y-2">
           <h2 className="text-2xl font-bold tracking-tight text-text">Accept Invitation</h2>

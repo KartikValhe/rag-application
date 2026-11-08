@@ -15,6 +15,7 @@ import {
   Table,
   Column,
   Alert,
+  ThemeToggle,
 } from "@/components/ui";
 import { Plus, UserPlus, LogOut, ShieldCheck } from "lucide-react";
 
@@ -228,154 +229,163 @@ export const PlatformDashboardPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <Button onClick={() => setIsCreateTenantOpen(true)}>
-            <Plus className="h-4 w-4" />
-            <span>Create Tenant</span>
-          </Button>
-          <Button variant="ghost" size="sm" onClick={handleLogout}>
-            <LogOut className="h-4 w-4 text-text-muted" />
-          </Button>
-        </div>
-      </header>
-
-      {/* Main Body */}
-      <main className="max-w-7xl mx-auto p-6 space-y-6">
-        {actionSuccessMsg && (
-          <Alert variant="success" title="Success">
-            {actionSuccessMsg}
-          </Alert>
-        )}
-
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-text">
-              Provisioned Tenants ({data?.total || 0})
-            </h2>
-          </div>
-
-          <Table<Tenant>
-            columns={columns}
-            data={data?.items || []}
-            keyExtractor={(t) => t.id}
-            isLoading={isLoading}
-            emptyMessage="No tenants created yet. Click 'Create Tenant' to provision one."
-          />
-        </div>
-      </main>
-
-      {/* Create Tenant Modal */}
-      <Modal
-        isOpen={isCreateTenantOpen}
-        onClose={() => setIsCreateTenantOpen(false)}
-        title="Provision New Tenant"
-        description="Create an organization workspace on the platform"
-      >
-        <form
-          onSubmit={tenantForm.handleSubmit(handleCreateTenant)}
-          className="space-y-4"
-        >
-          <Input
-            label="Organization Name"
-            placeholder="e.g. Oxford Institute"
-            error={tenantForm.formState.errors.name?.message}
-            {...tenantForm.register("name")}
-          />
-
-          <Input
-            label="Subdomain Slug"
-            placeholder="oxford"
-            helperText="Used as {slug}.platform.local subdomain"
-            error={tenantForm.formState.errors.slug?.message}
-            {...tenantForm.register("slug")}
-          />
-
-          <Select
-            label="Organization Kind"
-            options={[
-              { value: "college", label: "College" },
-              { value: "school", label: "School" },
-              { value: "institute", label: "Institute" },
-              { value: "class", label: "Coaching / Class" },
-              { value: "company", label: "Company" },
-              { value: "other", label: "Other" },
-            ]}
-            error={tenantForm.formState.errors.kind?.message}
-            {...tenantForm.register("kind")}
-          />
-
-          <Select
-            label="Registration Mode"
-            options={[
-              { value: "invite_only", label: "Invite Only (Recommended)" },
-              { value: "approval", label: "Approval Required" },
-              { value: "open", label: "Open Self-Registration" },
-            ]}
-            error={tenantForm.formState.errors.registration_mode?.message}
-            {...tenantForm.register("registration_mode")}
-          />
-
-          <div className="flex justify-end gap-2 pt-2">
+            <ThemeToggle />
             <Button
-              type="button"
-              variant="outline"
-              onClick={() => setIsCreateTenantOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              isLoading={createTenantMutation.isPending}
+              onClick={() => setIsCreateTenantOpen(true)}
+              leftIcon={<Plus className="w-4 h-4" />}
             >
               Create Tenant
             </Button>
-          </div>
-        </form>
-      </Modal>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLogout}
+                className="text-text-muted hover:text-danger hover:bg-danger/10"
+                title="Log Out"
+              >
+                <LogOut className="h-4 w-4" />
+              </Button>
+            </div>
+          </header>
 
-      {/* Create Tenant Admin Modal */}
-      <Modal
-        isOpen={Boolean(selectedTenantForAdmin)}
-        onClose={() => setSelectedTenantForAdmin(null)}
-        title={`Create Admin for ${selectedTenantForAdmin?.name}`}
-        description="Creates the first administrator account and emails a temporary password"
-      >
-        <form
-          onSubmit={adminForm.handleSubmit(handleCreateAdmin)}
-          className="space-y-4"
-        >
-          <Input
-            label="Admin Full Name"
-            placeholder="Prof. John Smith"
-            error={adminForm.formState.errors.full_name?.message}
-            {...adminForm.register("full_name")}
-          />
+          {/* Main Body */}
+          <main className="max-w-7xl mx-auto p-6 space-y-6">
+            {actionSuccessMsg && (
+              <Alert variant="success" title="Success">
+                {actionSuccessMsg}
+              </Alert>
+            )}
 
-          <Input
-            label="Admin Email"
-            type="email"
-            placeholder="admin@institution.edu"
-            error={adminForm.formState.errors.email?.message}
-            {...adminForm.register("email")}
-          />
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-text">
+                  Provisioned Tenants ({data?.total || 0})
+                </h2>
+              </div>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setSelectedTenantForAdmin(null)}
+              <Table<Tenant>
+                columns={columns}
+                data={data?.items || []}
+                keyExtractor={(t) => t.id}
+                isLoading={isLoading}
+                emptyMessage="No tenants created yet. Click 'Create Tenant' to provision one."
+              />
+            </div>
+          </main>
+
+          {/* Create Tenant Modal */}
+          <Modal
+            isOpen={isCreateTenantOpen}
+            onClose={() => setIsCreateTenantOpen(false)}
+            title="Provision New Tenant"
+            description="Create an organization workspace on the platform"
+          >
+            <form
+              onSubmit={tenantForm.handleSubmit(handleCreateTenant)}
+              className="space-y-4"
             >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              isLoading={createAdminMutation.isPending}
+              <Input
+                label="Organization Name"
+                placeholder="e.g. Oxford Institute"
+                error={tenantForm.formState.errors.name?.message}
+                {...tenantForm.register("name")}
+              />
+
+              <Input
+                label="Subdomain Slug"
+                placeholder="oxford"
+                helperText="Used as {slug}.platform.local subdomain"
+                error={tenantForm.formState.errors.slug?.message}
+                {...tenantForm.register("slug")}
+              />
+
+              <Select
+                label="Organization Kind"
+                options={[
+                  { value: "college", label: "College" },
+                  { value: "school", label: "School" },
+                  { value: "institute", label: "Institute" },
+                  { value: "class", label: "Coaching / Class" },
+                  { value: "company", label: "Company" },
+                  { value: "other", label: "Other" },
+                ]}
+                error={tenantForm.formState.errors.kind?.message}
+                {...tenantForm.register("kind")}
+              />
+
+              <Select
+                label="Registration Mode"
+                options={[
+                  { value: "invite_only", label: "Invite Only (Recommended)" },
+                  { value: "approval", label: "Approval Required" },
+                  { value: "open", label: "Open Self-Registration" },
+                ]}
+                error={tenantForm.formState.errors.registration_mode?.message}
+                {...tenantForm.register("registration_mode")}
+              />
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setIsCreateTenantOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  isLoading={createTenantMutation.isPending}
+                >
+                  Create Tenant
+                </Button>
+              </div>
+            </form>
+          </Modal>
+
+          {/* Create Tenant Admin Modal */}
+          <Modal
+            isOpen={Boolean(selectedTenantForAdmin)}
+            onClose={() => setSelectedTenantForAdmin(null)}
+            title={`Create Admin for ${selectedTenantForAdmin?.name}`}
+            description="Creates the first administrator account and emails a temporary password"
+          >
+            <form
+              onSubmit={adminForm.handleSubmit(handleCreateAdmin)}
+              className="space-y-4"
             >
-              Provision Admin
-            </Button>
-          </div>
-        </form>
-      </Modal>
-    </div>
-  );
+              <Input
+                label="Admin Full Name"
+                placeholder="Prof. John Smith"
+                error={adminForm.formState.errors.full_name?.message}
+                {...adminForm.register("full_name")}
+              />
+
+              <Input
+                label="Admin Email"
+                type="email"
+                placeholder="admin@institution.edu"
+                error={adminForm.formState.errors.email?.message}
+                {...adminForm.register("email")}
+              />
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setSelectedTenantForAdmin(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  isLoading={createAdminMutation.isPending}
+                >
+                  Provision Admin
+                </Button>
+              </div>
+            </form>
+          </Modal>
+        </div>
+        );
 };
 

@@ -5,23 +5,23 @@
 /* 
  * theme.css
  * ─────────
- * Central design tokens for the entire application.
+ * Central design tokens and reusable component layer for the entire application.
  * All colors, radii, fonts, and surface states are defined as CSS variables here.
  * In Phase 3 (White-label theming), tenant branding overrides these variables at runtime.
- * NO component may use hardcoded hex codes or per-component CSS files.
+ * NO component may use hardcoded hex codes, style={{}}, or per-component CSS files.
  */
 
 :root {
   /* Brand / Primary */
-  --color-primary: #3b82f6;
-  --color-primary-hover: #2563eb;
-  --color-primary-active: #1d4ed8;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-active: #1e40af;
   --color-primary-light: #eff6ff;
   --color-primary-foreground: #ffffff;
 
   /* Secondary / Neutral Accent */
-  --color-secondary: #64748b;
-  --color-secondary-hover: #475569;
+  --color-secondary: #475569;
+  --color-secondary-hover: #334155;
   --color-secondary-foreground: #ffffff;
 
   /* Backgrounds & Surfaces */
@@ -31,29 +31,29 @@
   --color-surface-card: #ffffff;
   --color-surface-muted: #f8fafc;
   --color-surface-hover: #f1f5f9;
-  --color-border: #e2e8f0;
-  --color-border-subtle: #cbd5e1;
+  --color-border: #cbd5e1;
+  --color-border-subtle: #e2e8f0;
 
-  /* Typography / Text */
+  /* Typography / Text (WCAG AA Compliant: >= 4.5:1 against light background) */
   --color-text: #0f172a;
-  --color-text-muted: #475569;
-  --color-text-subtle: #94a3b8;
+  --color-text-muted: #334155;
+  --color-text-subtle: #64748b;
   --color-text-inverted: #ffffff;
 
   /* Status Tokens */
-  --color-success: #10b981;
-  --color-success-surface: #ecfdf5;
-  --color-success-text: #065f46;
+  --color-success: #16a34a;
+  --color-success-surface: #f0fdf4;
+  --color-success-text: #166534;
 
-  --color-warning: #f59e0b;
+  --color-warning: #d97706;
   --color-warning-surface: #fffbeb;
   --color-warning-text: #92400e;
 
-  --color-danger: #ef4444;
+  --color-danger: #dc2626;
   --color-danger-surface: #fef2f2;
   --color-danger-text: #991b1b;
 
-  --color-info: #0ea5e9;
+  --color-info: #0284c7;
   --color-info-surface: #f0f9ff;
   --color-info-text: #075985;
 
@@ -69,6 +69,58 @@
   --font-family-heading: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
+/* 
+ * Dark Theme
+ * ──────────
+ * WCAG AA Compliant dark palette with visible contrast and borders.
+ */
+.dark {
+  /* Brand / Primary */
+  --color-primary: #3b82f6;
+  --color-primary-hover: #60a5fa;
+  --color-primary-active: #2563eb;
+  --color-primary-light: #172554;
+  --color-primary-foreground: #ffffff;
+
+  /* Secondary / Neutral Accent */
+  --color-secondary: #94a3b8;
+  --color-secondary-hover: #cbd5e1;
+  --color-secondary-foreground: #090d16;
+
+  /* Backgrounds & Surfaces */
+  --color-background: #090d16;
+  --color-background-subtle: #0f172a;
+  --color-surface: #111827;
+  --color-surface-card: #1e293b;
+  --color-surface-muted: #1e293b;
+  --color-surface-hover: #334155;
+  --color-border: #334155;
+  --color-border-subtle: #1e293b;
+
+  /* Typography / Text (WCAG AA Compliant: >= 4.5:1 against dark surface) */
+  --color-text: #f8fafc;
+  --color-text-muted: #cbd5e1;
+  --color-text-subtle: #94a3b8;
+  --color-text-inverted: #0f172a;
+
+  /* Status Tokens */
+  --color-success: #4ade80;
+  --color-success-surface: #052e16;
+  --color-success-text: #bbf7d0;
+
+  --color-warning: #fbbf24;
+  --color-warning-surface: #451a03;
+  --color-warning-text: #fef3c7;
+
+  --color-danger: #f87171;
+  --color-danger-surface: #450a0a;
+  --color-danger-text: #fecaca;
+
+  --color-info: #38bdf8;
+  --color-info-surface: #082f49;
+  --color-info-text: #e0f2fe;
+}
+
 body {
   margin: 0;
   font-family: var(--font-family-base);
@@ -78,3 +130,76 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* 
+ * Reusable Look-and-Feel Layer
+ * ────────────────────────────
+ * Central styles for buttons, cards, inputs, tables, and dialogs.
+ */
+@layer components {
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none rounded-md text-sm px-4 py-2;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs;
+  }
+  .btn-lg {
+    @apply px-6 py-3 text-base;
+  }
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-active shadow-sm;
+  }
+  .btn-secondary {
+    @apply bg-surface text-text hover:bg-surface-hover border border-border shadow-sm;
+  }
+  .btn-danger {
+    @apply bg-danger text-white hover:opacity-90 shadow-sm;
+  }
+  .btn-outline {
+    @apply border border-border text-text hover:bg-surface-hover hover:border-text-subtle;
+  }
+  .btn-ghost {
+    @apply text-text hover:bg-surface-hover;
+  }
+
+  /* Form Inputs */
+  .input-base {
+    @apply w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  /* Cards */
+  .card-base {
+    @apply rounded-lg border border-border bg-surface-card text-text shadow-sm transition-all;
+  }
+
+  /* Tables */
+  .table-container {
+    @apply w-full overflow-x-auto rounded-lg border border-border bg-surface-card;
+  }
+  .table-base {
+    @apply w-full text-left text-sm text-text;
+  }
+  .table-th {
+    @apply border-b border-border bg-surface-muted px-4 py-3 font-semibold text-text-muted;
+  }
+  .table-td {
+    @apply border-b border-border-subtle px-4 py-3 text-text transition-colors;
+  }
+  .table-row-hover {
+    @apply hover:bg-surface-hover;
+  }
+
+  /* Focus visible ring standards */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+
+  /* Hide scrollbar completely while retaining scrolling */
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}

@@ -1,72 +1,167 @@
 import React from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "@/features/auth/AuthContext";
 import { useTheme } from "@/theme/ThemeProvider";
-import { Button, Badge } from "@/components/ui";
-import { GraduationCap, LogOut, ShieldAlert } from "lucide-react";
+import { usePermission } from "@/hooks/usePermission";
+import { Badge } from "@/components/ui/Badge";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
+import { AppShell } from "@/components/layout/AppShell";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { GraduationCap, ShieldCheck, BookOpen, Layers } from "lucide-react";
 
 export const DashboardPage: React.FC = () => {
-  const { user, logout } = useAuth();
+  const location = useLocation();
+  const { user } = useAuth();
   const { tenantSlug } = useTheme();
+  const { isAdmin, isTeacher, isStudent } = usePermission();
+
+  const isTeacherView = location.pathname.includes("/teacher");
+  const isStudentView = location.pathname.includes("/student");
+
+  const portalTitle = isTeacherView
+    ? "Teaching Workspace"
+    : isStudentView
+    ? "Student Workspace"
+    : "Academic Workspace";
+
+  const roleLabel = isTeacherView
+    ? "Teacher / Faculty"
+    : isStudentView
+    ? "Enrolled Student"
+    : isAdmin
+    ? "Tenant Administrator"
+    : isTeacher
+    ? "Teacher / Faculty"
+    : isStudent
+    ? "Enrolled Student"
+    : "Member";
 
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b border-border bg-surface px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-primary-light rounded-lg text-primary">
-            <GraduationCap className="h-5 w-5" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-text capitalize">
-              {tenantSlug} Workspace
-            </h1>
-            <p className="text-xs text-text-muted">Student & Faculty Portal</p>
-          </div>
-        </div>
+    <AppShell tenantName={tenantSlug ? `${tenantSlug.toUpperCase()} Academic` : "Academic Portal"}>
+      <PageHeader
+        title={portalTitle}
+        description="Phase 2 role-based access control and academic structure enabled."
+        breadcrumbs={[
+          { label: "Portal", href: location.pathname },
+          { label: portalTitle },
+        ]}
+        actions={
+          <Badge
+            variant={
+              isTeacherView
+                ? "primary"
+                : isStudentView
+                ? "success"
+                : isAdmin
+                ? "danger"
+                : "default"
+            }
+            size="md"
+          >
+            {roleLabel}
+          </Badge>
+        }
+      />
 
-        <Button variant="ghost" size="sm" onClick={() => logout()}>
-          <LogOut className="h-4 w-4 mr-1.5" />
-          <span>Sign Out</span>
-        </Button>
-      </header>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                Tenant Realm
+              </span>
+              <div className="p-2 bg-primary/10 rounded-lg text-primary">
+                <Layers className="w-5 h-5" />
+              </div>
+            </div>
+            <CardTitle className="mt-2 text-xl capitalize">
+              {tenantSlug || "Default"}
+            </CardTitle>
+            <CardDescription>
+              Isolated PostgreSQL schema & RLS boundary
+            </CardDescription>
+          </CardHeader>
+        </Card>
 
-      <main className="max-w-4xl mx-auto p-8 space-y-6">
-        <div className="bg-surface p-6 rounded-xl border border-border shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-text">Welcome to Your Workspace</h2>
-              <p className="text-sm text-text-muted mt-0.5">
-                Phase 1 (Tenancy Core and Identity) is active.
-              </p>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                Active Identity
+              </span>
+              <div className="p-2 bg-success/10 rounded-lg text-success">
+                <GraduationCap className="w-5 h-5" />
+              </div>
             </div>
-            <Badge variant="success">Active Member</Badge>
-          </div>
+            <CardTitle className="mt-2 text-xl truncate">
+              {user?.email || (user?.id ? user.id.slice(0, 12) : "Authenticated")}
+            </CardTitle>
+            <CardDescription>
+              Session authenticated via HttpOnly refresh cookie
+            </CardDescription>
+          </CardHeader>
+        </Card>
 
-          <div className="p-4 bg-surface-muted rounded-lg border border-border text-sm space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-text-muted">User ID:</span>
-              <code className="text-xs bg-surface px-2 py-1 rounded border border-border">
-                {user?.id}
-              </code>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
+                Security & RBAC
+              </span>
+              <div className="p-2 bg-primary/10 rounded-lg text-primary">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-text-muted">Tenant Realm:</span>
-              <span className="capitalize font-medium text-text">{tenantSlug}</span>
-            </div>
-          </div>
+            <CardTitle className="mt-2 text-xl">
+              Default-Deny Enforced
+            </CardTitle>
+            <CardDescription>
+              Server-side scoped authorization active
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
 
-          <div className="flex items-start gap-3 p-4 bg-primary-light/30 border border-primary/20 rounded-lg text-sm text-text">
-            <ShieldAlert className="h-5 w-5 text-primary shrink-0 mt-0.5" />
-            <div>
-              <h4 className="font-semibold text-primary">Academic Structure Pending</h4>
-              <p className="text-xs text-text-muted mt-1 leading-relaxed">
-                Classroom enrollments, syllabus materials, and scoped AI chat will be enabled in
-                Phase 2 & Phase 6. Your identity and tenant isolation are securely established.
-              </p>
+      <Card>
+        <CardHeader>
+          <CardTitle>Welcome to Your Workspace</CardTitle>
+          <CardDescription>
+            Navigate using the sidebar to explore classes, subjects, enrollments, and academic structure.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4 text-sm text-text">
+            <div className="p-4 rounded-lg bg-surface-muted border border-border space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-text-muted">User ID:</span>
+                <code className="text-xs bg-surface px-2 py-1 rounded border border-border font-mono">
+                  {user?.id}
+                </code>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-text-muted">Assigned Roles:</span>
+                <span className="text-xs font-medium text-text">
+                  {user?.roles && user.roles.length > 0
+                    ? user.roles.join(", ")
+                    : isAdmin
+                    ? "tenant_admin (superuser)"
+                    : "member"}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3 p-4 rounded-lg bg-primary/5 border border-primary/20">
+              <BookOpen className="w-5 h-5 text-primary shrink-0 mt-0.5" />
+              <div>
+                <h4 className="font-semibold text-text">Design System & Layout Shell Ready</h4>
+                <p className="text-xs text-text-muted mt-1 leading-relaxed">
+                  The design system tokens are dynamically styled through CSS variables in light and dark modes with WCAG AA compliance. Use the sun/moon button in the top bar to toggle themes.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
-      </main>
-    </div>
+        </CardContent>
+      </Card>
+    </AppShell>
   );
 };
-

@@ -5,6 +5,10 @@ import { getAccessToken, setAccessToken } from "@/api/client";
 export interface AuthUser {
   id: string;
   isAdmin: boolean;
+  tenantId?: string;
+  email?: string;
+  roles?: string[];
+  permissions?: string[];
 }
 
 export interface AuthContextType {
@@ -35,6 +39,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setUser({
               id: payload.sub,
               isAdmin: Boolean(payload.is_admin),
+              tenantId: payload.tenant_id,
+              email: payload.email,
+              roles: payload.roles || (payload.is_admin ? ["tenant_admin"] : []),
+              permissions: payload.permissions || (payload.is_admin ? ["*"] : []),
             });
           }
         }
@@ -54,9 +62,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const res = await authApi.login(payload);
+      let tenantId: string | undefined;
+      let email: string | undefined;
+      let roles: string[] | undefined;
+      let permissions: string[] | undefined;
+
+      if (res.access_token) {
+        const parts = res.access_token.split(".");
+        if (parts.length === 3) {
+          try {
+            const tokenPayload = JSON.parse(atob(parts[1]));
+            tenantId = tokenPayload.tenant_id;
+            email = tokenPayload.email;
+            roles = tokenPayload.roles;
+            permissions = tokenPayload.permissions;
+          } catch {
+            // ignore decode error
+          }
+        }
+      }
+
       setUser({
         id: res.user_id,
         isAdmin: res.is_admin,
+        tenantId,
+        email: email || payload.email,
+        roles: roles || (res.is_admin ? ["tenant_admin"] : []),
+        permissions: permissions || (res.is_admin ? ["*"] : []),
       });
       return res;
     } finally {

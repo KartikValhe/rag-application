@@ -3,6 +3,8 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { getPlatformToken } from "@/api/client";
 import { Spinner } from "@/components/ui";
+import { AppShell } from "@/components/layout/AppShell";
+import { ForbiddenState } from "@/components/layout/ForbiddenState";
 
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({
   children,
@@ -44,7 +46,16 @@ export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({
   }
 
   if (!user?.isAdmin) {
-    return <Navigate to="/dashboard" replace />;
+    return (
+      <AppShell>
+        <ForbiddenState
+          title="Administrative Access Required (403)"
+          description="You do not have administrative permissions to view or manage this academic section."
+          backPath="/dashboard"
+          backLabel="Return to Workspace"
+        />
+      </AppShell>
+    );
   }
 
   return <>{children}</>;

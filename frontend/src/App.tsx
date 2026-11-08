@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/theme/ThemeProvider";
+import { ToastProvider } from "@/components/ui/Toast";
 import { AuthProvider } from "@/features/auth/AuthContext";
 import {
   ProtectedRoute,
@@ -20,6 +21,11 @@ import { AcceptInvitationPage } from "@/features/auth/AcceptInvitationPage";
 import { PlatformLoginPage } from "@/features/platform/PlatformLoginPage";
 import { PlatformDashboardPage } from "@/features/platform/PlatformDashboardPage";
 import { AdminDashboardPage } from "@/features/admin/AdminDashboardPage";
+import { RolesPage } from "@/features/roles/RolesPage";
+import { AcademicPage } from "@/features/academic/AcademicPage";
+import { EnrollmentsPage } from "@/features/enrollments/EnrollmentsPage";
+import { AssignmentsPage } from "@/features/assignments/AssignmentsPage";
+import { AuditLogPage } from "@/features/audit/AuditLogPage";
 import { DashboardPage } from "@/features/dashboard/DashboardPage";
 
 const queryClient = new QueryClient({
@@ -35,8 +41,9 @@ export const App: React.FC = () => {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <AuthProvider>
-          <BrowserRouter>
+        <ToastProvider>
+          <AuthProvider>
+            <BrowserRouter>
             <Routes>
               {/* Public Auth Routes */}
               <Route
@@ -94,10 +101,74 @@ export const App: React.FC = () => {
                   </AdminRoute>
                 }
               />
+              <Route
+                path="/admin/roles"
+                element={
+                  <AdminRoute>
+                    <RolesPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="/admin/academic"
+                element={
+                  <AdminRoute>
+                    <AcademicPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="/admin/enrollments"
+                element={
+                  <AdminRoute>
+                    <EnrollmentsPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="/admin/assignments"
+                element={
+                  <AdminRoute>
+                    <AssignmentsPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="/admin/users"
+                element={
+                  <AdminRoute>
+                    <AdminDashboardPage />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="/admin/audit"
+                element={
+                  <AdminRoute>
+                    <AuditLogPage />
+                  </AdminRoute>
+                }
+              />
 
-              {/* Regular Member Dashboard */}
+              {/* Member & Portal Dashboards */}
               <Route
                 path="/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <DashboardPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/teacher/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <DashboardPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/student/dashboard"
                 element={
                   <ProtectedRoute>
                     <DashboardPage />
@@ -111,8 +182,9 @@ export const App: React.FC = () => {
             </Routes>
           </BrowserRouter>
         </AuthProvider>
-      </ThemeProvider>
-    </QueryClientProvider>
+      </ToastProvider>
+    </ThemeProvider>
+  </QueryClientProvider>
   );
 };
 

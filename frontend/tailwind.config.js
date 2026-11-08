@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  darkMode: "class",
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
@@ -36,6 +37,7 @@ export default {
           subtle: "var(--color-text-subtle)",
           inverted: "var(--color-text-inverted)",
         },
+        muted: "var(--color-text-muted)",
         success: {
           DEFAULT: "var(--color-success)",
           surface: "var(--color-success-surface)",
@@ -69,8 +71,10 @@ export default {
         base: ["var(--font-family-base)", "sans-serif"],
         heading: ["var(--font-family-heading)", "sans-serif"],
       },
+      ringOffsetColor: {
+        background: "var(--color-background)",
+      },
     },
   },
   plugins: [],
 };
-

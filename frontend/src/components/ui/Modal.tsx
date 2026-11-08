@@ -1,14 +1,18 @@
-import React, { useEffect } from "react";
-import { cn } from "@/utils/cn";
+import React, { useEffect, useRef } from "react";
 import { X } from "lucide-react";
+import { cn } from "@/utils/cn";
+
+export type ModalSize = "sm" | "md" | "lg" | "xl" | "full";
 
 export interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
-  title: string;
+  title?: React.ReactNode;
   description?: string;
   children: React.ReactNode;
-  maxWidth?: "sm" | "md" | "lg" | "xl";
+  footer?: React.ReactNode;
+  size?: ModalSize;
+  closeOnBackdrop?: boolean;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -17,57 +21,88 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   description,
   children,
-  maxWidth = "md",
+  footer,
+  size = "md",
+  closeOnBackdrop = true,
 }) => {
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Close on Escape key and prevent background scroll
   useEffect(() => {
+    if (!isOpen) return;
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+      }
     };
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-      window.addEventListener("keydown", handleKeyDown);
-    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
     return () => {
-      document.body.style.overflow = "unset";
-      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = originalOverflow;
     };
   }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
-  const maxWidthStyles = {
+  const sizeClasses: Record<ModalSize, string> = {
     sm: "max-w-sm",
     md: "max-w-md",
     lg: "max-w-lg",
-    xl: "max-w-xl",
+    xl: "max-w-2xl",
+    full: "max-w-4xl",
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto"
+    >
+      {/* Backdrop */}
       <div
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity"
+        onClick={() => closeOnBackdrop && onClose()}
+      />
+
+      {/* Modal Dialog Content */}
+      <div
+        ref={modalRef}
         className={cn(
-          "w-full bg-surface text-text rounded-lg border border-border shadow-xl p-6 relative animate-in zoom-in-95 duration-200",
-          maxWidthStyles[maxWidth]
+          "relative w-full rounded-xl border border-border bg-surface text-text shadow-xl transition-all z-10 my-8 overflow-hidden",
+          sizeClasses[size]
         )}
       >
-        <div className="flex items-center justify-between pb-4 border-b border-border">
-          <div>
-            <h3 className="text-lg font-semibold text-text">{title}</h3>
-            {description && (
-              <p className="text-sm text-text-muted mt-0.5">{description}</p>
-            )}
+        {/* Header */}
+        <div className="flex items-start justify-between border-b border-border-subtle p-5 sm:p-6">
+          <div className="space-y-1">
+            {title && <h2 className="text-lg font-semibold text-text leading-none">{title}</h2>}
+            {description && <p className="text-xs text-text-muted">{description}</p>}
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="text-text-subtle hover:text-text p-1 rounded-md transition-colors"
-            aria-label="Close dialog"
+            className="rounded-md p-1.5 text-text-subtle hover:bg-surface-hover hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            aria-label="Close"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
-        <div className="pt-4">{children}</div>
+
+        {/* Body */}
+        <div className="p-5 sm:p-6 max-h-[75vh] overflow-y-auto">{children}</div>
+
+        {/* Footer */}
+        {footer && (
+          <div className="flex items-center justify-end space-x-3 border-t border-border-subtle bg-surface-muted p-4 sm:px-6">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
 };
-

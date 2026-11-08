@@ -5,7 +5,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { adminApi, InviteUserPayload } from "@/api/admin";
 import { User, ImportResponse } from "@/api/types";
-import { useAuth } from "@/features/auth/AuthContext";
 import { useTheme } from "@/theme/ThemeProvider";
 import {
   Button,
@@ -18,6 +17,7 @@ import {
   Alert,
   FileUpload,
 } from "@/components/ui";
+import { AppShell, PageHeader } from "@/components/layout";
 import {
   Users,
   UserPlus,
@@ -25,9 +25,7 @@ import {
   CheckCircle,
   XCircle,
   Settings,
-  LogOut,
   Search,
-  Building,
 } from "lucide-react";
 
 const inviteSchema = z.object({
@@ -36,7 +34,6 @@ const inviteSchema = z.object({
 });
 
 export const AdminDashboardPage: React.FC = () => {
-  const { logout } = useAuth();
   const { tenantSlug } = useTheme();
   const queryClient = useQueryClient();
 
@@ -225,37 +222,30 @@ export const AdminDashboardPage: React.FC = () => {
     },
   ];
 
+  const tenantTitle = tenantSlug
+    ? `${tenantSlug.charAt(0).toUpperCase() + tenantSlug.slice(1)} Administration`
+    : "Academic Administration";
+
   return (
-    <div className="min-h-screen bg-background">
-      {/* Top Navbar */}
-      <header className="border-b border-border bg-surface px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-primary-light rounded-lg text-primary">
-            <Building className="h-5 w-5" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-text capitalize">
-              {tenantSlug} Administration
-            </h1>
-            <p className="text-xs text-text-muted">
-              Tenant & Academic User Management
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <Button onClick={() => setIsInviteOpen(true)}>
-            <UserPlus className="h-4 w-4" />
-            <span>Invite User</span>
+    <AppShell tenantName={tenantSlug ? `${tenantSlug.toUpperCase()} Academic` : "Academic Admin"}>
+      <PageHeader
+        title={tenantTitle}
+        description="Tenant & Academic User Management"
+        breadcrumbs={[
+          { label: "Admin", href: "/admin" },
+          { label: "Overview" },
+        ]}
+        actions={
+          <Button
+            onClick={() => setIsInviteOpen(true)}
+            leftIcon={<UserPlus className="w-4 h-4" />}
+          >
+            Invite User
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => logout()}>
-            <LogOut className="h-4 w-4 text-text-muted" />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
-      {/* Main Container */}
-      <main className="max-w-7xl mx-auto p-6 space-y-6">
+      <div className="space-y-6">
         {feedbackMsg && (
           <Alert variant={feedbackMsg.type} title="Notification">
             {feedbackMsg.text}
@@ -527,7 +517,7 @@ export const AdminDashboardPage: React.FC = () => {
             </div>
           </div>
         )}
-      </main>
+      </div>
 
       {/* Invite User Modal */}
       <Modal
@@ -570,7 +560,7 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         </form>
       </Modal>
-    </div>
+    </AppShell>
   );
 };
 

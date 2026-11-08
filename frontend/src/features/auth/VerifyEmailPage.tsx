@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { authApi } from "@/api/auth";
-import { Button, Alert, Spinner } from "@/components/ui";
+import { Button, Alert, Spinner, ThemeToggle } from "@/components/ui";
 
 export const VerifyEmailPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -35,7 +35,10 @@ export const VerifyEmailPage: React.FC = () => {
   }, [token]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12">
+    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12 relative">
+      <div className="fixed top-4 right-4 z-50">
+        <ThemeToggle />
+      </div>
       <div className="w-full max-w-md space-y-6 bg-surface p-8 rounded-xl border border-border shadow-sm text-center">
         <h2 className="text-2xl font-bold tracking-tight text-text">Email Verification</h2>
 

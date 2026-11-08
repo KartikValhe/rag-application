@@ -1,45 +1,57 @@
-import React, { forwardRef } from "react";
+import React from "react";
 import { cn } from "@/utils/cn";
 
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   helperText?: string;
+  helper?: string;
+  leftIcon?: React.ReactNode;
+  rightIcon?: React.ReactNode;
 }
 
-export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ className, label, error, helperText, id, ...props }, ref) => {
-    const inputId = id || props.name;
+export const Input = React.forwardRef<HTMLInputElement, InputProps>(
+    ({ className, label, error, helperText, helper, leftIcon, rightIcon, id, ...props }, ref) => {
+      const inputId = id || (label ? label.toLowerCase().replace(/\s+/g, "-") : undefined);
+      const displayHelper = helperText || helper;
 
-    return (
-      <div className="w-full space-y-1.5">
-        {label && (
-          <label
-            htmlFor={inputId}
-            className="block text-xs font-semibold text-text-muted uppercase tracking-wider"
-          >
-            {label}
-          </label>
-        )}
-        <input
-          id={inputId}
-          ref={ref}
-          className={cn(
-            "w-full px-3 py-2 text-sm bg-surface text-text border border-border rounded focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-colors placeholder:text-text-subtle disabled:opacity-50 disabled:bg-surface-muted",
-            error && "border-danger focus:ring-danger",
-            className
+      return (
+        <div className="w-full space-y-1.5 text-left">
+          {label && (
+            <label htmlFor={inputId} className="block text-sm font-medium text-text">
+              {label}
+              {props.required && <span className="ml-1 text-danger">*</span>}
+            </label>
           )}
-          {...props}
-        />
-        {error ? (
-          <p className="text-xs text-danger">{error}</p>
-        ) : helperText ? (
-          <p className="text-xs text-text-muted">{helperText}</p>
-        ) : null}
-      </div>
-    );
-  }
+          <div className="relative flex items-center">
+            {leftIcon && (
+              <div className="pointer-events-none absolute left-3 flex items-center text-text-subtle">
+                {leftIcon}
+              </div>
+            )}
+            <input
+              id={inputId}
+              ref={ref}
+              className={cn(
+                "input-base",
+                leftIcon && "pl-9",
+                rightIcon && "pr-9",
+                error && "border-danger focus-visible:ring-danger",
+                className
+              )}
+              {...props}
+            />
+            {rightIcon && (
+              <div className="absolute right-3 flex items-center text-text-subtle">
+                {rightIcon}
+              </div>
+            )}
+          </div>
+          {error && <p className="text-xs text-danger font-medium">{error}</p>}
+          {!error && displayHelper && <p className="text-xs text-text-muted">{displayHelper}</p>}
+        </div>
+      );
+    }
 );
 
 Input.displayName = "Input";
-
