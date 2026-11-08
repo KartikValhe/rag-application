@@ -15,7 +15,7 @@ export interface AuthContextType {
   user: AuthUser | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (payload: LoginPayload) => Promise<{ access_token: string; user_id: string; is_admin: boolean }>;
+  login: (payload: LoginPayload) => Promise<{ access_token: string; user_id: string; is_admin: boolean; roles?: string[] }>;
   register: (payload: RegisterPayload) => Promise<{ status: string; message: string }>;
   logout: () => Promise<void>;
 }
@@ -82,15 +82,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
+      const resolvedRoles = roles || (res.is_admin ? ["tenant_admin"] : []);
       setUser({
         id: res.user_id,
         isAdmin: res.is_admin,
         tenantId,
         email: email || payload.email,
-        roles: roles || (res.is_admin ? ["tenant_admin"] : []),
+        roles: resolvedRoles,
         permissions: permissions || (res.is_admin ? ["*"] : []),
       });
-      return res;
+      return {
+        ...res,
+        roles: resolvedRoles,
+      };
     } finally {
       setIsLoading(false);
     }

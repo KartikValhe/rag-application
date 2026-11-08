@@ -10,7 +10,6 @@ import {
   FileText,
   X,
   School,
-  Calendar,
   PanelLeftClose,
   PanelLeftOpen,
   LogOut,
@@ -105,7 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       title: "Teacher Portal",
-      roles: ["teacher", "tenant_admin"],
+      roles: ["teacher"],
       items: [
         {
           label: "Teaching Workspace",
@@ -117,16 +116,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           href: "/teacher/classes",
           icon: BookOpen,
         },
-        {
-          label: "Timetable",
-          href: "/teacher/timetable",
-          icon: Calendar,
-        },
       ],
     },
     {
       title: "Student Portal",
-      roles: ["student", "tenant_admin"],
+      roles: ["student"],
       items: [
         {
           label: "Student Workspace",
@@ -138,11 +132,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           href: "/student/classes",
           icon: BookOpen,
         },
-        {
-          label: "Schedule",
-          href: "/student/timetable",
-          icon: Calendar,
-        },
       ],
     },
   ];
@@ -152,10 +141,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
     .filter((sec) => {
       if (sec.adminOnly && !isAdmin) return false;
       if (sec.permission && !can(sec.permission)) return false;
-      if (sec.roles && !isAdmin) {
-        if (sec.roles.includes("teacher") && isTeacher) return true;
-        if (sec.roles.includes("student") && isStudent) return true;
-        return false;
+      if (sec.roles) {
+        const matchesRole = sec.roles.some((r) => {
+          if (r === "teacher") return isTeacher;
+          if (r === "student") return isStudent;
+          if (r === "tenant_admin") return isAdmin;
+          return user?.roles?.includes(r);
+        });
+        if (!matchesRole) return false;
       }
       return true;
     })

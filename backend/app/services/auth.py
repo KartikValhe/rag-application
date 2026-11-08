@@ -232,11 +232,26 @@ async def login_user(
 
     # Issue tokens.
     from app.core.security import create_access_token  # local import avoids circular
+    from app.db.models.rbac import Role, UserRole
+    from app.core.authz import load_user_permissions
+
+    role_res = await db.execute(
+        select(Role.name)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.tenant_id == user.tenant_id, UserRole.user_id == user.id)
+    )
+    user_roles = list(role_res.scalars().all())
+    if user.is_admin and "tenant_admin" not in user_roles:
+        user_roles.append("tenant_admin")
+    user_perms = list(await load_user_permissions(user, db))
 
     access_token = create_access_token(
         tenant_id=str(user.tenant_id),
         user_id=str(user.id),
         is_admin=user.is_admin,
+        email=user.email,
+        roles=user_roles,
+        permissions=user_perms,
     )
     raw_refresh = generate_refresh_token()
     refresh_row = RefreshToken(
@@ -310,11 +325,26 @@ async def refresh_access_token(
         )
 
     from app.core.security import create_access_token
+    from app.db.models.rbac import Role, UserRole
+    from app.core.authz import load_user_permissions
+
+    role_res = await db.execute(
+        select(Role.name)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.tenant_id == user.tenant_id, UserRole.user_id == user.id)
+    )
+    user_roles = list(role_res.scalars().all())
+    if user.is_admin and "tenant_admin" not in user_roles:
+        user_roles.append("tenant_admin")
+    user_perms = list(await load_user_permissions(user, db))
 
     new_access = create_access_token(
         tenant_id=str(user.tenant_id),
         user_id=str(user.id),
         is_admin=user.is_admin,
+        email=user.email,
+        roles=user_roles,
+        permissions=user_perms,
     )
     new_raw_refresh = generate_refresh_token()
     db.add(

@@ -7,6 +7,8 @@ import { AuthProvider } from "@/features/auth/AuthContext";
 import {
   ProtectedRoute,
   AdminRoute,
+  TeacherRoute,
+  StudentRoute,
   PublicRoute,
   PlatformRoute,
 } from "@/features/auth/guards";
@@ -27,6 +29,10 @@ import { EnrollmentsPage } from "@/features/enrollments/EnrollmentsPage";
 import { AssignmentsPage } from "@/features/assignments/AssignmentsPage";
 import { AuditLogPage } from "@/features/audit/AuditLogPage";
 import { DashboardPage } from "@/features/dashboard/DashboardPage";
+import { TeacherClassesPage } from "@/features/teacher/TeacherClassesPage";
+import { TeacherClassDetailPage } from "@/features/teacher/TeacherClassDetailPage";
+import { StudentClassesPage } from "@/features/student/StudentClassesPage";
+import { StudentClassDetailPage } from "@/features/student/StudentClassDetailPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -159,20 +165,56 @@ export const App: React.FC = () => {
                   </ProtectedRoute>
                 }
               />
+
+              {/* Teacher Portal Routes */}
               <Route
                 path="/teacher/dashboard"
                 element={
-                  <ProtectedRoute>
+                  <TeacherRoute>
                     <DashboardPage />
-                  </ProtectedRoute>
+                  </TeacherRoute>
                 }
               />
               <Route
+                path="/teacher/classes"
+                element={
+                  <TeacherRoute>
+                    <TeacherClassesPage />
+                  </TeacherRoute>
+                }
+              />
+              <Route
+                path="/teacher/classes/:classId"
+                element={
+                  <TeacherRoute>
+                    <TeacherClassDetailPage />
+                  </TeacherRoute>
+                }
+              />
+
+              {/* Student Portal Routes */}
+              <Route
                 path="/student/dashboard"
                 element={
-                  <ProtectedRoute>
+                  <StudentRoute>
                     <DashboardPage />
-                  </ProtectedRoute>
+                  </StudentRoute>
+                }
+              />
+              <Route
+                path="/student/classes"
+                element={
+                  <StudentRoute>
+                    <StudentClassesPage />
+                  </StudentRoute>
+                }
+              />
+              <Route
+                path="/student/classes/:classId"
+                element={
+                  <StudentRoute>
+                    <StudentClassDetailPage />
+                  </StudentRoute>
                 }
               />
 

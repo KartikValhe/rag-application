@@ -80,18 +80,29 @@ def create_access_token(
     tenant_id: str,
     user_id: str,
     is_admin: bool = False,
+    email: str | None = None,
+    roles: list[str] | None = None,
+    permissions: list[str] | None = None,
 ) -> str:
     """
     Create a short-lived access token for a tenant user.
-    Claims: sub=user_id, tenant_id, is_admin, type="access".
+    Claims: sub=user_id, tenant_id, is_admin, type="access", optional email, roles, permissions.
     """
+    payload: dict[str, object] = {
+        "sub": user_id,
+        "tenant_id": tenant_id,
+        "is_admin": is_admin,
+        "type": "access",
+    }
+    if email is not None:
+        payload["email"] = email
+    if roles is not None:
+        payload["roles"] = roles
+    if permissions is not None:
+        payload["permissions"] = permissions
+
     return _make_token(
-        payload={
-            "sub": user_id,
-            "tenant_id": tenant_id,
-            "is_admin": is_admin,
-            "type": "access",
-        },
+        payload=payload,
         secret=settings.SECRET_KEY,
         expire_minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
     )

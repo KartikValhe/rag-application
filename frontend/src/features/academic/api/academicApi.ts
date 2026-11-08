@@ -26,6 +26,19 @@ export interface SubjectListResponse {
   total: number;
 }
 
+export interface MySubjectItem {
+  id: string;
+  name: string;
+  code?: string | null;
+}
+
+export interface MyClassItem {
+  id: string;
+  name: string;
+  kind: string;
+  subjects: MySubjectItem[];
+}
+
 export interface CreateClassPayload {
   name: string;
   kind?: string;
@@ -139,6 +152,12 @@ export const academicApi = {
 
   unlinkSubjectFromClass: async (classId: string, subjectId: string): Promise<{ message: string }> => {
     const res = await apiClient.delete<{ message: string }>(`/classes/${classId}/subjects/${subjectId}`);
+    return res.data;
+  },
+
+  // Scoped "My Classes" for Teacher & Student
+  getMyClasses: async (): Promise<MyClassItem[]> => {
+    const res = await apiClient.get<MyClassItem[]>("/me/classes");
     return res.data;
   },
 };

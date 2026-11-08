@@ -45,10 +45,12 @@ export const LoginPage: React.FC = () => {
         password: data.password,
         tenant_slug: data.tenantSlug,
       });
-      if (res.is_admin) {
+      if (res.is_admin || res.roles?.includes("tenant_admin")) {
         navigate("/admin");
+      } else if (res.roles?.includes("teacher")) {
+        navigate("/teacher/dashboard");
       } else {
-        navigate("/dashboard");
+        navigate("/student/dashboard");
       }
     } catch (err: unknown) {
       const axiosErr = err as { response?: { data?: { detail?: { message?: string } | string } } };
@@ -154,6 +156,13 @@ export const LoginPage: React.FC = () => {
                   className="px-2 py-1 bg-surface-muted hover:bg-surface-elevated rounded border border-border text-text"
                 >
                   Tenant Admin (acme)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => fillQuickCredentials("acme", "teacher@acme.edu", "Teacher123!")}
+                  className="px-2 py-1 bg-surface-muted hover:bg-surface-elevated rounded border border-border text-text"
+                >
+                  Teacher (acme)
                 </button>
                 <button
                   type="button"
