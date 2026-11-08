@@ -1,0 +1,339 @@
+"""
+app/api/v1/admin.py
+────────────────────
+Tenant-admin routes.  All routes require is_admin=True on the current user.
+
+Routes:
+  GET    /admin/users
+  PATCH  /admin/users/{user_id}/deactivate
+  POST   /admin/users/invite
+  GET    /admin/invitations/accept   (public — no auth, token in query param)
+  POST   /admin/users/import
+  GET    /admin/settings/registration-mode
+  PATCH  /admin/settings/registration-mode
+  GET    /admin/pending-approvals
+  POST   /admin/pending-approvals/{user_id}/approve
+  POST   /admin/pending-approvals/{user_id}/reject
+"""
+
+import uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import AdminUser, TenantDB
+from app.core.tenant_db import get_platform_session
+from app.db.models.tenant import Tenant
+from app.db.models.user import User
+from app.services.invitation import accept_invitation, bulk_import_users, create_invitation
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    is_admin: bool
+    status: str
+    created_at: str
+
+
+class UserListResponse(BaseModel):
+    items: list[UserResponse]
+    total: int
+
+
+class InviteRequest(BaseModel):
+    email: EmailStr
+    role_name: str = Field("student", pattern=r"^(student|teacher|admin)$")
+
+
+class InviteResponse(BaseModel):
+    invitation_id: str
+    email: str
+    message: str
+
+
+class AcceptInvitationRequest(BaseModel):
+    token: str
+    full_name: str = Field(..., min_length=1, max_length=200)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class RegistrationModeResponse(BaseModel):
+    registration_mode: str
+
+
+class RegistrationModeUpdateRequest(BaseModel):
+    registration_mode: str = Field(..., pattern=r"^(open|approval|invite_only)$")
+
+
+class ImportResultRow(BaseModel):
+    row_number: int
+    email: str
+    full_name: str
+    role_name: str
+    success: bool
+    error: str | None
+
+
+class ImportResponse(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    rows: list[ImportResultRow]
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.get("/users", response_model=UserListResponse)
+async def list_users(
+    admin: AdminUser,
+    db: TenantDB,
+    status_filter: str | None = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> UserListResponse:
+    """List all users in this tenant."""
+    query = select(User)
+    if status_filter:
+        query = query.where(User.status == status_filter)
+    result = await db.execute(query.offset(skip).limit(limit))
+    users = result.scalars().all()
+    # Total count without pagination.
+    count_result = await db.execute(
+        select(User) if not status_filter else select(User).where(User.status == status_filter)
+    )
+    total = len(count_result.scalars().all())
+    return UserListResponse(
+        items=[_to_user_response(u) for u in users],
+        total=total,
+    )
+
+
+@router.patch("/users/{user_id}/deactivate", response_model=UserResponse)
+async def deactivate_user(
+    user_id: uuid.UUID,
+    admin: AdminUser,
+    db: TenantDB,
+) -> UserResponse:
+    """Deactivate a user (soft delete — they can be reactivated)."""
+    if user_id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "cannot_self_deactivate"},
+        )
+    result = await db.execute(
+        select(User).where(User.tenant_id == admin.tenant_id, User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await db.execute(
+        update(User)
+        .where(User.tenant_id == admin.tenant_id, User.id == user_id)
+        .values(status="deactivated")
+    )
+    await db.refresh(user)
+    return _to_user_response(user)
+
+
+@router.post("/users/invite", response_model=InviteResponse, status_code=status.HTTP_201_CREATED)
+async def invite_user(
+    body: InviteRequest,
+    admin: AdminUser,
+    db: TenantDB,
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> InviteResponse:
+    """Send an invitation email to a new user."""
+    # Fetch tenant metadata (need the name for the email).
+    tenant_result = await platform_db.execute(
+        select(Tenant).where(Tenant.id == admin.tenant_id)
+    )
+    tenant = tenant_result.scalar_one()
+
+    invitation = await create_invitation(
+        tenant=tenant,
+        email=body.email,
+        role_name=body.role_name,
+        invited_by_user=admin,
+        db=db,
+    )
+    return InviteResponse(
+        invitation_id=str(invitation.id),
+        email=invitation.email,
+        message="Invitation sent.",
+    )
+
+
+@router.post("/invitations/accept", response_model=dict)
+@router.get("/invitations/accept", response_model=dict)
+async def accept_invitation_route(
+    token: str = Query(...),
+    full_name: str = Query(..., min_length=1),
+    password: str = Query(..., min_length=8),
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> dict[str, str]:
+    """
+    Public endpoint: accept an invitation link.
+    Works without an existing user session by finding the invitation's tenant.
+    """
+    from app.core.security import hash_email_token
+    from app.core.tenant_db import tenant_session_context
+    from app.db.models.auth import Invitation
+
+    token_h = hash_email_token(token)
+    result = await platform_db.execute(
+        select(Invitation).where(Invitation.token_hash == token_h)
+    )
+    invitation = result.scalar_one_or_none()
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_token", "message": "Invitation is invalid or expired."},
+        )
+
+    async with tenant_session_context(str(invitation.tenant_id)) as tenant_db:
+        user = await accept_invitation(
+            raw_token=token, full_name=full_name, password=password, db=tenant_db
+        )
+    return {"message": "Account created. You can now log in.", "user_id": str(user.id)}
+
+
+@router.post("/users/import", response_model=ImportResponse)
+async def import_users(
+    admin: AdminUser,
+    db: TenantDB,
+    platform_db: AsyncSession = Depends(get_platform_session),
+    file: UploadFile = File(..., description="CSV with columns: email, full_name, role_name"),
+) -> ImportResponse:
+    """Bulk-import users from a CSV file."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_file_type", "message": "File must be a .csv."},
+        )
+    contents = await file.read()
+
+    tenant_result = await platform_db.execute(
+        select(Tenant).where(Tenant.id == admin.tenant_id)
+    )
+    tenant = tenant_result.scalar_one()
+
+    rows = await bulk_import_users(
+        csv_content=contents, tenant=tenant, imported_by=admin, db=db
+    )
+    succeeded = sum(1 for r in rows if r.success)
+    return ImportResponse(
+        total=len(rows),
+        succeeded=succeeded,
+        failed=len(rows) - succeeded,
+        rows=[
+            ImportResultRow(
+                row_number=r.row_number,
+                email=r.email,
+                full_name=r.full_name,
+                role_name=r.role_name,
+                success=r.success,
+                error=r.error,
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.get("/settings/registration-mode", response_model=RegistrationModeResponse)
+async def get_registration_mode(
+    admin: AdminUser,
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> RegistrationModeResponse:
+    result = await platform_db.execute(
+        select(Tenant).where(Tenant.id == admin.tenant_id)
+    )
+    tenant = result.scalar_one()
+    return RegistrationModeResponse(registration_mode=tenant.registration_mode)
+
+
+@router.patch("/settings/registration-mode", response_model=RegistrationModeResponse)
+async def set_registration_mode(
+    body: RegistrationModeUpdateRequest,
+    admin: AdminUser,
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> RegistrationModeResponse:
+    await platform_db.execute(
+        update(Tenant)
+        .where(Tenant.id == admin.tenant_id)
+        .values(registration_mode=body.registration_mode)
+    )
+    return RegistrationModeResponse(registration_mode=body.registration_mode)
+
+
+@router.get("/pending-approvals", response_model=UserListResponse)
+async def list_pending_approvals(
+    admin: AdminUser,
+    db: TenantDB,
+) -> UserListResponse:
+    result = await db.execute(select(User).where(User.status == "pending"))
+    users = result.scalars().all()
+    return UserListResponse(items=[_to_user_response(u) for u in users], total=len(users))
+
+
+@router.post("/pending-approvals/{user_id}/approve", response_model=UserResponse)
+async def approve_user(
+    user_id: uuid.UUID,
+    admin: AdminUser,
+    db: TenantDB,
+) -> UserResponse:
+    result = await db.execute(
+        select(User).where(User.tenant_id == admin.tenant_id, User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+    if user is None or user.status != "pending":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await db.execute(
+        update(User)
+        .where(User.tenant_id == admin.tenant_id, User.id == user_id)
+        .values(status="active")
+    )
+    await db.refresh(user)
+    return _to_user_response(user)
+
+
+@router.post("/pending-approvals/{user_id}/reject", response_model=UserResponse)
+async def reject_user(
+    user_id: uuid.UUID,
+    admin: AdminUser,
+    db: TenantDB,
+) -> UserResponse:
+    result = await db.execute(
+        select(User).where(User.tenant_id == admin.tenant_id, User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+    if user is None or user.status != "pending":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await db.execute(
+        update(User)
+        .where(User.tenant_id == admin.tenant_id, User.id == user_id)
+        .values(status="deactivated")
+    )
+    await db.refresh(user)
+    return _to_user_response(user)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _to_user_response(user: User) -> UserResponse:
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        full_name=user.full_name,
+        is_admin=user.is_admin,
+        status=user.status,
+        created_at=str(user.created_at),
+    )
+
