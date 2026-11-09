@@ -26,11 +26,33 @@ export interface PublicBranding {
   version: number;
 }
 
+export interface BrandingResponse {
+  display_name: string;
+  tagline: string | null;
+  footer_text: string | null;
+  support_email: string | null;
+  tokens: DesignTokens;
+  logo_key: string | null;
+  logo_url: string | null;
+  favicon_key: string | null;
+  favicon_url: string | null;
+  version: number;
+  updated_at: string;
+}
+
+export interface BrandingUpdateRequest {
+  display_name?: string | null;
+  tagline?: string | null;
+  footer_text?: string | null;
+  support_email?: string | null;
+  tokens?: DesignTokens;
+  expected_version?: number;
+}
+
 export interface StoredBrandingCache {
   version: number;
   etag?: string | null;
   branding: PublicBranding;
-  css?: string;
   cachedAt: number;
 }
 

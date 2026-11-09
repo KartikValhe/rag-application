@@ -1,11 +1,16 @@
 /**
  * features/branding/api/brandingApi.ts
  * ────────────────────────────────────
- * API calls for fetching public tenant branding with ETag / 304 support.
+ * API calls for fetching public tenant branding with ETag / 304 support,
+ * and admin endpoints for managing branding, tokens, and asset uploads.
  */
 
 import { apiClient } from "@/api/client";
-import { PublicBranding } from "../types";
+import type {
+  PublicBranding,
+  BrandingResponse,
+  BrandingUpdateRequest,
+} from "../types.ts";
 
 export interface FetchBrandingResult {
   branding: PublicBranding | null;
@@ -48,4 +53,58 @@ export async function fetchPublicBranding(
     notModified: false,
     etag: responseEtag,
   };
+}
+
+export async function getAdminBranding(): Promise<BrandingResponse> {
+  const response = await apiClient.get<BrandingResponse>("/admin/branding");
+  return response.data;
+}
+
+export async function updateAdminBranding(
+  payload: BrandingUpdateRequest
+): Promise<BrandingResponse> {
+  const response = await apiClient.put<BrandingResponse>(
+    "/admin/branding",
+    payload
+  );
+  return response.data;
+}
+
+export async function uploadAdminLogo(file: File): Promise<BrandingResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiClient.post<BrandingResponse>(
+    "/admin/branding/logo",
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+  return response.data;
+}
+
+export async function uploadAdminFavicon(
+  file: File
+): Promise<BrandingResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiClient.post<BrandingResponse>(
+    "/admin/branding/favicon",
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+  return response.data;
+}
+
+export async function resetAdminBranding(): Promise<BrandingResponse> {
+  const response = await apiClient.post<BrandingResponse>(
+    "/admin/branding/reset"
+  );
+  return response.data;
 }

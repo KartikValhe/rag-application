@@ -20,11 +20,15 @@ import {
   calculateContrastRatio,
   mixColors,
   getAccessibleForeground,
+  checkWcagContrast,
   computePalette,
   generateThemeCss,
+  generateScopedThemeCss,
   RADIUS_ALLOWLIST,
   FONT_FAMILY_ALLOWLIST,
 } from "../utils/tokens.ts";
+
+import { brandingFormSchema } from "../schemas/brandingSchema.ts";
 
 import {
   getBrandingStorageKey,
@@ -201,7 +205,29 @@ test("LocalStorage storage helpers: save, load, and versioning", () => {
   assert.equal(loaded?.version, 3);
   assert.equal(loaded?.etag, 'W/"test-3"');
   assert.equal(loaded?.branding.display_name, "Test Academy");
-  assert.ok(loaded?.css?.includes("--color-primary"), "Precomputed CSS must be stored in cache");
+  // Hardening: Verify raw CSS string is NOT stored in cache
+  assert.equal((loaded as any)?.css, undefined, "Raw CSS string must not be stored in cache");
+
+  // Hardening: Verify invalid cache is discarded from localStorage
+  store["app_branding_malicious"] = JSON.stringify({
+    version: 1,
+    branding: {
+      display_name: "Evil Corp",
+      tokens: { primary: "not_a_hex", secondary: "#123456", accent: "#000000", radius: "md", font_family: "system-ui" },
+    },
+  });
+  const maliciousLoaded = getStoredBranding("malicious");
+  assert.equal(maliciousLoaded, null, "Must discard cache with invalid hex tokens");
+  assert.equal(store["app_branding_malicious"], undefined, "Must remove invalid cache from localStorage");
+
+  store["app_branding_bad_radius"] = JSON.stringify({
+    version: 1,
+    branding: {
+      display_name: "Bad Radius",
+      tokens: { primary: "#123456", secondary: "#123456", accent: "#000000", radius: "evil_radius", font_family: "system-ui" },
+    },
+  });
+  assert.equal(getStoredBranding("bad_radius"), null, "Must discard cache with invalid radius");
 
   clearStoredBranding(slug);
   assert.equal(getStoredBranding(slug), null, "Should return null after clearing");
@@ -211,4 +237,77 @@ test("LocalStorage storage helpers: save, load, and versioning", () => {
     throw new Error("Private browsing quota exceeded");
   };
   assert.equal(getStoredBranding(slug), null, "Must safely catch storage exceptions");
+});
+
+test("checkWcagContrast: validates contrast compliance before saving", () => {
+  // 1. Valid color (standard blue #2563eb passes all checks)
+  const validRes = checkWcagContrast("#2563eb");
+  assert.equal(validRes.isValid, true);
+  assert.equal(validRes.errorMessage, undefined);
+
+  // 2. Bright yellow (#ffff00) has terrible contrast against light background (#ffffff)
+  const yellowRes = checkWcagContrast("#ffff00");
+  assert.equal(yellowRes.isValid, false);
+  assert.ok(yellowRes.errorMessage?.includes("light backgrounds"));
+
+  // 3. Dark color (#0a1128) has poor contrast against dark theme background
+  const darkRes = checkWcagContrast("#0a1128");
+  assert.equal(darkRes.isValid, false);
+  assert.ok(darkRes.errorMessage?.includes("dark backgrounds"));
+
+  // 4. Invalid hex string
+  const badHexRes = checkWcagContrast("not_a_hex");
+  assert.equal(badHexRes.isValid, false);
+  assert.ok(badHexRes.errorMessage?.includes("valid 6-digit hex"));
+});
+
+test("generateScopedThemeCss: generates isolated preview styles without polluting global rules", () => {
+  const tokens: DesignTokens = {
+    primary: "#059669",
+    secondary: "#475569",
+    accent: "#06b6d4",
+    radius: "xl",
+    font_family: "mono",
+  };
+
+  const scopedCss = generateScopedThemeCss(tokens, "my-preview-scope");
+  assert.ok(scopedCss.includes(".my-preview-scope {"), "Must scope to custom class");
+  assert.ok(scopedCss.includes(".my-preview-scope.preview-dark"), "Must scope dark mode to container class");
+  assert.ok(!scopedCss.includes(":root {"), "Must NOT define global :root rules");
+  assert.ok(!scopedCss.includes(".dark {"), "Must NOT define global .dark rules");
+  assert.ok(scopedCss.includes("--color-primary: #059669;"));
+  assert.ok(scopedCss.includes(FONT_FAMILY_ALLOWLIST.mono));
+});
+
+test("brandingFormSchema: validates admin branding form input", () => {
+  const validForm = {
+    display_name: "Acme High School",
+    tagline: "Inspiring Excellence",
+    footer_text: "© 2026 Acme High School",
+    support_email: "help@acme.edu",
+    primary: "#2563eb",
+    secondary: "#475569",
+    accent: "#06b6d4",
+    radius: "md" as const,
+    font_family: "system-ui" as const,
+  };
+
+  const parseResult = brandingFormSchema.safeParse(validForm);
+  assert.equal(parseResult.success, true);
+
+  // Empty display_name rejected
+  const emptyNameResult = brandingFormSchema.safeParse({ ...validForm, display_name: "" });
+  assert.equal(emptyNameResult.success, false);
+
+  // Invalid hex rejected
+  const badHexResult = brandingFormSchema.safeParse({ ...validForm, primary: "blue" });
+  assert.equal(badHexResult.success, false);
+
+  // Disallowed radius rejected
+  const badRadiusResult = brandingFormSchema.safeParse({ ...validForm, radius: "extra_huge" });
+  assert.equal(badRadiusResult.success, false);
+
+  // Invalid email rejected
+  const badEmailResult = brandingFormSchema.safeParse({ ...validForm, support_email: "not-an-email" });
+  assert.equal(badEmailResult.success, false);
 });

@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   LogOut,
+  Palette,
   User as UserIcon,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
@@ -102,6 +103,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           href: "/admin/audit",
           icon: FileText,
           permission: "audit:view",
+        },
+        {
+          label: "Branding & Theme",
+          href: "/admin/branding",
+          icon: Palette,
+          permission: "branding:manage",
         },
       ],
     },

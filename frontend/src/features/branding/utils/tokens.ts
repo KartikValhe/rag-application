@@ -5,7 +5,7 @@
  * - Color manipulation and WCAG AA contrast calculations.
  * - Dynamic token derivation for light and dark modes (hover, active, subtle, foreground).
  * - Allow-list enforcement for border radii and system font stacks.
- * - Dynamic CSS injection into the DOM.
+ * - Dynamic CSS injection into the DOM (global and scoped).
  */
 
 import type {
@@ -143,6 +143,79 @@ export function getAccessibleForeground(
   return contrastWhite >= contrastDark ? white : dark;
 }
 
+export interface WcagContrastResult {
+  isValid: boolean;
+  whiteContrast: number;
+  darkTextContrast: number;
+  lightSurfaceContrast: number;
+  darkSurfaceContrast: number;
+  errorMessage?: string;
+}
+
+export function checkWcagContrast(primaryHex: string): WcagContrastResult {
+  if (!isValidHex(primaryHex)) {
+    return {
+      isValid: false,
+      whiteContrast: 1,
+      darkTextContrast: 1,
+      lightSurfaceContrast: 1,
+      darkSurfaceContrast: 1,
+      errorMessage: "Primary color must be a valid 6-digit hex code (e.g. #2563eb).",
+    };
+  }
+
+  const white = "#ffffff";
+  const darkText = "#0f172a";
+  const darkSurface = "#0f172a";
+  const lightSurface = "#ffffff";
+
+  const cWhite = calculateContrastRatio(primaryHex, white);
+  const cDark = calculateContrastRatio(primaryHex, darkText);
+  const cLightSurf = calculateContrastRatio(primaryHex, lightSurface);
+  const cDarkSurf = calculateContrastRatio(primaryHex, darkSurface);
+
+  if (cWhite < 4.5 && cDark < 4.5) {
+    return {
+      isValid: false,
+      whiteContrast: cWhite,
+      darkTextContrast: cDark,
+      lightSurfaceContrast: cLightSurf,
+      darkSurfaceContrast: cDarkSurf,
+      errorMessage: `Primary color ${primaryHex} lacks sufficient text contrast (minimum 4.5:1) with either white (${cWhite.toFixed(2)}:1) or dark text (${cDark.toFixed(2)}:1).`,
+    };
+  }
+
+  if (cLightSurf < 3.0) {
+    return {
+      isValid: false,
+      whiteContrast: cWhite,
+      darkTextContrast: cDark,
+      lightSurfaceContrast: cLightSurf,
+      darkSurfaceContrast: cDarkSurf,
+      errorMessage: `Primary color ${primaryHex} has insufficient contrast against light backgrounds (${cLightSurf.toFixed(2)}:1 < 3.0:1). Please pick a darker shade.`,
+    };
+  }
+
+  if (cDarkSurf < 3.0) {
+    return {
+      isValid: false,
+      whiteContrast: cWhite,
+      darkTextContrast: cDark,
+      lightSurfaceContrast: cLightSurf,
+      darkSurfaceContrast: cDarkSurf,
+      errorMessage: `Primary color ${primaryHex} has insufficient contrast against dark backgrounds (${cDarkSurf.toFixed(2)}:1 < 3.0:1). Please pick a lighter or more saturated shade.`,
+    };
+  }
+
+  return {
+    isValid: true,
+    whiteContrast: cWhite,
+    darkTextContrast: cDark,
+    lightSurfaceContrast: cLightSurf,
+    darkSurfaceContrast: cDarkSurf,
+  };
+}
+
 // ── Derived Token Generation ────────────────────────────────────────────────
 
 export interface ComputedPalette {
@@ -190,8 +263,6 @@ export function computePalette(
   }
 
   // Dark Mode Token Derivation
-  // If the primary color has low contrast against the dark background (#090d16 < 4.0:1),
-  // brighten it slightly so that it remains crisp and visible.
   const contrastAgainstDarkSurface = calculateContrastRatio(primary, "#090d16");
   const darkPrimary =
     contrastAgainstDarkSurface < 4.0
@@ -203,7 +274,6 @@ export function computePalette(
   const darkPrimaryLight = mixColors(darkPrimary, "#090d16", 0.82);
   const darkPrimaryForeground = getAccessibleForeground(darkPrimary, true);
 
-  // In dark mode, brighten secondary accent slightly for contrast against slate/dark background
   const darkSecondary = mixColors(secondary, "#ffffff", 0.35);
   const darkSecondaryHover = mixColors(darkSecondary, "#ffffff", 0.2);
   const darkSecondaryForeground = getAccessibleForeground(darkSecondary, true);
@@ -259,6 +329,62 @@ export function generateThemeCss(tokens: DesignTokens): string {
 }
 
 .dark {
+  --color-primary: ${dark.primary};
+  --color-primary-hover: ${dark.primaryHover};
+  --color-primary-active: ${dark.primaryActive};
+  --color-primary-light: ${dark.primaryLight};
+  --color-primary-foreground: ${dark.primaryForeground};
+
+  --color-secondary: ${dark.secondary};
+  --color-secondary-hover: ${dark.secondaryHover};
+  --color-secondary-foreground: ${dark.secondaryForeground};
+}
+`.trim();
+}
+
+/**
+ * Generates scoped CSS for the live preview container.
+ * Strictly scopes variables to .${scopeClassName} without modifying :root or .dark globals.
+ */
+export function generateScopedThemeCss(
+  tokens: DesignTokens,
+  scopeClassName: string
+): string {
+  const light = computePalette(tokens, false);
+  const dark = computePalette(tokens, true);
+
+  const radiusKey = tokens.radius in RADIUS_ALLOWLIST ? tokens.radius : "md";
+  const radii = RADIUS_ALLOWLIST[radiusKey];
+
+  const fontKey =
+    tokens.font_family in FONT_FAMILY_ALLOWLIST
+      ? tokens.font_family
+      : "system-ui";
+  const fontStack = FONT_FAMILY_ALLOWLIST[fontKey];
+
+  return `
+.${scopeClassName} {
+  --color-primary: ${light.primary};
+  --color-primary-hover: ${light.primaryHover};
+  --color-primary-active: ${light.primaryActive};
+  --color-primary-light: ${light.primaryLight};
+  --color-primary-foreground: ${light.primaryForeground};
+
+  --color-secondary: ${light.secondary};
+  --color-secondary-hover: ${light.secondaryHover};
+  --color-secondary-foreground: ${light.secondaryForeground};
+
+  --radius-sm: ${radii.sm};
+  --radius-md: ${radii.md};
+  --radius-lg: ${radii.lg};
+  --radius-xl: ${radii.xl};
+  --radius-full: ${radii.full};
+
+  --font-family-base: ${fontStack};
+  --font-family-heading: ${fontStack};
+}
+
+.${scopeClassName}.preview-dark, .${scopeClassName} .preview-dark {
   --color-primary: ${dark.primary};
   --color-primary-hover: ${dark.primaryHover};
   --color-primary-active: ${dark.primaryActive};

@@ -351,6 +351,19 @@ async def update_admin_branding(
     """
     branding = await _get_or_create_tenant_branding(current_user.tenant_id, db)
 
+    # Optimistic concurrency check: reject if another admin bumped the version
+    if body.expected_version is not None and branding.version != body.expected_version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "concurrency_conflict",
+                "message": (
+                    f"Branding was modified by another administrator (current version: {branding.version}, "
+                    f"expected: {body.expected_version}). Please refresh and try again."
+                ),
+            },
+        )
+
     if body.display_name is not None:
         branding.display_name = body.display_name
     if body.tagline is not None:

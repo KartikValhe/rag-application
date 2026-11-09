@@ -525,3 +525,91 @@ async def test_admin_upload_rejects_oversized_dimensions(
         )
         assert resp.status_code == 400
         assert "dimensions" in resp.json()["detail"]["message"].lower()
+
+
+async def test_admin_branding_concurrency_conflict(
+    admin_a: User,
+    tenant_a: Tenant,
+) -> None:
+    token = create_access_token(
+        user_id=str(admin_a.id),
+        tenant_id=str(tenant_a.id),
+        is_admin=True,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Fetch current branding version
+        get_res = await client.get("/api/v1/admin/branding", headers=headers)
+        assert get_res.status_code == 200
+        initial_version = get_res.json()["version"]
+
+        # 2. First update with correct expected_version succeeds and bumps version
+        put_res = await client.put(
+            "/api/v1/admin/branding",
+            json={"display_name": "First Admin Update", "expected_version": initial_version},
+            headers=headers,
+        )
+        assert put_res.status_code == 200
+        new_version = put_res.json()["version"]
+        assert new_version == initial_version + 1
+
+        # 3. Second concurrent update with stale expected_version fails with 409
+        stale_res = await client.put(
+            "/api/v1/admin/branding",
+            json={"display_name": "Stale Admin Update", "expected_version": initial_version},
+            headers=headers,
+        )
+        assert stale_res.status_code == 409
+        detail = stale_res.json()["detail"]
+        assert detail["code"] == "concurrency_conflict"
+        assert "another administrator" in detail["message"].lower()
+
+
+async def test_admin_upload_rejects_script_text_disguised_as_png(
+    admin_a: User,
+    tenant_a: Tenant,
+) -> None:
+    token = create_access_token(
+        user_id=str(admin_a.id),
+        tenant_id=str(tenant_a.id),
+        is_admin=True,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    script_payload = b"<script>alert('xss')</script>"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/admin/branding/logo",
+            files={"file": ("fake_logo.png", script_payload, "image/png")},
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        msg = resp.json()["detail"]["message"].lower()
+        assert "valid image" in msg or "content" in msg or "format" in msg or "corrupt" in msg or "svg" in msg
+
+
+async def test_admin_upload_rejects_renamed_svg(
+    admin_a: User,
+    tenant_a: Tenant,
+) -> None:
+    token = create_access_token(
+        user_id=str(admin_a.id),
+        tenant_id=str(tenant_a.id),
+        is_admin=True,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    svg_disguised_as_png = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/admin/branding/logo",
+            files={"file": ("innocent_look.png", svg_disguised_as_png, "image/png")},
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        msg = resp.json()["detail"]["message"].lower()
+        assert "svg" in msg or "content" in msg or "format" in msg

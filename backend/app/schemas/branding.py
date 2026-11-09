@@ -131,6 +131,10 @@ class BrandingUpdateRequest(BaseModel):
     footer_text: str | None = Field(default=None, max_length=512)
     support_email: EmailStr | None = Field(default=None, max_length=255)
     tokens: DesignTokens | None = None
+    expected_version: int | None = Field(
+        default=None,
+        description="Optimistic concurrency control: version expected by client before updating",
+    )
 
 
 class BrandingResponse(BaseModel):

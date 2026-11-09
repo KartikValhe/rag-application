@@ -63,6 +63,13 @@ npm install
 npm run dev
 ```
 
+### 5. Multi-Tenant Subdomain Testing (White-Label Theming)
+All modern browsers treat `*.localhost` as loopback addresses without requiring `/etc/hosts` changes:
+- **Tenant Acme:** Visit `http://acme.localhost:5173/login` &rarr; Automatically resolves `acme` tenant, displays custom Acme Academy colors, typography, logos, and copy.
+- **Default Tenant:** Visit `http://localhost:5173/login` &rarr; Uses standard platform theme tokens.
+- **Parameter Override:** Visit `http://localhost:5173/login?tenant=acme` &rarr; Explicitly selects the `acme` tenant branding.
+- **Branding Editor:** Log in as `admin@acme.edu` (`Admin123!`), open the sidebar &rarr; **Branding & Theme** (`/admin/branding`) to customize tokens, preview components live, and upload brand assets.
+
 ---
 
 ## 🌐 Network Ports & Services
@@ -125,6 +132,10 @@ When deploying to staging or production environments, observe the following mand
    - When deploying behind a reverse proxy, CDN, or load balancer (e.g. AWS ALB, Cloudflare, NGINX), set `TRUST_PROXY=true` in the environment so that client IP addresses are accurately extracted from `X-Forwarded-For`.
    - In direct or local development setups, leave `TRUST_PROXY=false` (default) to avoid IP address spoofing in audit logs and throttle counters.
 
+2. **Host Header Preservation (Mandatory for Multi-Tenancy):**
+   - The production reverse proxy (NGINX, Caddy, Cloudflare, AWS ALB) **MUST PRESERVE** the original incoming `Host` header (e.g. `proxy_set_header Host $host;` or `X-Forwarded-Host`) when forwarding requests to the FastAPI backend.
+   - The backend resolves tenant identity from the Host header (e.g. `{slug}.yourdomain.edu`). Overwriting `Host` with `localhost` or an upstream internal IP will cause tenant routing to default to the fallback tenant.
+
 2. **Secrets Management:**
    - Never commit or store production secrets in `.env` files or repository configs.
    - All secrets (`SECRET_KEY`, `PLATFORM_SECRET_KEY`, `PLATFORM_DATABASE_URL`, `DATABASE_URL`, `REDIS_PASSWORD`) must be injected at runtime via a dedicated secrets manager (e.g., AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault).
@@ -161,8 +172,9 @@ pytest backend/tests/ -v
 Run frontend verification:
 ```bash
 cd frontend
-npm run typecheck
-npm run lint
-npm run build
+npm run test       # 14 theme engine & form validation unit tests
+npm run typecheck  # TypeScript strict type checking
+npm run lint       # ESLint rules
+npm run build      # Vite production build
 ```
 
