@@ -4,6 +4,7 @@ import { useAuth } from "@/features/auth/AuthContext";
 import { usePermission } from "@/hooks/usePermission";
 import { Badge } from "@/components/ui/Badge";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { useBranding } from "@/features/branding";
 
 export interface TopbarProps {
   onToggleMobileNav: () => void;
@@ -20,22 +21,23 @@ export const Topbar: React.FC<TopbarProps> = ({
 }) => {
   const { user } = useAuth();
   const { isAdmin, isTeacher, isStudent } = usePermission();
+  const { branding } = useBranding();
 
   const primaryRoleLabel = isAdmin
     ? "Admin"
     : isTeacher
-    ? "Teacher"
-    : isStudent
-    ? "Student"
-    : "Member";
+      ? "Teacher"
+      : isStudent
+        ? "Student"
+        : "Member";
 
   const primaryRoleVariant = isAdmin
     ? "danger"
     : isTeacher
-    ? "primary"
-    : isStudent
-    ? "success"
-    : "default";
+      ? "primary"
+      : isStudent
+        ? "success"
+        : "default";
 
   return (
     <header className="sticky top-0 z-30 h-16 bg-surface/95 backdrop-blur-xs border-b border-border px-4 sm:px-6 flex items-center justify-between transition-colors">
@@ -66,7 +68,7 @@ export const Topbar: React.FC<TopbarProps> = ({
 
         <div className="flex items-center space-x-2">
           <span className="font-semibold text-sm text-text">
-            {tenantName || "Academic Portal"}
+            {tenantName || branding.display_name || "Academic Portal"}
           </span>
           <span className="hidden sm:inline-block w-1.5 h-1.5 rounded-full bg-border" />
           <span className="hidden sm:inline-block text-xs text-text-muted">

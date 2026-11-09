@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/theme/ThemeProvider";
+import { BrandingProvider } from "@/features/branding";
 import { ToastProvider } from "@/components/ui/Toast";
 import { AuthProvider } from "@/features/auth/AuthContext";
 import {
@@ -47,186 +48,188 @@ export const App: React.FC = () => {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <ToastProvider>
-          <AuthProvider>
-            <BrowserRouter>
-            <Routes>
-              {/* Public Auth Routes */}
-              <Route
-                path="/login"
-                element={
-                  <PublicRoute>
-                    <LoginPage />
-                  </PublicRoute>
-                }
-              />
-              <Route
-                path="/register"
-                element={
-                  <PublicRoute>
-                    <RegisterPage />
-                  </PublicRoute>
-                }
-              />
-              <Route
-                path="/forgot-password"
-                element={
-                  <PublicRoute>
-                    <ForgotPasswordPage />
-                  </PublicRoute>
-                }
-              />
-              <Route
-                path="/reset-password"
-                element={
-                  <PublicRoute>
-                    <ResetPasswordPage />
-                  </PublicRoute>
-                }
-              />
-              <Route path="/verify-email" element={<VerifyEmailPage />} />
-              <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
+          <BrandingProvider>
+            <ToastProvider>
+              <AuthProvider>
+                <BrowserRouter>
+                  <Routes>
+                    {/* Public Auth Routes */}
+                    <Route
+                      path="/login"
+                      element={
+                        <PublicRoute>
+                          <LoginPage />
+                        </PublicRoute>
+                      }
+                    />
+                    <Route
+                      path="/register"
+                      element={
+                        <PublicRoute>
+                          <RegisterPage />
+                        </PublicRoute>
+                      }
+                    />
+                    <Route
+                      path="/forgot-password"
+                      element={
+                        <PublicRoute>
+                          <ForgotPasswordPage />
+                        </PublicRoute>
+                      }
+                    />
+                    <Route
+                      path="/reset-password"
+                      element={
+                        <PublicRoute>
+                          <ResetPasswordPage />
+                        </PublicRoute>
+                      }
+                    />
+                    <Route path="/verify-email" element={<VerifyEmailPage />} />
+                    <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
 
-              {/* Superadmin Platform Routes */}
-              <Route path="/platform/login" element={<PlatformLoginPage />} />
-              <Route
-                path="/platform"
-                element={
-                  <PlatformRoute>
-                    <PlatformDashboardPage />
-                  </PlatformRoute>
-                }
-              />
+                    {/* Superadmin Platform Routes */}
+                    <Route path="/platform/login" element={<PlatformLoginPage />} />
+                    <Route
+                      path="/platform"
+                      element={
+                        <PlatformRoute>
+                          <PlatformDashboardPage />
+                        </PlatformRoute>
+                      }
+                    />
 
-              {/* Tenant Admin Routes */}
-              <Route
-                path="/admin"
-                element={
-                  <AdminRoute>
-                    <AdminDashboardPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/roles"
-                element={
-                  <AdminRoute>
-                    <RolesPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/academic"
-                element={
-                  <AdminRoute>
-                    <AcademicPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/enrollments"
-                element={
-                  <AdminRoute>
-                    <EnrollmentsPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/assignments"
-                element={
-                  <AdminRoute>
-                    <AssignmentsPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/users"
-                element={
-                  <AdminRoute>
-                    <AdminDashboardPage />
-                  </AdminRoute>
-                }
-              />
-              <Route
-                path="/admin/audit"
-                element={
-                  <AdminRoute>
-                    <AuditLogPage />
-                  </AdminRoute>
-                }
-              />
+                    {/* Tenant Admin Routes */}
+                    <Route
+                      path="/admin"
+                      element={
+                        <AdminRoute>
+                          <AdminDashboardPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/roles"
+                      element={
+                        <AdminRoute>
+                          <RolesPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/academic"
+                      element={
+                        <AdminRoute>
+                          <AcademicPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/enrollments"
+                      element={
+                        <AdminRoute>
+                          <EnrollmentsPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/assignments"
+                      element={
+                        <AdminRoute>
+                          <AssignmentsPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/users"
+                      element={
+                        <AdminRoute>
+                          <AdminDashboardPage />
+                        </AdminRoute>
+                      }
+                    />
+                    <Route
+                      path="/admin/audit"
+                      element={
+                        <AdminRoute>
+                          <AuditLogPage />
+                        </AdminRoute>
+                      }
+                    />
 
-              {/* Member & Portal Dashboards */}
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute>
-                    <DashboardPage />
-                  </ProtectedRoute>
-                }
-              />
+                    {/* Member & Portal Dashboards */}
+                    <Route
+                      path="/dashboard"
+                      element={
+                        <ProtectedRoute>
+                          <DashboardPage />
+                        </ProtectedRoute>
+                      }
+                    />
 
-              {/* Teacher Portal Routes */}
-              <Route
-                path="/teacher/dashboard"
-                element={
-                  <TeacherRoute>
-                    <DashboardPage />
-                  </TeacherRoute>
-                }
-              />
-              <Route
-                path="/teacher/classes"
-                element={
-                  <TeacherRoute>
-                    <TeacherClassesPage />
-                  </TeacherRoute>
-                }
-              />
-              <Route
-                path="/teacher/classes/:classId"
-                element={
-                  <TeacherRoute>
-                    <TeacherClassDetailPage />
-                  </TeacherRoute>
-                }
-              />
+                    {/* Teacher Portal Routes */}
+                    <Route
+                      path="/teacher/dashboard"
+                      element={
+                        <TeacherRoute>
+                          <DashboardPage />
+                        </TeacherRoute>
+                      }
+                    />
+                    <Route
+                      path="/teacher/classes"
+                      element={
+                        <TeacherRoute>
+                          <TeacherClassesPage />
+                        </TeacherRoute>
+                      }
+                    />
+                    <Route
+                      path="/teacher/classes/:classId"
+                      element={
+                        <TeacherRoute>
+                          <TeacherClassDetailPage />
+                        </TeacherRoute>
+                      }
+                    />
 
-              {/* Student Portal Routes */}
-              <Route
-                path="/student/dashboard"
-                element={
-                  <StudentRoute>
-                    <DashboardPage />
-                  </StudentRoute>
-                }
-              />
-              <Route
-                path="/student/classes"
-                element={
-                  <StudentRoute>
-                    <StudentClassesPage />
-                  </StudentRoute>
-                }
-              />
-              <Route
-                path="/student/classes/:classId"
-                element={
-                  <StudentRoute>
-                    <StudentClassDetailPage />
-                  </StudentRoute>
-                }
-              />
+                    {/* Student Portal Routes */}
+                    <Route
+                      path="/student/dashboard"
+                      element={
+                        <StudentRoute>
+                          <DashboardPage />
+                        </StudentRoute>
+                      }
+                    />
+                    <Route
+                      path="/student/classes"
+                      element={
+                        <StudentRoute>
+                          <StudentClassesPage />
+                        </StudentRoute>
+                      }
+                    />
+                    <Route
+                      path="/student/classes/:classId"
+                      element={
+                        <StudentRoute>
+                          <StudentClassDetailPage />
+                        </StudentRoute>
+                      }
+                    />
 
-              {/* Default redirect */}
-              <Route path="/" element={<Navigate to="/login" replace />} />
-              <Route path="*" element={<Navigate to="/login" replace />} />
-            </Routes>
-          </BrowserRouter>
-        </AuthProvider>
-      </ToastProvider>
+                    {/* Default redirect */}
+                    <Route path="/" element={<Navigate to="/login" replace />} />
+                    <Route path="*" element={<Navigate to="/login" replace />} />
+                  </Routes>
+                </BrowserRouter>
+              </AuthProvider>
+        </ToastProvider>
+      </BrandingProvider>
     </ThemeProvider>
-  </QueryClientProvider>
+  </QueryClientProvider >
   );
 };
 

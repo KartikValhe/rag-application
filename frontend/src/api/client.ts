@@ -34,6 +34,12 @@ export const getPlatformToken = (): string | null => {
  */
 export const getTenantSlug = (): string => {
   const host = window.location.hostname.toLowerCase();
+  if (host.endsWith(".localhost")) {
+    const sub = host.slice(0, -".localhost".length);
+    if (sub && sub !== "www") {
+      return sub;
+    }
+  }
   const parts = host.split(".");
   if (parts.length > 2 && parts[0] !== "www") {
     return parts[0];
@@ -48,7 +54,7 @@ export const getTenantSlug = (): string => {
 };
 
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1",
+  baseURL: import.meta.env.VITE_API_URL || "/api/v1",
   withCredentials: true, // Sends and receives HttpOnly cookies (refresh_token)
   headers: {
     "X-Requested-With": "XMLHttpRequest",

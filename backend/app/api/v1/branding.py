@@ -47,7 +47,7 @@ from app.services.storage import get_storage, validate_and_sanitize_image
 public_router = APIRouter(prefix="/public/branding", tags=["branding"])
 admin_router = APIRouter(prefix="/admin/branding", tags=["branding"])
 
-PUBLIC_BRANDING_THROTTLE_LIMIT = 100
+PUBLIC_BRANDING_THROTTLE_LIMIT = 600
 PUBLIC_BRANDING_THROTTLE_WINDOW = 60  # seconds
 
 
@@ -140,6 +140,29 @@ async def _get_or_create_tenant_branding(
     return branding
 
 
+async def _invalidate_branding_cache(
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    request: Request | None = None,
+    old_version: int | None = None,
+) -> None:
+    """Invalidate Redis cache for tenant branding by slug and version."""
+    try:
+        redis = await get_redis()
+        tenant_res = await db.execute(select(Tenant.slug).where(Tenant.id == tenant_id))
+        slug = tenant_res.scalar_one_or_none()
+        if slug:
+            await redis.delete(f"cache:branding:slug:{slug}")
+        if request:
+            req_slug = getattr(request.state, "tenant_slug", None)
+            if req_slug and req_slug != slug:
+                await redis.delete(f"cache:branding:slug:{req_slug}")
+        if old_version is not None:
+            await redis.delete(f"cache:branding:{tenant_id}:{old_version}")
+    except Exception:
+        pass
+
+
 # ── Public Endpoints ──────────────────────────────────────────────────────────
 
 @public_router.get("", response_model=PublicBrandingResponse, dependencies=[Depends(public_endpoint())])
@@ -216,11 +239,24 @@ async def get_public_branding(
             headers={"ETag": etag, "Cache-Control": "public, max-age=300, stale-while-revalidate=60"},
         )
 
-    # Fetch branding in tenant RLS context
+    # Fetch branding in tenant RLS context.
+    # If the tenant has no branding row in DB, return default branding safely (never an error).
     async with tenant_session_context(str(tenant.id)) as t_db:
-        branding = await _get_or_create_tenant_branding(tenant.id, t_db, tenant.name)
-        branding_resp = _to_public_branding_response(branding)
-        await t_db.commit()
+        res = await t_db.execute(select(TenantBranding).where(TenantBranding.tenant_id == tenant.id))
+        branding = res.scalar_one_or_none()
+        if branding is None:
+            branding_resp = PublicBrandingResponse(
+                display_name=tenant.name or "RAG Platform",
+                tagline=None,
+                footer_text=None,
+                support_email=None,
+                tokens=DesignTokens(**DEFAULT_TOKENS),
+                logo_url=None,
+                favicon_url=None,
+                version=1,
+            )
+        else:
+            branding_resp = _to_public_branding_response(branding)
 
     etag = f'W/"{tenant.id}-{branding_resp.version}"'
 
@@ -343,14 +379,12 @@ async def update_admin_branding(
     )
 
     # Invalidate Redis cache
-    try:
-        redis = await get_redis()
-        slug = getattr(request.state, "tenant_slug", None)
-        if slug:
-            await redis.delete(f"cache:branding:slug:{slug}")
-        await redis.delete(f"cache:branding:{current_user.tenant_id}:{branding.version - 1}")
-    except Exception:
-        pass
+    await _invalidate_branding_cache(
+        tenant_id=current_user.tenant_id,
+        db=db,
+        request=request,
+        old_version=branding.version - 1,
+    )
 
     return _to_admin_branding_response(branding)
 
@@ -395,13 +429,12 @@ async def upload_admin_logo(
         db=db,
     )
 
-    try:
-        redis = await get_redis()
-        slug = getattr(request.state, "tenant_slug", None)
-        if slug:
-            await redis.delete(f"cache:branding:slug:{slug}")
-    except Exception:
-        pass
+    await _invalidate_branding_cache(
+        tenant_id=current_user.tenant_id,
+        db=db,
+        request=request,
+        old_version=branding.version - 1,
+    )
 
     return _to_admin_branding_response(branding)
 
@@ -446,13 +479,12 @@ async def upload_admin_favicon(
         db=db,
     )
 
-    try:
-        redis = await get_redis()
-        slug = getattr(request.state, "tenant_slug", None)
-        if slug:
-            await redis.delete(f"cache:branding:slug:{slug}")
-    except Exception:
-        pass
+    await _invalidate_branding_cache(
+        tenant_id=current_user.tenant_id,
+        db=db,
+        request=request,
+        old_version=branding.version - 1,
+    )
 
     return _to_admin_branding_response(branding)
 
@@ -500,12 +532,11 @@ async def reset_admin_branding(
         db=db,
     )
 
-    try:
-        redis = await get_redis()
-        slug = getattr(request.state, "tenant_slug", None)
-        if slug:
-            await redis.delete(f"cache:branding:slug:{slug}")
-    except Exception:
-        pass
+    await _invalidate_branding_cache(
+        tenant_id=current_user.tenant_id,
+        db=db,
+        request=request,
+        old_version=branding.version - 1,
+    )
 
     return _to_admin_branding_response(branding)

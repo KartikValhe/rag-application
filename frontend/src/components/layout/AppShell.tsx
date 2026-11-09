@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { cn } from "@/utils/cn";
+import { useBranding } from "@/features/branding";
 
 export interface AppShellProps {
   children: React.ReactNode;
@@ -14,6 +15,7 @@ export const AppShell: React.FC<AppShellProps> = ({
   tenantName,
   className,
 }) => {
+  const { branding } = useBranding();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(() => {
     try {
@@ -67,11 +69,14 @@ export const AppShell: React.FC<AppShellProps> = ({
 
         <main
           className={cn(
-            "flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8 focus:outline-none",
+            "flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8 focus:outline-none flex flex-col justify-between",
             className
           )}
         >
-          <div className="max-w-7xl mx-auto">{children}</div>
+          <div className="max-w-7xl mx-auto w-full">{children}</div>
+          <footer className="max-w-7xl mx-auto w-full mt-12 pt-4 border-t border-border text-center text-xs text-text-subtle">
+            {branding.footer_text || "© 2026 RAG Platform. All rights reserved."}
+          </footer>
         </main>
       </div>
     </div>

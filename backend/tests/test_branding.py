@@ -211,9 +211,9 @@ async def test_public_branding_known_tenant_with_etag_and_304(
 
 async def test_public_branding_rate_limiting(client: AsyncClient) -> None:
     redis = await get_redis()
-    # Pre-set the throttle counter to the limit for test client IPs
+    # Pre-set the throttle counter to the 600 limit for test client IPs
     for test_ip in ("127.0.0.1", "testclient"):
-        await redis.set(f"throttle:public_branding:{test_ip}", 100, ex=60)
+        await redis.set(f"throttle:public_branding:{test_ip}", 600, ex=60)
 
     resp = await client.get(
         "/api/v1/public/branding",
@@ -221,6 +221,61 @@ async def test_public_branding_rate_limiting(client: AsyncClient) -> None:
     )
     assert resp.status_code == 429
     assert resp.json()["detail"]["code"] == "rate_limited"
+
+
+async def test_public_branding_tenant_without_branding_row_returns_default(
+    client: AsyncClient,
+    raw_db: AsyncSession,
+) -> None:
+    # Create tenant without a branding row
+    tenant_unbranded = Tenant(
+        slug=f"nobrand-{uuid.uuid4().hex[:6]}",
+        name="No Brand Academy",
+        kind="school",
+        status="active",
+    )
+    raw_db.add(tenant_unbranded)
+    await raw_db.commit()
+
+    resp = await client.get(
+        "/api/v1/public/branding",
+        headers={"Host": f"{tenant_unbranded.slug}.localhost"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["display_name"] == "No Brand Academy"
+    assert data["tokens"]["primary"] == "#2563eb"
+    assert data["version"] == 1
+
+
+async def test_branding_cache_invalidated_on_update_and_suspension(
+    client: AsyncClient,
+    admin_a: User,
+    tenant_a: Tenant,
+) -> None:
+    redis = await get_redis()
+    slug_key = f"cache:branding:slug:{tenant_a.slug}"
+
+    # Pre-populate cache
+    await redis.set(slug_key, '{"tenant_id": "dummy", "data": {"version": 99}}')
+    assert await redis.get(slug_key) is not None
+
+    token = create_access_token(
+        user_id=str(admin_a.id),
+        tenant_id=str(tenant_a.id),
+        is_admin=True,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Update branding as admin
+    resp = await client.put(
+        "/api/v1/admin/branding",
+        json={"display_name": "Cache Invalidation Test"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    # Slug cache must be invalidated
+    assert await redis.get(slug_key) is None
 
 
 # ── 4. Admin Branding Endpoints Tests ─────────────────────────────────────────

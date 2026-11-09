@@ -195,6 +195,15 @@ async def update_tenant(
     if updates:
         await db.execute(update(Tenant).where(Tenant.id == tenant_id).values(**updates))
         await db.refresh(tenant)
+
+        # Invalidate branding cache on status change (e.g. suspended) or rename
+        if body.status is not None or body.name is not None:
+            try:
+                from app.core.redis_client import get_redis
+                redis = await get_redis()
+                await redis.delete(f"cache:branding:slug:{tenant.slug}")
+            except Exception:
+                pass
     return _to_tenant_response(tenant)
 
 

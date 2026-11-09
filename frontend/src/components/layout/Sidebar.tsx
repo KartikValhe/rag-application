@@ -20,6 +20,7 @@ import { useAuth } from "@/features/auth/AuthContext";
 import { usePermission } from "@/hooks/usePermission";
 import { Badge } from "@/components/ui/Badge";
 import { Can } from "@/components/auth/Can";
+import { useBranding } from "@/features/branding";
 
 export interface SidebarProps {
   isCollapsed: boolean;
@@ -53,6 +54,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const location = useLocation();
   const { user, logout } = useAuth();
   const { isAdmin, isTeacher, isStudent, can } = usePermission();
+  const { branding } = useBranding();
+  const [logoFailed, setLogoFailed] = React.useState(false);
 
   const navSections: NavSectionConfig[] = [
     {
@@ -166,17 +169,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Brand & Collapse Header */}
       <div className="flex items-center justify-between h-16 px-4 border-b border-border select-none">
         <div className="flex items-center space-x-3 overflow-hidden">
-          <div className="w-9 h-9 rounded-lg bg-primary text-primary-contrast flex items-center justify-center font-bold text-base shrink-0 shadow-sm">
-            R
-          </div>
+          {branding.logo_url && !logoFailed ? (
+            <img
+              src={branding.logo_url}
+              alt={branding.display_name}
+              className="w-9 h-9 object-contain rounded-lg shrink-0"
+              onError={() => setLogoFailed(true)}
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-lg bg-primary text-primary-foreground flex items-center justify-center font-bold text-base shrink-0 shadow-sm">
+              {branding.display_name ? branding.display_name.charAt(0).toUpperCase() : "R"}
+            </div>
+          )}
           {!isCollapsed && (
             <div className="flex flex-col min-w-0">
               <span className="font-bold text-sm tracking-tight text-text truncate">
-                RAG Academic
+                {branding.display_name || "Academic Portal"}
               </span>
-              <span className="text-[10px] uppercase font-semibold text-text-muted tracking-wider">
-                Multi-Tenant
-              </span>
+                <span className="text-[10px] uppercase font-semibold text-text-muted tracking-wider truncate">
+                  {branding.tagline || "Workspace"}
+                </span>
             </div>
           )}
         </div>
@@ -208,89 +220,89 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Navigation Links */}
-        <nav className="flex-1 overflow-y-auto scrollbar-none px-3 py-4 space-y-6" aria-label="Sidebar Navigation">
-          {visibleSections.map((sec, sIdx) => (
-            <div key={`sec-${sIdx}`} className="space-y-1">
-              {!isCollapsed && (
-                <div className="px-3 text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-2">
-                  {sec.title}
-                </div>
-              )}
-              <ul className="space-y-1">
-                {sec.items.map((item) => {
-                  const Icon = item.icon;
-                  const isActive = location.pathname === item.href;
-
-                  return (
-                    <Can key={item.href} permission={item.permission}>
-                      <li>
-                        <NavLink
-                          to={item.href}
-                          onClick={onCloseMobile}
-                          className={cn(
-                            "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all group relative",
-                            isActive
-                              ? "bg-primary/10 text-primary border-l-2 border-primary font-semibold"
-                              : "text-text-muted hover:text-text hover:bg-surface-hover"
-                          )}
-                          title={isCollapsed ? item.label : undefined}
-                        >
-                          <Icon
-                            className={cn(
-                              "w-5 h-5 shrink-0 transition-colors",
-                              isActive ? "text-primary" : "text-text-muted group-hover:text-text"
-                            )}
-                            aria-hidden="true"
-                          />
-                          {!isCollapsed && <span className="truncate flex-1">{item.label}</span>}
-                          {!isCollapsed && item.badge && (
-                            <Badge variant="primary" size="sm">
-                              {item.badge}
-                            </Badge>
-                          )}
-                        </NavLink>
-                      </li>
-                    </Can>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </nav>
-
-        {/* Left Bottom Corner: User Identity & Logout */}
-        <div className="p-3 border-t border-border bg-surface-muted/30">
-          <div className={cn("flex items-center", isCollapsed ? "justify-center" : "justify-between gap-2")}>
+      <nav className="flex-1 overflow-y-auto scrollbar-none px-3 py-4 space-y-6" aria-label="Sidebar Navigation">
+        {visibleSections.map((sec, sIdx) => (
+          <div key={`sec-${sIdx}`} className="space-y-1">
             {!isCollapsed && (
-              <div className="flex items-center space-x-2.5 min-w-0 flex-1">
-                <div className="w-8 h-8 rounded-full bg-surface border border-border flex items-center justify-center text-text font-medium shrink-0">
-                  <UserIcon className="w-4 h-4 text-text-muted" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-semibold text-text truncate">
-                    {user?.email || "User"}
-                  </p>
-                  <p className="text-[10px] text-text-muted capitalize">
-                    {isAdmin ? "Admin" : isTeacher ? "Teacher" : isStudent ? "Student" : "Member"}
-                  </p>
-                </div>
+              <div className="px-3 text-[11px] font-semibold text-text-muted uppercase tracking-wider mb-2">
+                {sec.title}
               </div>
             )}
+            <ul className="space-y-1">
+              {sec.items.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.href;
 
-            <button
-              type="button"
-              onClick={() => logout()}
-              className={cn(
-                "p-2 rounded-md text-text-muted hover:text-danger hover:bg-danger/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger cursor-pointer",
-                isCollapsed ? "w-full flex justify-center" : ""
-              )}
-              title="Log Out"
-              aria-label="Log Out"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
+                return (
+                  <Can key={item.href} permission={item.permission}>
+                    <li>
+                      <NavLink
+                        to={item.href}
+                        onClick={onCloseMobile}
+                        className={cn(
+                          "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all group relative",
+                          isActive
+                            ? "bg-primary/10 text-primary border-l-2 border-primary font-semibold"
+                            : "text-text-muted hover:text-text hover:bg-surface-hover"
+                        )}
+                        title={isCollapsed ? item.label : undefined}
+                      >
+                        <Icon
+                          className={cn(
+                            "w-5 h-5 shrink-0 transition-colors",
+                            isActive ? "text-primary" : "text-text-muted group-hover:text-text"
+                          )}
+                          aria-hidden="true"
+                        />
+                        {!isCollapsed && <span className="truncate flex-1">{item.label}</span>}
+                        {!isCollapsed && item.badge && (
+                          <Badge variant="primary" size="sm">
+                            {item.badge}
+                          </Badge>
+                        )}
+                      </NavLink>
+                    </li>
+                  </Can>
+                );
+              })}
+            </ul>
           </div>
+        ))}
+      </nav>
+
+      {/* Left Bottom Corner: User Identity & Logout */}
+      <div className="p-3 border-t border-border bg-surface-muted/30">
+        <div className={cn("flex items-center", isCollapsed ? "justify-center" : "justify-between gap-2")}>
+          {!isCollapsed && (
+            <div className="flex items-center space-x-2.5 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-full bg-surface border border-border flex items-center justify-center text-text font-medium shrink-0">
+                <UserIcon className="w-4 h-4 text-text-muted" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-text truncate">
+                  {user?.email || "User"}
+                </p>
+                <p className="text-[10px] text-text-muted capitalize">
+                  {isAdmin ? "Admin" : isTeacher ? "Teacher" : isStudent ? "Student" : "Member"}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={() => logout()}
+            className={cn(
+              "p-2 rounded-md text-text-muted hover:text-danger hover:bg-danger/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger cursor-pointer",
+              isCollapsed ? "w-full flex justify-center" : ""
+            )}
+            title="Log Out"
+            aria-label="Log Out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
+      </div>
     </div>
   );
 

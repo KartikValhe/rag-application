@@ -1,27 +1,76 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RAG Platform</title>
-    <!-- Prevent Theme Flash (FOUC): apply stored theme or OS preference before first render -->
-    <script>
-      (function() {
-        try {
-          const stored = localStorage.getItem("app_theme");
-          const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-          if (stored === "dark" || (!stored && prefersDark)) {
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG Platform</title>
+
+  <!-- Synchronous Boot Script: Prevent FOUC & Theme Flash -->
+  <script>
+    (function () {
+      try {
+          // 1. Theme mode (dark / light)
+          var storedTheme = localStorage.getItem("app_theme");
+          var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (storedTheme === "dark" || (!storedTheme && prefersDark)) {
             document.documentElement.classList.add("dark");
           } else {
             document.documentElement.classList.remove("dark");
           }
-        } catch (e) {}
-      })();
-    </script>
-  </head>
-  <body class="bg-background text-text min-h-screen">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+
+        // 2. Tenant slug resolution
+        var host = (window.location.hostname || "").toLowerCase();
+        var slug = "";
+        if (host.endsWith(".localhost")) {
+          var sub = host.slice(0, -".localhost".length);
+          if (sub && sub !== "www") slug = sub;
+        }
+        if (!slug) {
+          var parts = host.split(".");
+          if (parts.length > 2 && parts[0] !== "www") {
+            slug = parts[0];
+          }
+        }
+        if (!slug && window.location.search) {
+          var searchParams = new URLSearchParams(window.location.search);
+          slug = searchParams.get("tenant") || searchParams.get("tenant_slug") || "";
+        }
+        if (!slug) {
+          slug = localStorage.getItem("tenant_slug") || "acme";
+        }
+
+        // 3. Stored branding tokens (Synchronous zero-flash application)
+        var raw = localStorage.getItem("app_branding_" + slug);
+        if (raw) {
+          var parsed = JSON.parse(raw);
+          if (parsed && parsed.branding) {
+            if (parsed.branding.display_name) {
+              document.title = parsed.branding.display_name;
+            }
+            if (parsed.branding.favicon_url) {
+              var icon = document.querySelector("link[rel~='icon']");
+              if (icon) icon.href = parsed.branding.favicon_url;
+            }
+            if (parsed.css) {
+              var style = document.createElement("style");
+              style.id = "app-theme-tokens";
+              style.textContent = parsed.css;
+              document.head.appendChild(style);
+            }
+          }
+        }
+      } catch (e) {
+        // Fail gracefully in restricted environments (private browsing / quota)
+      }
+    })();
+  </script>
+</head>
+
+<body class="bg-background text-text min-h-screen">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
 </html>
