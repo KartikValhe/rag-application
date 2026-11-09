@@ -112,6 +112,10 @@ def _extract_slug(request: Request) -> str | None:
     if host == platform_domain:
         return None
 
+    # Subdomain of localhost: e.g. acme.localhost -> acme
+    if host.endswith(".localhost"):
+        return host[: -len(".localhost")]
+
     # Local dev: use X-Tenant-Slug header or ?tenant_slug= query param.
     if host in ("localhost", "127.0.0.1", "platform.local"):
         slug = request.headers.get("X-Tenant-Slug")

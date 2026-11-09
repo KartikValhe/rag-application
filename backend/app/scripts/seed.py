@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, TeacherAssignment
+from app.db.models.branding import TenantBranding
 from app.db.models.rbac import Permission, Role, RolePermission, UserRole
 from app.db.models.tenant import PlatformAdmin, Tenant
 from app.db.models.user import User
@@ -376,6 +377,39 @@ async def seed() -> None:
                             subject_id=math_id,
                         )
                     )
+
+            # Seed Tenant Branding
+            res_b = await session.execute(
+                select(TenantBranding).where(TenantBranding.tenant_id == tenant.id)
+            )
+            if not res_b.scalar_one_or_none():
+                acme_tokens = {
+                    "primary": "#2563eb",
+                    "secondary": "#475569",
+                    "accent": "#06b6d4",
+                    "radius": "md",
+                    "font_family": "system-ui",
+                }
+                default_tokens = {
+                    "primary": "#0d9488",
+                    "secondary": "#64748b",
+                    "accent": "#f59e0b",
+                    "radius": "lg",
+                    "font_family": "sans",
+                }
+                tokens = acme_tokens if slug == "acme" else default_tokens
+                session.add(
+                    TenantBranding(
+                        tenant_id=tenant.id,
+                        tokens=tokens,
+                        display_name=tenant.name,
+                        tagline=f"Empowering minds at {tenant.name}",
+                        footer_text=f"© 2026 {tenant.name}. All rights reserved.",
+                        support_email=f"support@{slug}.edu",
+                        version=1,
+                    )
+                )
+                print(f"[OK] Seeded branding for '{slug}'")
 
     await engine.dispose()
     print("\nPhase 2 seed completed successfully!")

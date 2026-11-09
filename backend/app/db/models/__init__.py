@@ -15,6 +15,7 @@ from app.db.models.academic import (
 from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
 from app.db.models.base import Base
+from app.db.models.branding import TenantBranding
 from app.db.models.rbac import (
     Permission,
     Role,
@@ -42,5 +43,5 @@ __all__ = [
     "Enrollment",
     "TeacherAssignment",
     "AuditLog",
+    "TenantBranding",
 ]
-

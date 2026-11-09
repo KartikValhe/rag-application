@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     CORS_ALLOWED_ORIGINS: str = ""  # Comma-separated list of explicit allowed origins
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"
+    UPLOAD_DIR: str = "uploads"
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property

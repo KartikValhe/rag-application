@@ -148,6 +148,26 @@ async def create_tenant(
     )
     db.add(tenant)
     await db.flush()
+
+    # Seed default branding for the new tenant within the same transaction.
+    # Set app.tenant_id locally so the RLS WITH CHECK clause allows the row.
+    from sqlalchemy import text
+    from app.db.models.branding import TenantBranding
+    from app.schemas.branding import DEFAULT_TOKENS
+
+    await db.execute(
+        text("SELECT set_config('app.tenant_id', :tid, true)"),
+        {"tid": str(tenant.id)},
+    )
+    branding = TenantBranding(
+        tenant_id=tenant.id,
+        tokens=DEFAULT_TOKENS,
+        display_name=tenant.name,
+        version=1,
+    )
+    db.add(branding)
+    await db.flush()
+
     return _to_tenant_response(tenant)
 
 

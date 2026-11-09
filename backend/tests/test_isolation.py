@@ -31,6 +31,7 @@ from app.db.models.academic import (
 )
 from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
+from app.db.models.branding import TenantBranding
 from app.db.models.rbac import (
     Permission,
     Role,
@@ -88,6 +89,16 @@ TENANT_TABLES = [
         "action": "iso:audit_test",
         "target_type": "user",
         "details": {"test": True},
+    }),
+    (TenantBranding, {
+        "tokens": lambda: {
+            "primary": "#2563eb",
+            "secondary": "#475569",
+            "accent": "#06b6d4",
+            "radius": "md",
+            "font_family": "system-ui",
+        },
+        "display_name": "Isolation Branding",
     }),
 ]
 
