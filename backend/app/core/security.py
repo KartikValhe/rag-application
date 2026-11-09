@@ -18,7 +18,9 @@ from typing import cast
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from jose import JWTError, jwt
+from fastapi import Request
+import jwt
+from jwt.exceptions import PyJWTError as JWTError
 
 from app.core.config import settings
 
@@ -123,9 +125,17 @@ def create_platform_access_token(*, platform_admin_id: str) -> str:
 def decode_access_token(token: str) -> dict[str, object]:
     """
     Decode and validate a tenant access token.
-    Raises jose.JWTError on any failure (expired, bad signature, wrong type).
+    Raises JWTError on any failure (expired, bad signature, wrong type).
     """
-    payload = cast(dict[str, object], jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM]))
+    payload = cast(
+        dict[str, object],
+        jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"require": ["exp"]},
+        ),
+    )
     if payload.get("type") != "access":
         raise JWTError("Wrong token type")
     return payload
@@ -133,10 +143,37 @@ def decode_access_token(token: str) -> dict[str, object]:
 
 def decode_platform_token(token: str) -> dict[str, object]:
     """Decode and validate a platform (superadmin) access token."""
-    payload = cast(dict[str, object], jwt.decode(token, settings.PLATFORM_SECRET_KEY, algorithms=[ALGORITHM]))
+    payload = cast(
+        dict[str, object],
+        jwt.decode(
+            token,
+            settings.PLATFORM_SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"require": ["exp"]},
+        ),
+    )
     if payload.get("type") != "platform_access":
         raise JWTError("Wrong token type")
     return payload
+
+
+# ── Network / Proxy helpers ──────────────────────────────────────────────────
+
+def get_client_ip(request: Request | None) -> str | None:
+    """
+    Extract client IP address from a request.
+    Only trusts X-Forwarded-For if settings.TRUST_PROXY is True;
+    otherwise falls back to request.client.host.
+    """
+    if request is None:
+        return None
+    if settings.TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return None
 
 
 # ── Refresh token helpers ────────────────────────────────────────────────────

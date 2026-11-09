@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
 
     # Platform (superadmin) engine connecting as app_platform role.
-    PLATFORM_DATABASE_URL: str = "postgresql+asyncpg://app_platform:platform_password@localhost:5433/ragplatform"
+    PLATFORM_DATABASE_URL: str
 
     # Direct (non-pooled) URL used exclusively by Alembic and long-running
     # worker processes that need session-mode semantics.
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     # ── Redis ───────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_PASSWORD: str = ""
 
     # ── JWT / Auth ──────────────────────────────────────────────────────────
     SECRET_KEY: str  # Signs tenant user JWTs.
@@ -47,7 +48,9 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     # Number of failed login attempts allowed before a 15-minute lockout.
     LOGIN_THROTTLE_MAX_ATTEMPTS: int = 5
+    LOGIN_THROTTLE_IP_MAX_ATTEMPTS: int = 50
     LOGIN_THROTTLE_WINDOW_SECONDS: int = 900  # 15 minutes
+    TRUST_PROXY: bool = False
 
     # ── Email ───────────────────────────────────────────────────────────────
     MAIL_HOST: str = "localhost"
@@ -84,8 +87,6 @@ class Settings(BaseSettings):
             origins.extend([
                 "http://localhost:5173",
                 "http://127.0.0.1:5173",
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
             ])
         # Return unique origins preserving order
         return list(dict.fromkeys(origins))
@@ -97,6 +98,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SECRET_KEY and PLATFORM_SECRET_KEY must be set to real secrets via environment variables."
             )
+        disallowed = {
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        }
+        if v.strip() in disallowed:
+            raise ValueError(
+                "SECRET_KEY and PLATFORM_SECRET_KEY cannot use previously committed insecure default keys."
+            )
         if len(v.strip()) < 32:
             raise ValueError(
                 "SECRET_KEY and PLATFORM_SECRET_KEY are too weak: must be at least 32 characters."
@@ -107,6 +116,19 @@ class Settings(BaseSettings):
     def _keys_must_differ(self) -> "Settings":
         if self.SECRET_KEY == self.PLATFORM_SECRET_KEY:
             raise ValueError("SECRET_KEY and PLATFORM_SECRET_KEY must be different.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_redis_security(self) -> "Settings":
+        if not self.is_development:
+            has_password = bool(self.REDIS_PASSWORD.strip())
+            if not has_password and "@" in self.REDIS_URL:
+                from urllib.parse import urlparse
+                parsed = urlparse(self.REDIS_URL)
+                if parsed.password:
+                    has_password = True
+            if not has_password:
+                raise ValueError("Redis password must be configured in non-development environments.")
         return self
 
 

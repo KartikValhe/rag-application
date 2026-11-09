@@ -37,9 +37,7 @@ export const adminApi = {
   acceptInvitation: async (
     payload: AcceptInvitationPayload
   ): Promise<{ message: string; user_id: string }> => {
-    const res = await apiClient.post("/admin/invitations/accept", null, {
-      params: payload,
-    });
+    const res = await apiClient.post("/admin/invitations/accept", payload);
     return res.data;
   },
 

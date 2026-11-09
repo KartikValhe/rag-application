@@ -191,6 +191,15 @@ async def bulk_import_users(
     Each row is processed independently; a failure on one row does not
     abort the others.  Returns one ImportRow per input row.
     """
+    MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB
+    MAX_ROWS = 500
+
+    if len(csv_content) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"code": "file_too_large", "message": "CSV file exceeds maximum limit of 2MB."},
+        )
+
     try:
         text = csv_content.decode("utf-8-sig")  # Handle BOM from Excel exports.
     except UnicodeDecodeError:
@@ -218,9 +227,16 @@ async def bulk_import_users(
             },
         )
 
+    rows_list = list(reader)
+    if len(rows_list) > MAX_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "too_many_rows", "message": f"CSV exceeds maximum limit of {MAX_ROWS} rows."},
+        )
+
     results: list[ImportRow] = []
 
-    for row_num, row in enumerate(reader, start=2):  # Row 1 is header.
+    for row_num, row in enumerate(rows_list, start=2):  # Row 1 is header.
         email = (row.get("email") or "").strip().lower()
         full_name = (row.get("full_name") or "").strip()
         role_name = (row.get("role_name") or "student").strip().lower()

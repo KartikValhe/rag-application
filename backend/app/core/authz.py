@@ -113,8 +113,14 @@ async def verify_scope(
         scope.class_id_param
     )
     if not class_id_raw:
-        # If the parameter isn't present in this request, scope check passes
-        return
+        # Fail closed: A scoped endpoint must provide the scoping parameter
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "scope_resolution_failed",
+                "message": f"Required scope parameter '{scope.class_id_param}' missing from request.",
+            },
+        )
 
     try:
         class_id = uuid.UUID(str(class_id_raw))
@@ -128,23 +134,31 @@ async def verify_scope(
     if class_res.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
 
-    # 2. If scope is CLASS_SUBJECT and subject_id is present, verify subject exists in this tenant
+    # 2. If scope is CLASS_SUBJECT, verify subject_id is present and exists in this tenant
     subject_id: uuid.UUID | None = None
     if scope.scope_type == ScopeType.CLASS_SUBJECT:
         subject_id_raw = request.path_params.get(
             scope.subject_id_param
         ) or request.query_params.get(scope.subject_id_param)
-        if subject_id_raw:
-            try:
-                subject_id = uuid.UUID(str(subject_id_raw))
-            except (ValueError, TypeError):
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
-
-            sub_res = await db.execute(
-                select(Subject.id).where(Subject.tenant_id == user.tenant_id, Subject.id == subject_id)
+        if not subject_id_raw:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "scope_resolution_failed",
+                    "message": f"Required scope parameter '{scope.subject_id_param}' missing from request.",
+                },
             )
-            if sub_res.scalar_one_or_none() is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+
+        try:
+            subject_id = uuid.UUID(str(subject_id_raw))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+
+        sub_res = await db.execute(
+            select(Subject.id).where(Subject.tenant_id == user.tenant_id, Subject.id == subject_id)
+        )
+        if sub_res.scalar_one_or_none() is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
 
     # Check user roles to determine assignment vs enrollment
     roles_res = await db.execute(
@@ -173,9 +187,6 @@ async def verify_scope(
             return
 
         if scope.scope_type == ScopeType.CLASS_SUBJECT:
-            if not subject_id:
-                return
-
             ta_res = await db.execute(
                 select(TeacherAssignment.id).where(
                     TeacherAssignment.tenant_id == user.tenant_id,

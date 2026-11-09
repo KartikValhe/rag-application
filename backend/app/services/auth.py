@@ -42,23 +42,42 @@ logger = structlog.get_logger(__name__)
 
 # ── Throttle helpers ─────────────────────────────────────────────────────────
 
-def _throttle_key(tenant_id: str, email: str) -> str:
+def _throttle_email_key(tenant_id: str, email: str) -> str:
     return f"throttle:login:{tenant_id}:{email.lower()}"
 
 
-async def _check_and_increment_throttle(tenant_id: str, email: str) -> None:
+def _throttle_ip_key(ip: str) -> str:
+    return f"throttle:login:ip:{ip}"
+
+
+async def _check_throttle(
+    tenant_id: str,
+    email: str,
+    ip: str | None = None,
+) -> None:
     """
-    Raise HTTP 429 if the user has exceeded the allowed failed-login attempts
-    within the sliding window.  Increments the counter on each call.
+    Raise HTTP 429 if the user or IP has exceeded the allowed failed-login attempts
+    within the sliding window. Does NOT increment counters.
     """
     redis = await get_redis()
-    key = _throttle_key(tenant_id, email)
-    count = await redis.incr(key)
-    if count == 1:
-        # First attempt — set the expiry window.
-        await redis.expire(key, settings.LOGIN_THROTTLE_WINDOW_SECONDS)
-    if count > settings.LOGIN_THROTTLE_MAX_ATTEMPTS:
-        ttl = await redis.ttl(key)
+
+    if ip:
+        ip_val = await redis.get(_throttle_ip_key(ip))
+        if ip_val and int(ip_val) >= settings.LOGIN_THROTTLE_IP_MAX_ATTEMPTS:
+            ttl = await redis.ttl(_throttle_ip_key(ip))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "ip_throttled",
+                    "message": "Too many failed login attempts from this IP. Try again later.",
+                    "retry_after_seconds": max(ttl, 0),
+                },
+                headers={"Retry-After": str(max(ttl, 0))},
+            )
+
+    email_val = await redis.get(_throttle_email_key(tenant_id, email))
+    if email_val and int(email_val) >= settings.LOGIN_THROTTLE_MAX_ATTEMPTS:
+        ttl = await redis.ttl(_throttle_email_key(tenant_id, email))
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
@@ -70,10 +89,38 @@ async def _check_and_increment_throttle(tenant_id: str, email: str) -> None:
         )
 
 
-async def _clear_throttle(tenant_id: str, email: str) -> None:
-    """Clear the throttle counter after a successful login."""
+async def _record_login_failure(
+    tenant_id: str,
+    email: str,
+    ip: str | None = None,
+) -> None:
+    """Increment failed login counters for the IP and email."""
     redis = await get_redis()
-    await redis.delete(_throttle_key(tenant_id, email))
+    if ip:
+        ip_key = _throttle_ip_key(ip)
+        ip_count = await redis.incr(ip_key)
+        if ip_count == 1:
+            await redis.expire(ip_key, settings.LOGIN_THROTTLE_WINDOW_SECONDS)
+
+    email_key = _throttle_email_key(tenant_id, email)
+    count = await redis.incr(email_key)
+    if count == 1:
+        await redis.expire(email_key, settings.LOGIN_THROTTLE_WINDOW_SECONDS)
+
+
+async def _check_and_increment_throttle(
+    tenant_id: str,
+    email: str,
+    ip: str | None = None,
+) -> None:
+    """Deprecated alias for backwards compatibility."""
+    await _check_throttle(tenant_id, email, ip)
+
+
+async def _clear_throttle(tenant_id: str, email: str) -> None:
+    """Clear the email throttle counter after a successful login."""
+    redis = await get_redis()
+    await redis.delete(_throttle_email_key(tenant_id, email))
 
 
 # ── Tenant lookup ────────────────────────────────────────────────────────────
@@ -182,6 +229,7 @@ async def login_user(
     email: str,
     password: str,
     user_agent: str | None,
+    client_ip: str | None = None,
     db: AsyncSession,
 ) -> tuple[User, str, str]:
     """
@@ -189,7 +237,7 @@ async def login_user(
     Raises 401 on bad credentials, 429 on throttle, 403 on inactive account.
     """
     # Throttle check runs BEFORE the DB query so attackers can't probe timing.
-    await _check_and_increment_throttle(tenant_id, email)
+    await _check_throttle(tenant_id, email, ip=client_ip)
 
     result = await db.execute(select(User).where(User.email == email.lower()))
     user = result.scalar_one_or_none()
@@ -197,6 +245,7 @@ async def login_user(
     if user is None or user.password_hash is None or not verify_password(
         password, user.password_hash
     ):
+        await _record_login_failure(tenant_id, email, ip=client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_credentials", "message": "Invalid email or password."},
@@ -278,7 +327,10 @@ async def refresh_access_token(
 ) -> tuple[str, str]:
     """
     Validate the refresh token, rotate it, and return a new (access, refresh) pair.
-    Old refresh token is revoked.  Raises 401 on any invalid state.
+    Rotated refresh tokens are kept as revoked rows.
+    If a revoked token is replayed outside the 10-second grace window,
+    all sessions for that user are deleted (theft detection).
+    Raises 401 on any invalid state.
     """
     hashed = hash_refresh_token(raw_refresh_token)
     result = await db.execute(
@@ -289,26 +341,65 @@ async def refresh_access_token(
     )
     token_row = result.scalar_one_or_none()
 
-    expires_at = token_row.expires_at if token_row else None
-    if expires_at is not None and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
 
-    if (
-        token_row is None
-        or token_row.revoked
-        or (expires_at is not None and expires_at < datetime.now(UTC))
-    ):
+    if token_row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_refresh_token", "message": "Session expired."},
         )
 
-    # Revoke old token (rotation).
-    await db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.id == token_row.id)
-        .values(revoked=True)
-    )
+    expires_at = token_row.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+
+    if expires_at is not None and expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_refresh_token", "message": "Session expired."},
+        )
+
+    if token_row.revoked:
+        revoked_at = token_row.revoked_at
+        if revoked_at is not None and revoked_at.tzinfo is None:
+            revoked_at = revoked_at.replace(tzinfo=UTC)
+
+        # 10-second grace window for concurrent tab refreshes
+        is_within_grace = (
+            revoked_at is not None
+            and (now - revoked_at) <= timedelta(seconds=10)
+        )
+
+        if not is_within_grace:
+            # Token reuse detected! Revoke all tokens for this user
+            await db.execute(
+                delete(RefreshToken).where(
+                    RefreshToken.tenant_id == token_row.tenant_id,
+                    RefreshToken.user_id == token_row.user_id,
+                )
+            )
+            await db.commit()  # Ensure session revocation persists before raising exception
+            logger.warning(
+                "refresh_token_reuse_detected",
+                user_id=str(token_row.user_id),
+                tenant_id=tenant_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "token_reused",
+                    "message": "Revoked refresh token reused; all sessions terminated.",
+                },
+            )
+        # Within grace window: allow concurrent tab refresh to proceed
+
+    # Revoke old token on first rotation
+    if not token_row.revoked:
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.id == token_row.id)
+            .values(revoked=True, revoked_at=now)
+        )
 
     # Fetch user to include current is_admin flag in new token.
     user_result = await db.execute(
@@ -367,15 +458,20 @@ async def logout_user(
     raw_refresh_token: str,
     db: AsyncSession,
 ) -> None:
-    """Revoke the specific refresh token used for this session."""
+    """Revoke the specific refresh token used for this session (preserve row)."""
     hashed = hash_refresh_token(raw_refresh_token)
+    now = datetime.now(UTC)
     await db.execute(
         update(RefreshToken)
         .where(
             RefreshToken.token_hash == hashed,
             RefreshToken.tenant_id == uuid.UUID(tenant_id),
         )
-        .values(revoked=True)
+        .values(
+            revoked=True,
+            revoked_at=now,
+            expires_at=now - timedelta(seconds=1),
+        )
     )
 
 

@@ -69,6 +69,10 @@ SYSTEM_ROLES = {
 
 
 async def seed() -> None:
+    if settings.ENVIRONMENT.lower() != "development":
+        raise RuntimeError(
+            f"Seed script refused to run: ENVIRONMENT is '{settings.ENVIRONMENT}', but must be 'development'."
+        )
     print("Connecting to database...")
     engine = create_async_engine(
         settings.MIGRATION_DATABASE_URL,

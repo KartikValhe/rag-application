@@ -26,7 +26,7 @@ from app.api.v1.router import router as v1_router
 from app.core.authz import public_endpoint
 from app.core.config import settings
 from app.core.logging import configure_logging
-from app.core.middleware import TenantResolutionMiddleware
+from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
 from app.core.redis_client import close_redis, get_redis
 
 
@@ -59,6 +59,7 @@ app = FastAPI(
 # Tenant resolution must run before any route handler so that context vars
 # (request_id, tenant_slug) are set when route dependencies execute.
 app.add_middleware(TenantResolutionMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Configure CORS with an explicit origin whitelist
 app.add_middleware(
@@ -71,6 +72,7 @@ app.add_middleware(
         "Authorization",
         "X-Tenant-Slug",
         "X-Request-ID",
+        "X-Requested-With",
         "Accept",
         "Origin",
     ],

@@ -50,10 +50,15 @@ export const getTenantSlug = (): string => {
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1",
   withCredentials: true, // Sends and receives HttpOnly cookies (refresh_token)
+  headers: {
+    "X-Requested-With": "XMLHttpRequest",
+  },
 });
+apiClient.defaults.headers.common["X-Requested-With"] = "XMLHttpRequest";
 
 // Request interceptor: attach bearer token and tenant header
 apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  config.headers.set("X-Requested-With", "XMLHttpRequest");
   // If request is directed to /platform, use platformToken
   const isPlatform = config.url?.includes("/platform");
   const token = isPlatform ? getPlatformToken() : getAccessToken();

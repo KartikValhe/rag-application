@@ -18,12 +18,11 @@ from typing import Annotated
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import set_request_context
-from app.core.security import decode_access_token, decode_platform_token
+from app.core.security import JWTError, decode_access_token, decode_platform_token
 from app.core.tenant_db import get_platform_session, tenant_session_context
 from app.db.engine import SessionLocal
 from app.db.models.tenant import PlatformAdmin, Tenant
@@ -79,23 +78,34 @@ async def _resolve_tenant_from_jwt(
             detail={"code": "invalid_token", "message": "Missing tenant_id claim."},
         )
 
-    # Validate host ↔ JWT tenant match (skip in dev when no slug is set).
+    try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_token", "message": "Invalid tenant_id."},
+        )
+
+    # Validate tenant exists and is active on every authenticated request
     host_slug: str | None = getattr(request.state, "tenant_slug", None)
-    if host_slug:
-        # Look up the slug → id mapping to compare.
-        async with SessionLocal() as db, db.begin():
-            result = await db.execute(
-                select(Tenant).where(Tenant.slug == host_slug, Tenant.status == "active")
+    async with SessionLocal() as db, db.begin():
+        result = await db.execute(
+            select(Tenant).where(Tenant.id == tenant_uuid)
+        )
+        tenant = result.scalar_one_or_none()
+        if tenant is None or tenant.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "tenant_inactive", "message": "Tenant is suspended or inactive."},
             )
-            tenant = result.scalar_one_or_none()
-            if tenant is None or str(tenant.id) != tenant_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "code": "tenant_mismatch",
-                        "message": "Token was issued for a different tenant.",
-                    },
-                )
+        if host_slug and tenant.slug != host_slug:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "tenant_mismatch",
+                    "message": "Token was issued for a different tenant.",
+                },
+            )
 
     # Store tenant_id in context so logging and downstream code can read it.
     set_request_context(

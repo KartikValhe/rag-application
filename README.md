@@ -117,6 +117,36 @@ All accounts are pre-seeded via `app.scripts.seed`:
 
 ---
 
+## 🚀 Deployment Notes
+
+When deploying to staging or production environments, observe the following mandatory operational requirements:
+
+1. **Reverse Proxy & Load Balancer Trust (`TRUST_PROXY`):**
+   - When deploying behind a reverse proxy, CDN, or load balancer (e.g. AWS ALB, Cloudflare, NGINX), set `TRUST_PROXY=true` in the environment so that client IP addresses are accurately extracted from `X-Forwarded-For`.
+   - In direct or local development setups, leave `TRUST_PROXY=false` (default) to avoid IP address spoofing in audit logs and throttle counters.
+
+2. **Secrets Management:**
+   - Never commit or store production secrets in `.env` files or repository configs.
+   - All secrets (`SECRET_KEY`, `PLATFORM_SECRET_KEY`, `PLATFORM_DATABASE_URL`, `DATABASE_URL`, `REDIS_PASSWORD`) must be injected at runtime via a dedicated secrets manager (e.g., AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault).
+   - In non-development environments (`ENVIRONMENT!=development`), the backend enforces that `SECRET_KEY` and `PLATFORM_SECRET_KEY` differ and are >= 32 characters, and `REDIS_PASSWORD` (or authenticated `rediss://` URL) is strictly required.
+
+3. **Database Migrations:**
+   - Execute database migrations on deploy before starting web workers:
+     ```bash
+     alembic upgrade head
+     ```
+   - Migration `0003_refresh_token_revoked_at` must run to establish the `revoked_at` column required for refresh-token theft detection and grace periods.
+
+4. **Superadmin Account Provisioning:**
+   - Initial superadmin credentials are not seeded automatically in production.
+   - Run the dedicated CLI command once per environment to provision the platform superadmin:
+     ```bash
+     python -m app.scripts.create_superadmin --email "superadmin@yourdomain.com"
+     ```
+   - Passwords must meet the strong password policy (at least 12 characters, uppercase, lowercase, digit, and special symbol).
+
+---
+
 ## 🧪 Running Automated Tests
 
 Run backend test suite:

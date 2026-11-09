@@ -20,7 +20,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AdminUser, TenantDB
@@ -102,16 +102,17 @@ async def list_users(
     limit: int = Query(50, ge=1, le=200),
 ) -> UserListResponse:
     """List all users in this tenant."""
-    query = select(User)
+    query = select(User).where(User.tenant_id == admin.tenant_id)
     if status_filter:
         query = query.where(User.status == status_filter)
     result = await db.execute(query.offset(skip).limit(limit))
     users = result.scalars().all()
     # Total count without pagination.
-    count_result = await db.execute(
-        select(User) if not status_filter else select(User).where(User.status == status_filter)
-    )
-    total = len(count_result.scalars().all())
+    count_stmt = select(func.count()).select_from(User).where(User.tenant_id == admin.tenant_id)
+    if status_filter:
+        count_stmt = count_stmt.where(User.status == status_filter)
+    count_result = await db.execute(count_stmt)
+    total = count_result.scalar_one()
     return UserListResponse(
         items=[_to_user_response(u) for u in users],
         total=total,
@@ -163,11 +164,8 @@ async def invite_user(
 
 
 @router.post("/invitations/accept", response_model=dict, dependencies=[Depends(public_endpoint())])
-@router.get("/invitations/accept", response_model=dict, dependencies=[Depends(public_endpoint())])
 async def accept_invitation_route(
-    token: str = Query(...),
-    full_name: str = Query(..., min_length=1),
-    password: str = Query(..., min_length=8),
+    body: AcceptInvitationRequest,
     platform_db: AsyncSession = Depends(get_platform_session),
 ) -> dict[str, str]:
     """
@@ -178,7 +176,7 @@ async def accept_invitation_route(
     from app.core.tenant_db import tenant_session_context
     from app.db.models.auth import Invitation
 
-    token_h = hash_email_token(token)
+    token_h = hash_email_token(body.token)
     result = await platform_db.execute(
         select(Invitation).where(Invitation.token_hash == token_h)
     )
@@ -191,7 +189,7 @@ async def accept_invitation_route(
 
     async with tenant_session_context(str(invitation.tenant_id)) as tenant_db:
         user = await accept_invitation(
-            raw_token=token, full_name=full_name, password=password, db=tenant_db
+            raw_token=body.token, full_name=body.full_name, password=body.password, db=tenant_db
         )
     return {"message": "Account created. You can now log in.", "user_id": str(user.id)}
 
@@ -210,6 +208,12 @@ async def import_users(
             detail={"code": "invalid_file_type", "message": "File must be a .csv."},
         )
     contents = await file.read()
+    MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB
+    if len(contents) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"code": "file_too_large", "message": "CSV file exceeds maximum limit of 2MB."},
+        )
 
     tenant_result = await platform_db.execute(
         select(Tenant).where(Tenant.id == admin.tenant_id)
@@ -269,9 +273,13 @@ async def list_pending_approvals(
     admin: AdminUser,
     db: TenantDB,
 ) -> UserListResponse:
-    result = await db.execute(select(User).where(User.status == "pending"))
+    query = select(User).where(User.tenant_id == admin.tenant_id, User.status == "pending")
+    result = await db.execute(query)
     users = result.scalars().all()
-    return UserListResponse(items=[_to_user_response(u) for u in users], total=len(users))
+    count_stmt = select(func.count()).select_from(User).where(User.tenant_id == admin.tenant_id, User.status == "pending")
+    count_result = await db.execute(count_stmt)
+    total = count_result.scalar_one()
+    return UserListResponse(items=[_to_user_response(u) for u in users], total=total)
 
 
 @router.post("/pending-approvals/{user_id}/approve", response_model=UserResponse, dependencies=[Depends(require("user:manage"))])

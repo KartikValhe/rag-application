@@ -149,6 +149,7 @@ def upgrade() -> None:
         sa.Column("token_hash", sa.Text, nullable=False, unique=True),
         sa.Column("expires_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("revoked", sa.Boolean, nullable=False, server_default="false"),
+        sa.Column("revoked_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
         sa.Column("user_agent", sa.Text, nullable=True),
@@ -226,20 +227,6 @@ def upgrade() -> None:
             USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
             WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
     """)
-
-    # ── Seed a default superadmin ─────────────────────────────────────────────
-    # Password: "SuperAdmin123!" — MUST be changed immediately after first login.
-    # Hash generated with argon2id.
-    op.execute("""
-        INSERT INTO app.platform_admins (email, full_name, password_hash)
-        VALUES (
-            'superadmin@platform.local',
-            'Super Admin',
-            '$argon2id$v=19$m=65536,t=2,p=2$nTzgTDRdS7jKgzIIKzOIrA$jYijyrI44s62hU7pxGtkm4A7OS4757eWyfMDxz11D2s'
-        )
-        ON CONFLICT (email) DO NOTHING
-    """)
-
 
 def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS app.email_tokens CASCADE")

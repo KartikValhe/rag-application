@@ -102,7 +102,7 @@ Student message
 |-------|----------|----------|
 | Async jobs | **ARQ** (Redis-backed, async-native, fits FastAPI). Alternative: Celery | ARQ is lighter but smaller ecosystem; Celery is heavier but battle-tested |
 | ORM / migrations | SQLAlchemy 2.0 (async) + Alembic | Async SQLAlchemy has sharp edges with RLS session handling; wrap it in one helper |
-| Auth | Short-lived JWT access token (10–15 min) + rotating refresh token (stored hashed, revocable via Redis/DB) | More moving parts than session cookies, but works for SPA + future mobile **Supabase Auth is deliberately not used in v1** (see 1.6). |
+| Auth | Short-lived JWT access token (10–15 min) + rotating refresh token (stored hashed, revocable via Redis/DB) | More moving parts than session cookies, but works for SPA + future mobile **Supabase Auth is deliberately not used in v1** (see 1.6). **Known trade-off:** Access tokens embed a roles and permissions snapshot; permission changes take up to 15 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`) to reach already-issued access tokens unless sessions are rotated or revoked. |
 | LLM access | Provider-agnostic `LLMClient` + `Embedder` interfaces; model names in config | One more abstraction, but lets you change models/vendors and run offline eval cheaply |
 | File storage | **Supabase Storage** (private buckets, accessed only by the backend; wrapped in an `ObjectStore` interface) | One less service to run, but plan limits (file size, storage) apply; the interface keeps S3/R2 as a drop-in alternative |
 | API contract | FastAPI generates OpenAPI → `openapi-typescript` generates TS types/client | Needs a CI step, but removes a whole class of frontend/backend drift bugs |

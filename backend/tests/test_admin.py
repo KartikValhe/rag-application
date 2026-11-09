@@ -123,8 +123,20 @@ async def test_invite_user_and_accept(
     invitation.token_hash = hash_email_token(test_raw_token)
     await raw_db.commit()
 
-    accept_resp = await client.post(
+    # GET method must be rejected with 405 Method Not Allowed
+    get_resp = await client.get(
         f"/api/v1/admin/invitations/accept?token={test_raw_token}&full_name=Accepted+User&password=Password123!",
+    )
+    assert get_resp.status_code == 405
+
+    # POST with JSON body succeeds
+    accept_resp = await client.post(
+        "/api/v1/admin/invitations/accept",
+        json={
+            "token": test_raw_token,
+            "full_name": "Accepted User",
+            "password": "Password123!",
+        },
     )
     assert accept_resp.status_code == 200
 

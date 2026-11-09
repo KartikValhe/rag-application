@@ -235,7 +235,7 @@ async def test_refresh_rotates_token(
 
     refresh_resp = await client.post(
         "/api/v1/auth/refresh",
-        headers={"X-Tenant-Slug": tenant_a.slug},
+        headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
         cookies=login_resp.cookies,
     )
     assert refresh_resp.status_code == 200
@@ -259,7 +259,7 @@ async def test_logout_clears_session(
 
     logout_resp = await client.post(
         "/api/v1/auth/logout",
-        headers={"X-Tenant-Slug": tenant_a.slug},
+        headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
         cookies=login_resp.cookies,
     )
     assert logout_resp.status_code == 204
@@ -267,7 +267,7 @@ async def test_logout_clears_session(
     # Using the old refresh cookie should now fail.
     refresh_resp = await client.post(
         "/api/v1/auth/refresh",
-        headers={"X-Tenant-Slug": tenant_a.slug},
+        headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
         cookies=login_resp.cookies,
     )
     assert refresh_resp.status_code == 401

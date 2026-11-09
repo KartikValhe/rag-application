@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import get_client_ip
 from app.db.models.audit import AuditLog
 
 # Keys that must NEVER be written to the audit log
@@ -64,11 +65,7 @@ async def record_audit_event(
     request_id = None
 
     if request:
-        ip_address = request.client.host if request.client else None
-        # Check X-Forwarded-For if behind a proxy
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            ip_address = forwarded.split(",")[0].strip()
+        ip_address = get_client_ip(request)
         request_id = getattr(request.state, "request_id", None) or request.headers.get("x-request-id")
 
     safe_details = sanitize_audit_details(details or {})

@@ -24,11 +24,16 @@ async def get_redis() -> aioredis.Redis:  # type: ignore[type-arg]
     """
     global _redis_pool
     if _redis_pool is None:
+        kwargs: dict[str, object] = {
+            "encoding": "utf-8",
+            "decode_responses": True,
+            "max_connections": 20,
+        }
+        if settings.REDIS_PASSWORD:
+            kwargs["password"] = settings.REDIS_PASSWORD
         _redis_pool = aioredis.from_url(
             settings.REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            max_connections=20,
+            **kwargs,
         )
     return _redis_pool
 

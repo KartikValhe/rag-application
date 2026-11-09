@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.authz import public_endpoint
 from app.core.config import settings
-from app.core.security import hash_email_token, hash_refresh_token
+from app.core.security import get_client_ip, hash_email_token, hash_refresh_token
 from app.core.tenant_db import get_platform_session, tenant_session_context
 from app.db.models.auth import EmailToken, RefreshToken
 from app.db.models.tenant import Tenant
@@ -61,6 +61,16 @@ def _clear_refresh_cookie(response: Response) -> None:
         secure=not settings.is_development,
         samesite="lax",
     )
+
+
+def _verify_csrf_header(request: Request) -> None:
+    """Enforce custom header presence for CSRF defense on cookie-authenticated requests."""
+    val = request.headers.get("x-requested-with", "")
+    if val.lower() != "xmlhttprequest":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "csrf_detected", "message": "Missing or invalid CSRF protection header."},
+        )
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -163,6 +173,7 @@ async def login(
     platform_db: AsyncSession = Depends(get_platform_session),
 ) -> LoginResponse:
     """Login and receive access token (body) + refresh token (HttpOnly cookie)."""
+    client_ip = get_client_ip(request)
     tenant = await _get_tenant(body.tenant_slug, platform_db)
     async with tenant_session_context(str(tenant.id)) as tenant_db:
         user, access_token, raw_refresh = await login_user(
@@ -170,6 +181,7 @@ async def login(
             email=body.email,
             password=body.password,
             user_agent=request.headers.get("user-agent"),
+            client_ip=client_ip,
             db=tenant_db,
         )
     # The refresh token cookie stores "{tenant_id}:{token}" so rotation can run under tenant RLS
@@ -189,6 +201,8 @@ async def refresh(
     platform_db: AsyncSession = Depends(get_platform_session),
 ) -> RefreshResponse:
     """Rotate the refresh token and return a new access token."""
+    _verify_csrf_header(request)
+
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -244,6 +258,8 @@ async def logout(
     refresh_token: Annotated[str | None, Cookie(alias=REFRESH_COOKIE)] = None,
 ) -> None:
     """Revoke the refresh token and clear the cookie."""
+    _verify_csrf_header(request)
+
     if refresh_token:
         tenant_id_str, raw_token = (
             refresh_token.split(":", 1) if ":" in refresh_token else ("", refresh_token)
