@@ -66,113 +66,125 @@ export const RegisterPage: React.FC = () => {
         typeof detail === "object" && detail?.message
           ? detail.message
           : typeof detail === "string"
-          ? detail
-          : "Registration failed. Organization may be invite-only or email is in use.";
+            ? detail
+            : "Registration failed. Organization may be invite-only or email is in use.";
       setErrorMsg(message);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12 relative">
-      <div className="fixed top-4 right-4 z-50">
-        <ThemeToggle />
-      </div>
-      <div className="w-full max-w-md space-y-6 bg-surface p-8 rounded-xl border border-border shadow-sm">
-        <div className="text-center space-y-2">
-          <h2 className="text-2xl font-bold tracking-tight text-text">Create Account</h2>
-          <p className="text-sm text-text-muted">
-            Join your organization's learning workspace
-          </p>
-        </div>
-
-        {errorMsg && (
-          <Alert variant="danger" title="Registration Error">
-            {errorMsg}
-          </Alert>
-        )}
-
-        {successInfo ? (
-          <div className="space-y-4">
-            <Alert
-              variant={successInfo.status === "pending" ? "warning" : "success"}
-              title={
-                successInfo.status === "pending"
-                  ? "Registration Submitted"
-                  : "Account Created"
-              }
-            >
-              {successInfo.message}
-            </Alert>
-            <div className="pt-2">
-              <Link to="/login">
-                <Button variant="outline" className="w-full">
-                  Return to Sign In
-                </Button>
-              </Link>
-            </div>
+        <div className="min-h-dvh flex flex-col items-center justify-center bg-background px-4 py-8 sm:py-12 relative w-full">
+          <div className="absolute top-4 right-4 z-20">
+            <ThemeToggle />
           </div>
-        ) : (
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-            <Input
-              label="Organization ID (Slug)"
-              placeholder="e.g. acme-college"
-              error={errors.tenantSlug?.message}
-              {...register("tenantSlug")}
-            />
 
-            <Input
-              label="Full Name"
-              placeholder="Jane Doe"
-              error={errors.fullName?.message}
-              {...register("fullName")}
-            />
+            <div className="w-full max-w-md space-y-6 bg-surface p-6 sm:p-8 rounded-xl border border-border shadow-sm">
+              <div className="text-center space-y-2">
+                <h2 className="text-2xl font-bold tracking-tight text-text">Create Account</h2>
+                <p className="text-sm text-text-muted">
+                  Join your organization's learning workspace
+                </p>
+              </div>
 
-            <Input
-              label="Email Address"
-              type="email"
-              placeholder="jane@institution.edu"
-              error={errors.email?.message}
-              {...register("email")}
-            />
+              {errorMsg && (
+                <Alert variant="danger" title="Registration Error">
+                  {errorMsg}
+                </Alert>
+              )}
 
-            <Input
-              label="Password"
-              type="password"
-              placeholder="••••••••"
-              error={errors.password?.message}
-              {...register("password")}
-            />
+              {successInfo ? (
+                <div className="space-y-4">
+                  <Alert
+                    variant={successInfo.status === "pending" ? "warning" : "success"}
+                    title={
+                      successInfo.status === "pending"
+                        ? "Registration Submitted"
+                        : "Account Created"
+                    }
+                  >
+                    {successInfo.message}
+                  </Alert>
+                  <div className="pt-2">
+                      <Link to="/login" className="block w-full">
+                        <Button variant="outline" className="w-full">
+                          Return to Sign In
+                        </Button>
+                      </Link>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+                  <Input
+                    label="Organization ID (Slug)"
+                    placeholder="e.g. acme-college"
+                    autoComplete="organization"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck="false"
+                    error={errors.tenantSlug?.message}
+                    {...register("tenantSlug")}
+                  />
 
-            <Input
-              label="Confirm Password"
-              type="password"
-              placeholder="••••••••"
-              error={errors.confirmPassword?.message}
-              {...register("confirmPassword")}
-            />
+                  <Input
+                    label="Full Name"
+                    placeholder="Jane Doe"
+                    autoComplete="name"
+                    autoCapitalize="words"
+                    error={errors.fullName?.message}
+                    {...register("fullName")}
+                  />
 
-            <Button
-              type="submit"
-              className="w-full"
-              size="lg"
-              isLoading={isSubmitting}
-            >
-              Register
-            </Button>
-          </form>
-        )}
+                  <Input
+                    label="Email Address"
+                    type="email"
+                    inputMode="email"
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    placeholder="jane@institution.edu"
+                    error={errors.email?.message}
+                    {...register("email")}
+                  />
 
-        <div className="text-center text-xs text-text-muted">
-          Already have an account?{" "}
-          <Link
-            to="/login"
-            className="text-primary hover:text-primary-hover font-semibold"
-          >
-            Sign In
-          </Link>
-        </div>
-      </div>
-    </div>
-  );
+                  <Input
+                    label="Password"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="••••••••"
+                    error={errors.password?.message}
+                    {...register("password")}
+                  />
+
+                  <Input
+                    label="Confirm Password"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="••••••••"
+                    error={errors.confirmPassword?.message}
+                    {...register("confirmPassword")}
+                  />
+
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    size="lg"
+                    isLoading={isSubmitting}
+                  >
+                    Register
+                  </Button>
+                </form>
+              )}
+
+                <div className="text-center text-xs text-text-muted min-h-[44px] flex items-center justify-center">
+                  Already have an account?{" "}
+                  <Link
+                    to="/login"
+                    className="text-primary hover:text-primary-hover font-semibold ml-1 inline-flex items-center"
+                  >
+                    Sign In
+                  </Link>
+                </div>
+              </div>
+            </div>
+            );
 };
-

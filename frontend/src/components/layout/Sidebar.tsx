@@ -22,12 +22,15 @@ import { usePermission } from "@/hooks/usePermission";
 import { Badge } from "@/components/ui/Badge";
 import { Can } from "@/components/auth/Can";
 import { useBranding } from "@/features/branding";
+import { useScrollLock } from "@/hooks/useScrollLock";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 export interface SidebarProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   isMobileOpen: boolean;
   onCloseMobile: () => void;
+  hamburgerRef?: React.RefObject<HTMLButtonElement>;
 }
 
 interface NavItemConfig {
@@ -51,12 +54,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse,
   isMobileOpen,
   onCloseMobile,
+  hamburgerRef,
 }) => {
   const location = useLocation();
   const { user, logout } = useAuth();
   const { isAdmin, isTeacher, isStudent, can } = usePermission();
   const { branding } = useBranding();
   const [logoFailed, setLogoFailed] = React.useState(false);
+  const drawerRef = React.useRef<HTMLElement | null>(null);
+
+  // Lock body scroll on mobile when drawer is open
+  useScrollLock(isMobileOpen);
+
+  // Trap focus and handle Escape key to close drawer, returning focus to hamburger
+  useFocusTrap(drawerRef, isMobileOpen, {
+    onClose: onCloseMobile,
+    returnFocusRef: hamburgerRef,
+  });
+
+  // Automatically close drawer on route change
+  React.useEffect(() => {
+    if (isMobileOpen) {
+      onCloseMobile();
+    }
+  }, [location.pathname]);
 
   const navSections: NavSectionConfig[] = [
     {
@@ -215,12 +236,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </button>
 
-        {/* Mobile close button */}
+        {/* Mobile close button: 44px min touch target */}
         <button
           type="button"
           onClick={onCloseMobile}
-          className="lg:hidden p-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          aria-label="Close sidebar"
+          className="lg:hidden min-w-[44px] min-h-[44px] flex items-center justify-center rounded-md text-text-muted hover:text-text hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer shrink-0"
+          aria-label="Close navigation"
         >
           <X className="w-5 h-5" />
         </button>
@@ -247,7 +268,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         to={item.href}
                         onClick={onCloseMobile}
                         className={cn(
-                          "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all group relative",
+                          "flex items-center gap-3 px-3 py-2.5 min-h-[44px] rounded-md text-sm font-medium transition-all group relative",
                           isActive
                             ? "bg-primary/10 text-primary border-l-2 border-primary font-semibold"
                             : "text-text-muted hover:text-text hover:bg-surface-hover"
@@ -300,8 +321,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             type="button"
             onClick={() => logout()}
             className={cn(
-              "p-2 rounded-md text-text-muted hover:text-danger hover:bg-danger/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger cursor-pointer",
-              isCollapsed ? "w-full flex justify-center" : ""
+              "min-w-[44px] min-h-[44px] flex items-center justify-center rounded-md text-text-muted hover:text-danger hover:bg-danger/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger cursor-pointer",
+              isCollapsed ? "w-full" : ""
             )}
             title="Log Out"
             aria-label="Log Out"
@@ -326,8 +347,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Mobile Drawer */}
       <aside
+        ref={drawerRef}
         className={cn(
-          "fixed inset-y-0 left-0 z-50 w-72 lg:hidden transform transition-transform duration-200 ease-in-out",
+          "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] lg:hidden transform transition-transform duration-200 ease-in-out shadow-2xl",
           isMobileOpen ? "translate-x-0" : "-translate-x-full"
         )}
         aria-label="Mobile Navigation"

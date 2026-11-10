@@ -135,7 +135,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return a cached singleton Settings instance."""
-    return Settings()
+    return Settings()  # type: ignore[call-arg]
 
 
 # Module-level convenience alias used throughout the codebase.

@@ -77,11 +77,12 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-background px-4 py-12 relative">
-        <div className="fixed top-4 right-4 z-50">
-          <ThemeToggle />
-        </div>
-        <div className="w-full max-w-md space-y-6 bg-surface p-8 rounded-xl border border-border shadow-sm">
+        <div className="min-h-dvh flex flex-col items-center justify-center bg-background px-4 py-8 sm:py-12 relative w-full">
+          <div className="absolute top-4 right-4 z-20">
+            <ThemeToggle />
+          </div>
+
+          <div className="w-full max-w-md space-y-6 bg-surface p-6 sm:p-8 rounded-xl border border-border shadow-sm">
             <div className="text-center space-y-3">
               {branding.logo_url && !logoFailed ? (
                 <img
@@ -103,108 +104,119 @@ export const LoginPage: React.FC = () => {
               </p>
             </div>
 
-            {errorMsg && (
-              <Alert variant="danger" title="Login Failed">
-                {errorMsg}
-              </Alert>
-            )}
+              {errorMsg && (
+                <Alert variant="danger" title="Login Failed">
+                  {errorMsg}
+                </Alert>
+              )}
 
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-              <Input
-                label="Organization ID (Slug)"
-                placeholder="e.g. acme"
-                error={errors.tenantSlug?.message}
-                {...register("tenantSlug")}
-              />
+                <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+                  <Input
+                    label="Organization ID (Slug)"
+                    placeholder="e.g. acme"
+                    autoComplete="organization"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck="false"
+                    error={errors.tenantSlug?.message}
+                    {...register("tenantSlug")}
+                  />
 
-              <Input
-                label="Email Address"
-                type="email"
-                placeholder="you@institution.edu"
-                error={errors.email?.message}
-                {...register("email")}
-              />
+                  <Input
+                    label="Email Address"
+                    type="email"
+                    inputMode="email"
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    placeholder="you@institution.edu"
+                    error={errors.email?.message}
+                    {...register("email")}
+                  />
 
-              <div className="space-y-1">
-                <Input
-                  label="Password"
-                  type="password"
-                  placeholder="••••••••"
-                  error={errors.password?.message}
-                  {...register("password")}
-                />
-                <div className="flex justify-end pt-1">
-                  <Link
-                    to="/forgot-password"
-                    className="text-xs text-primary hover:text-primary-hover font-medium"
-                  >
+          <div className="space-y-1">
+                    <Input
+                      label="Password"
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="••••••••"
+                      error={errors.password?.message}
+                      {...register("password")}
+                    />
+                    <div className="flex justify-end pt-1">
+                      <Link
+                        to="/forgot-password"
+                        className="text-xs text-primary hover:text-primary-hover font-medium min-h-[44px] sm:min-h-[auto] inline-flex items-center"
+                      >
                     Forgot password?
                   </Link>
                 </div>
-              </div>
+            </div>
 
-              <Button
-                type="submit"
-                className="w-full"
-                size="lg"
-                isLoading={isSubmitting}
-              >
-                Sign In
-              </Button>
-            </form>
-
-            <div className="text-center text-xs text-text-muted space-y-2">
-              <div>
-                Need an account?{" "}
-                <Link
-                  to="/register"
-                  className="text-primary hover:text-primary-hover font-semibold"
+                <Button
+                  type="submit"
+                  className="w-full"
+                  size="lg"
+                  isLoading={isSubmitting}
                 >
-                  Register
-                </Link>
-              </div>
+                  Sign In
+                </Button>
+              </form>
 
-              {import.meta.env.DEV && (
-                <div className="pt-3 border-t border-border text-left">
-                  <p className="font-semibold text-text mb-1">Quick Demo Accounts:</p>
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => fillQuickCredentials("acme", "admin@acme.edu", "Admin123!")}
-                      className="px-2 py-1 bg-surface-muted hover:bg-surface-elevated rounded border border-border text-text"
-                    >
-                      Tenant Admin (acme)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => fillQuickCredentials("acme", "teacher@acme.edu", "Teacher123!")}
-                      className="px-2 py-1 bg-surface-muted hover:bg-surface-elevated rounded border border-border text-text"
-                    >
-                      Teacher (acme)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => fillQuickCredentials("acme", "student@acme.edu", "Student123!")}
-                      className="px-2 py-1 bg-surface-muted hover:bg-surface-elevated rounded border border-border text-text"
-                    >
-                      Student (acme)
-                    </button>
-                  </div>
-                  <div className="mt-2 text-right">
-                    <Link to="/platform/login" className="text-xs text-primary hover:underline">
-                      Platform Superadmin Login &rarr;
-                    </Link>
-                  </div>
+              <div className="text-center text-xs text-text-muted space-y-3">
+                <div className="min-h-[44px] flex items-center justify-center">
+                  Need an account?{" "}
+                  <Link
+                    to="/register"
+                    className="text-primary hover:text-primary-hover font-semibold ml-1 inline-flex items-center"
+                  >
+                    Register
+                  </Link>
                 </div>
-              )}
+
+                {import.meta.env.DEV && (
+                  <div className="pt-3 border-t border-border text-left space-y-2">
+                    <p className="font-semibold text-text">Quick Demo Accounts:</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => fillQuickCredentials("acme", "admin@acme.edu", "Admin123!")}
+                        className="min-h-[44px] px-3 py-2 bg-surface-muted hover:bg-surface-hover rounded-md border border-border text-text font-medium flex items-center justify-center text-center cursor-pointer transition-colors"
+                      >
+                        Admin (acme)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => fillQuickCredentials("acme", "teacher@acme.edu", "Teacher123!")}
+                        className="min-h-[44px] px-3 py-2 bg-surface-muted hover:bg-surface-hover rounded-md border border-border text-text font-medium flex items-center justify-center text-center cursor-pointer transition-colors"
+                      >
+                        Teacher (acme)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => fillQuickCredentials("acme", "student@acme.edu", "Student123!")}
+                        className="min-h-[44px] px-3 py-2 bg-surface-muted hover:bg-surface-hover rounded-md border border-border text-text font-medium flex items-center justify-center text-center cursor-pointer transition-colors"
+                      >
+                        Student (acme)
+                      </button>
+                    </div>
+                    <div className="pt-1 text-right">
+                      <Link
+                        to="/platform/login"
+                        className="text-xs text-primary hover:underline min-h-[44px] inline-flex items-center"
+                      >
+                        Platform Superadmin Login &rarr;
+                      </Link>
+                    </div>
+                  </div>
+          )}
             </div>
           </div>
 
-          {/* Tenant-branded Footer Text */}
-          <footer className="mt-6 text-center text-xs text-text-subtle">
-            {branding.footer_text || "© 2026 RAG Platform. All rights reserved."}
-          </footer>
-        </div>
-        );
+        {/* Tenant-branded Footer Text */}
+        <footer className="mt-6 text-center text-xs text-text-subtle pb-[env(safe-area-inset-bottom)]">
+          {branding.footer_text || "© 2026 RAG Platform. All rights reserved."}
+        </footer>
+      </div>
+      );
 };
-

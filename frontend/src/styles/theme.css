@@ -1,3 +1,22 @@
+/* Body scroll lock for drawers and dialogs (classList toggle, no inline styles) */
+html.body-scroll-lock,
+body.body-scroll-lock {
+  overflow: hidden !important;
+  touch-action: none;
+}
+
+/* Accessible reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -138,13 +157,13 @@ body {
 @layer components {
   /* Buttons */
   .btn {
-    @apply inline-flex items-center justify-center font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none rounded-md text-sm px-4 py-2;
+    @apply inline-flex items-center justify-center font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none rounded-md text-sm px-4 py-2 min-h-[44px] sm:min-h-[38px];
   }
   .btn-sm {
-    @apply px-3 py-1.5 text-xs;
+    @apply px-3 py-1.5 text-xs min-h-[44px] sm:min-h-[32px];
   }
   .btn-lg {
-    @apply px-6 py-3 text-base;
+    @apply px-6 py-3 text-base min-h-[48px] sm:min-h-[44px];
   }
   .btn-primary {
     @apply bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-active shadow-sm;
@@ -164,7 +183,7 @@ body {
 
   /* Form Inputs */
   .input-base {
-    @apply w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text placeholder:text-text-subtle transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 min-h-[44px] sm:min-h-[38px];
   }
 
   /* Cards */
@@ -201,5 +220,17 @@ body {
   .scrollbar-none {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+}
+
+
+/* Touch-device height enforcement without bloating desktop fine-pointer view */
+@media (pointer: coarse) {
+  .btn,
+  .input-base {
+    min-height: 44px;
+  }
+  .btn-sm {
+    min-height: 44px;
   }
 }

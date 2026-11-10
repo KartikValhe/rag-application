@@ -52,70 +52,72 @@ export const AcceptInvitationPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4 py-12 relative">
-      <div className="fixed top-4 right-4 z-50">
-        <ThemeToggle />
-      </div>
-      <div className="w-full max-w-md space-y-6 bg-surface p-8 rounded-xl border border-border shadow-sm">
-        <div className="text-center space-y-2">
-          <h2 className="text-2xl font-bold tracking-tight text-text">Accept Invitation</h2>
-          <p className="text-sm text-text-muted">
-            Set up your name and password to activate your account
-          </p>
+      <div className="min-h-dvh flex items-center justify-center bg-background px-4 py-8 sm:py-12 relative">
+        <div className="fixed top-4 right-4 z-50">
+          <ThemeToggle />
         </div>
+          <div className="w-full max-w-md space-y-6 bg-surface p-6 sm:p-8 rounded-xl border border-border shadow-sm">
+            <div className="text-center space-y-2">
+              <h2 className="text-2xl font-bold tracking-tight text-text">Accept Invitation</h2>
+              <p className="text-sm text-text-muted">
+                Set up your name and password to activate your account
+              </p>
+            </div>
 
-        {errorMsg && (
-          <Alert variant="danger" title="Error">
-            {errorMsg}
-          </Alert>
-        )}
+            {errorMsg && (
+              <Alert variant="danger" title="Error">
+                {errorMsg}
+              </Alert>
+            )}
 
-        {isSuccess ? (
-          <div className="space-y-4">
-            <Alert variant="success" title="Account Activated!">
-              Your account has been set up successfully. You can now log in.
-            </Alert>
-            <Link to="/login">
-              <Button className="w-full mt-2">Sign In</Button>
-            </Link>
+            {isSuccess ? (
+              <div className="space-y-4">
+                <Alert variant="success" title="Account Activated!">
+                  Your account has been set up successfully. You can now log in.
+                </Alert>
+                <Link to="/login">
+                  <Button className="w-full mt-2">Sign In</Button>
+                </Link>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+                <Input
+                  label="Full Name"
+                  placeholder="Your name"
+                  autoComplete="name"
+                  error={errors.fullName?.message}
+                  {...register("fullName")}
+                />
+
+                <Input
+                  label="Choose Password"
+                  type="password"
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  error={errors.password?.message}
+                  {...register("password")}
+                />
+
+                <Input
+                  label="Confirm Password"
+                  type="password"
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                  error={errors.confirmPassword?.message}
+                  {...register("confirmPassword")}
+                />
+
+                <Button
+                  type="submit"
+                  className="w-full"
+                  size="lg"
+                  isLoading={isSubmitting}
+                >
+                  Activate Account
+                </Button>
+              </form>
+            )}
           </div>
-        ) : (
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-            <Input
-              label="Full Name"
-              placeholder="Your name"
-              error={errors.fullName?.message}
-              {...register("fullName")}
-            />
-
-            <Input
-              label="Choose Password"
-              type="password"
-              placeholder="••••••••"
-              error={errors.password?.message}
-              {...register("password")}
-            />
-
-            <Input
-              label="Confirm Password"
-              type="password"
-              placeholder="••••••••"
-              error={errors.confirmPassword?.message}
-              {...register("confirmPassword")}
-            />
-
-            <Button
-              type="submit"
-              className="w-full"
-              size="lg"
-              isLoading={isSubmitting}
-            >
-              Activate Account
-            </Button>
-          </form>
-        )}
-      </div>
-    </div>
-  );
+        </div>
+        );
 };
-

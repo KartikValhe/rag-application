@@ -64,10 +64,12 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   return (
     <ToastContext.Provider value={{ toast, removeToast }}>
       {children}
-      {/* Floating Notifications Container */}
+      {/* Floating Notifications Container: Inset & full-width on mobile without horizontal overflow */}
       <div
+        role="region"
         aria-live="polite"
-        className="fixed bottom-4 right-4 z-50 flex flex-col space-y-2 pointer-events-none max-w-sm w-full px-4"
+        aria-label="Notifications"
+        className="fixed bottom-4 inset-x-4 sm:inset-x-auto sm:right-4 sm:bottom-4 z-50 flex flex-col space-y-2 pointer-events-none sm:max-w-sm w-auto sm:w-full pb-[env(safe-area-inset-bottom)]"
       >
         {toasts.map((t) => (
           <div
@@ -78,21 +80,22 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             )}
           >
             <div className="flex-shrink-0 mt-0.5">{icons[t.type]}</div>
-            <div className="flex-1 text-left">
-              {t.title && <h4 className="text-sm font-semibold text-text">{t.title}</h4>}
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{t.message}</p>
+              <div className="flex-1 text-left min-w-0">
+                {t.title && <h4 className="text-sm font-semibold text-text truncate">{t.title}</h4>}
+                <p className="text-xs text-text-muted mt-0.5 leading-relaxed break-words">{t.message}</p>
+              </div>
+              {/* 44px minimum touch target for dismiss button */}
+              <button
+                type="button"
+                onClick={() => removeToast(t.id)}
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center text-text-subtle hover:text-text rounded-md transition-colors shrink-0 -mr-2 -my-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                aria-label="Dismiss notification"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => removeToast(t.id)}
-              className="text-text-subtle hover:text-text p-1 rounded-md transition-colors"
-              aria-label="Dismiss"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
         ))}
-      </div>
+          </div>
     </ToastContext.Provider>
   );
 };
@@ -104,4 +107,3 @@ export const useToast = (): ToastContextType["toast"] => {
   }
   return context.toast;
 };
-
