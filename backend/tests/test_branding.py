@@ -20,7 +20,6 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.redis_client import get_redis
 from app.core.security import create_access_token
 from app.db.models.audit import AuditLog
@@ -29,14 +28,11 @@ from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import app
 from app.schemas.branding import (
-    DEFAULT_TOKENS,
-    BrandingUpdateRequest,
     DesignTokens,
     calculate_contrast_ratio,
     calculate_relative_luminance,
     validate_wcag_contrast,
 )
-from app.services.storage import get_storage
 
 pytestmark = pytest.mark.asyncio
 

@@ -33,7 +33,6 @@ from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
 from app.db.models.branding import TenantBranding
 from app.db.models.rbac import (
-    Permission,
     Role,
     RolePermission,
     UserRole,
@@ -344,7 +343,7 @@ async def test_academic_and_rbac_junctions_isolation(
     assert not any(c.tenant_id == tenant_b.id for c in cs_rows)
 
     # Cross-tenant insert attempt in Tenant A's session using Tenant B's ID must fail
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         await tenant_a_session.execute(
             insert(Enrollment).values(
                 tenant_id=tenant_b.id,

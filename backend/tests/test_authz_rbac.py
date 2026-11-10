@@ -20,12 +20,11 @@ import uuid
 from typing import Any
 
 import pytest
-from fastapi.routing import APIRoute
 from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.authz import Scope, ScopeType, get_route_declared_permission, require
+from app.core.authz import Scope, ScopeType, get_route_declared_permission
 from app.core.security import create_access_token
 from app.db.engine import SessionLocal
 from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, TeacherAssignment
@@ -35,7 +34,6 @@ from app.db.models.user import User
 from app.main import app
 from app.services.audit import record_audit_event
 from app.services.rbac import (
-    assign_user_role,
     create_custom_role,
     deactivate_user_safely,
     delete_custom_role,
@@ -167,6 +165,7 @@ async def test_scope_and_cross_class_defense(
       - Cross-tenant class ID attempt returns generic 404.
     """
     from fastapi import Request
+
     from app.core.authz import verify_scope
 
     # Setup Tenant A classes and subjects

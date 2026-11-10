@@ -7,6 +7,7 @@ White-label theming and design token endpoints:
   - Admin branding management (tokens/text update, logo/favicon upload with metadata stripping, reset to defaults).
 """
 
+import contextlib
 import json
 import re
 import uuid
@@ -16,8 +17,8 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
-    HTTPException,
     Header,
+    HTTPException,
     Request,
     Response,
     UploadFile,
@@ -26,7 +27,7 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, TenantDB
+from app.api.deps import TenantDB
 from app.core.authz import public_endpoint, require
 from app.core.redis_client import get_redis
 from app.core.security import get_client_ip
@@ -418,10 +419,8 @@ async def upload_admin_logo(
 
     # Clean up previous logo if present
     if branding.logo_key:
-        try:
+        with contextlib.suppress(Exception):
             await storage.delete(branding.logo_key)
-        except Exception:
-            pass
 
     key = f"{current_user.tenant_id}/logo/{uuid.uuid4().hex}.{ext}"
     await storage.put(key, clean_bytes, content_type)
@@ -468,10 +467,8 @@ async def upload_admin_favicon(
 
     # Clean up previous favicon if present
     if branding.favicon_key:
-        try:
+        with contextlib.suppress(Exception):
             await storage.delete(branding.favicon_key)
-        except Exception:
-            pass
 
     key = f"{current_user.tenant_id}/favicon/{uuid.uuid4().hex}.{ext}"
     await storage.put(key, clean_bytes, content_type)
@@ -513,17 +510,13 @@ async def reset_admin_branding(
     storage = get_storage()
 
     if branding.logo_key:
-        try:
+        with contextlib.suppress(Exception):
             await storage.delete(branding.logo_key)
-        except Exception:
-            pass
         branding.logo_key = None
 
     if branding.favicon_key:
-        try:
+        with contextlib.suppress(Exception):
             await storage.delete(branding.favicon_key)
-        except Exception:
-            pass
         branding.favicon_key = None
 
     branding.tokens = DEFAULT_TOKENS

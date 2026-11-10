@@ -16,13 +16,15 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Request
-import jwt
-from jwt.exceptions import PyJWTError as JWTError
+from jwt.exceptions import PyJWTError
 
 from app.core.config import settings
+
+JWTError = PyJWTError
 
 # ── Password hashing ─────────────────────────────────────────────────────────
 

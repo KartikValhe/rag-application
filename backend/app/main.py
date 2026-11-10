@@ -17,17 +17,17 @@ import email_validator
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Permit local development domains (.local, .localhost, .internal) in EmailStr validation
-for _d in ("local", "localhost", "internal"):
-    if _d in email_validator.SPECIAL_USE_DOMAIN_NAMES:
-        email_validator.SPECIAL_USE_DOMAIN_NAMES.remove(_d)
-
 from app.api.v1.router import router as v1_router
 from app.core.authz import public_endpoint
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
 from app.core.redis_client import close_redis, get_redis
+
+# Permit local development domains (.local, .localhost, .internal) in EmailStr validation
+for _d in ("local", "localhost", "internal"):
+    if _d in email_validator.SPECIAL_USE_DOMAIN_NAMES:
+        email_validator.SPECIAL_USE_DOMAIN_NAMES.remove(_d)
 
 
 @asynccontextmanager

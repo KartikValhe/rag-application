@@ -7,7 +7,6 @@ Prevents privilege escalation and protects system roles.
 """
 
 import uuid
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -15,7 +14,7 @@ from sqlalchemy import select
 
 from app.api.deps import TenantDB
 from app.core.authz import require
-from app.db.models.rbac import Role, RolePermission, UserRole
+from app.db.models.rbac import Role, UserRole
 from app.db.models.user import User
 from app.services.rbac import (
     assign_user_role,

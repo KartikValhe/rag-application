@@ -6,8 +6,6 @@ Provides raster image validation, sanitization, and metadata stripping using Pil
 """
 
 import io
-import re
-import uuid
 from pathlib import Path
 from typing import Protocol
 
@@ -136,7 +134,7 @@ def validate_and_sanitize_image(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_image", "message": "Uploaded file is not a valid image."},
-        )
+        ) from None
 
     # Re-open after verify() to inspect properties and process pixels
     try:
@@ -145,7 +143,7 @@ def validate_and_sanitize_image(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_image", "message": "Unable to process image."},
-        )
+        ) from None
 
     fmt = (img.format or "").upper()
     if fmt not in ALLOWED_FORMATS:

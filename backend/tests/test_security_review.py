@@ -14,6 +14,7 @@ Security regression tests covering Step 0 and Batch 1 hardening requirements:
 """
 
 import uuid
+
 import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
@@ -81,6 +82,7 @@ def test_cors_origins_is_explicit_list() -> None:
 def test_set_config_uses_bound_parameters_in_source() -> None:
     """Verify that tenant_db.py sets app.tenant_id via parameterized SQL."""
     import inspect
+
     from app.core import tenant_db
 
     src = inspect.getsource(tenant_db.tenant_session_context)
@@ -269,6 +271,7 @@ async def test_refresh_token_reuse_outside_grace_window_wipes_all_sessions(
     sessions for that user and returns 401 token_reused.
     """
     from datetime import UTC, datetime, timedelta
+
     from app.db.models.auth import RefreshToken
 
     login_resp = await client.post(
@@ -296,7 +299,7 @@ async def test_refresh_token_reuse_outside_grace_window_wipes_all_sessions(
     # Simulate passing the 10-second grace window on token1
     await raw_db.execute(
         update(RefreshToken)
-        .where(RefreshToken.user_id == user_a.id, RefreshToken.revoked == True)
+        .where(RefreshToken.user_id == user_a.id, RefreshToken.revoked.is_(True))
         .values(revoked_at=datetime.now(UTC) - timedelta(seconds=20))
     )
     await raw_db.commit()
@@ -474,8 +477,10 @@ def test_trust_proxy_controls_x_forwarded_for(monkeypatch: pytest.MonkeyPatch) -
 
 def test_pyjwt_pinning_and_separate_secrets() -> None:
     """PyJWT must require exp, pin HS256, and reject cross-secret decoding."""
-    import jwt
     from datetime import UTC, datetime, timedelta
+
+    import jwt
+
     from app.core.security import (
         JWTError,
         create_access_token,

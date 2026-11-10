@@ -37,7 +37,6 @@ os.environ.setdefault("ENVIRONMENT", "development")
 
 from app.core.security import hash_password
 from app.db.engine import SessionLocal
-from app.db.models import Base
 from app.db.models.rbac import Role, UserRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User

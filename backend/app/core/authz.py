@@ -13,7 +13,7 @@ Guarantees:
 """
 
 import uuid
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
@@ -49,7 +49,7 @@ ALL_SYSTEM_PERMISSIONS = {
 }
 
 
-class ScopeType(str, Enum):
+class ScopeType(StrEnum):
     CLASS = "class"
     CLASS_SUBJECT = "class_subject"
 
@@ -125,7 +125,7 @@ async def verify_scope(
     try:
         class_id = uuid.UUID(str(class_id_raw))
     except (ValueError, TypeError):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND) from None
 
     # 1. Verify class exists in this tenant
     class_res = await db.execute(
@@ -152,7 +152,7 @@ async def verify_scope(
         try:
             subject_id = uuid.UUID(str(subject_id_raw))
         except (ValueError, TypeError):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND) from None
 
         sub_res = await db.execute(
             select(Subject.id).where(Subject.tenant_id == user.tenant_id, Subject.id == subject_id)
@@ -243,8 +243,8 @@ def require(permission: str, scope: Scope | None = None) -> Any:
         return user
 
     # Tag the dependency with declared permission metadata for Default-Deny auditing
-    setattr(dep, "__declared_permission__", permission)
-    setattr(dep, "__declared_scope__", scope)
+    setattr(dep, "__declared_permission__", permission)  # noqa: B010
+    setattr(dep, "__declared_scope__", scope)  # noqa: B010
     return dep
 
 
@@ -253,7 +253,7 @@ def public_endpoint() -> Any:
     async def dep() -> None:
         return None
 
-    setattr(dep, "__declared_permission__", "public")
+    setattr(dep, "__declared_permission__", "public")  # noqa: B010
     return dep
 
 
@@ -262,7 +262,7 @@ def platform_endpoint() -> Any:
     async def dep(admin: PlatformAdmin = Depends(get_current_platform_admin)) -> PlatformAdmin:
         return admin
 
-    setattr(dep, "__declared_permission__", "platform:superadmin")
+    setattr(dep, "__declared_permission__", "platform:superadmin")  # noqa: B010
     return dep
 
 
@@ -271,13 +271,17 @@ def get_route_declared_permission(route: Any) -> str | None:
     # 1. Check endpoint function attributes
     endpoint = getattr(route, "endpoint", None)
     if endpoint and hasattr(endpoint, "__declared_permission__"):
-        return getattr(endpoint, "__declared_permission__")
+        val = getattr(endpoint, "__declared_permission__", None)
+        if isinstance(val, str):
+            return val
 
     # 2. Check route-level dependencies
     for dep in getattr(route, "dependencies", []):
         call = getattr(dep, "dependency", None) or dep
         if hasattr(call, "__declared_permission__"):
-            return getattr(call, "__declared_permission__")
+            val = getattr(call, "__declared_permission__", None)
+            if isinstance(val, str):
+                return val
 
     # 3. Check parameter/dependant dependencies
     dependant = getattr(route, "dependant", None)
@@ -285,7 +289,9 @@ def get_route_declared_permission(route: Any) -> str | None:
         for sub_dep in getattr(dependant, "dependencies", []):
             call = getattr(sub_dep, "call", None) or sub_dep
             if hasattr(call, "__declared_permission__"):
-                return getattr(call, "__declared_permission__")
+                val = getattr(call, "__declared_permission__", None)
+                if isinstance(val, str):
+                    return val
 
     return None
 

@@ -13,14 +13,13 @@ Academic structure endpoints:
 import csv
 import io
 import uuid
-from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.api.deps import TenantDB
-from app.core.authz import Scope, ScopeType, load_user_permissions, require
+from app.core.authz import Scope, ScopeType, require
 from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, TeacherAssignment
 from app.db.models.rbac import Role, UserRole
 from app.db.models.user import User
@@ -824,8 +823,8 @@ async def get_class_roster(
 async def bulk_import_enrollments(
     class_id: uuid.UUID,
     file: UploadFile = File(...),
-    request: Request = None,
-    db: TenantDB = None,
+    request: Request = None,  # type: ignore[assignment]
+    db: TenantDB = None,  # type: ignore[assignment]
     current_user: User = Depends(require("enrollment:manage", Scope(ScopeType.CLASS))),
 ) -> EnrollmentImportResponse:
     """
@@ -851,7 +850,7 @@ async def bulk_import_enrollments(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_encoding", "message": "CSV must be UTF-8 encoded."},
-        )
+        ) from None
 
     reader = csv.DictReader(io.StringIO(text_content))
     if not reader.fieldnames or "email" not in [f.strip().lower() for f in reader.fieldnames]:
@@ -1219,7 +1218,7 @@ async def get_my_classes(
         )
         enr_res = await db.execute(enr_stmt)
         classes = enr_res.scalars().all()
-        result: list[MyClassResponse] = []
+        result = []
         for c in classes:
             subs_res = await db.execute(
                 select(Subject)

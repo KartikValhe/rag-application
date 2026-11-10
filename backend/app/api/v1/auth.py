@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.authz import public_endpoint
 from app.core.config import settings
-from app.core.security import get_client_ip, hash_email_token, hash_refresh_token
+from app.core.security import get_client_ip, hash_email_token
 from app.core.tenant_db import get_platform_session, tenant_session_context
-from app.db.models.auth import EmailToken, RefreshToken
+from app.db.models.auth import EmailToken
 from app.db.models.tenant import Tenant
 from app.services.auth import (
     get_tenant_by_slug,
@@ -227,7 +227,7 @@ async def refresh(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_refresh_token", "message": "Session expired."},
-        )
+        ) from None
 
     # Ensure tenant exists and is active
     result = await platform_db.execute(

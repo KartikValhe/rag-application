@@ -6,16 +6,15 @@ Nothing in this codebase ever reads os.environ directly — always use `settings
 """
 
 from functools import lru_cache
+
 import email_validator
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Permit local development domains (.local, .localhost, .internal) in EmailStr validation
 for _d in ("local", "localhost", "internal"):
     if _d in email_validator.SPECIAL_USE_DOMAIN_NAMES:
         email_validator.SPECIAL_USE_DOMAIN_NAMES.remove(_d)
-
-from pydantic import field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

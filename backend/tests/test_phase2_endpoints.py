@@ -15,7 +15,6 @@ Comprehensive test suite for Phase 2 endpoints:
 
 import io
 import uuid
-from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -23,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token
-from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, TeacherAssignment
+from app.db.models.academic import Class, Subject
 from app.db.models.rbac import Role, UserRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
@@ -374,9 +373,7 @@ async def test_my_classes_endpoint(
     c_a = (
         await client.post("/api/v1/classes", headers=admin_hdr, json={"name": f"A-{uuid.uuid4().hex[:4]}"})
     ).json()
-    c_b = (
-        await client.post("/api/v1/classes", headers=admin_hdr, json={"name": f"B-{uuid.uuid4().hex[:4]}"})
-    ).json()
+    await client.post("/api/v1/classes", headers=admin_hdr, json={"name": f"B-{uuid.uuid4().hex[:4]}"})
 
     # Create Subject Math
     sub_m = (

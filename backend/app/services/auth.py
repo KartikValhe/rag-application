@@ -280,9 +280,9 @@ async def login_user(
     await _clear_throttle(tenant_id, email)
 
     # Issue tokens.
+    from app.core.authz import load_user_permissions
     from app.core.security import create_access_token  # local import avoids circular
     from app.db.models.rbac import Role, UserRole
-    from app.core.authz import load_user_permissions
 
     role_res = await db.execute(
         select(Role.name)
@@ -415,9 +415,9 @@ async def refresh_access_token(
             detail={"code": "user_inactive"},
         )
 
+    from app.core.authz import load_user_permissions
     from app.core.security import create_access_token
     from app.db.models.rbac import Role, UserRole
-    from app.core.authz import load_user_permissions
 
     role_res = await db.execute(
         select(Role.name)

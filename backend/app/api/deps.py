@@ -84,7 +84,7 @@ async def _resolve_tenant_from_jwt(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_token", "message": "Invalid tenant_id."},
-        )
+        ) from None
 
     # Validate tenant exists and is active on every authenticated request
     host_slug: str | None = getattr(request.state, "tenant_slug", None)

@@ -45,8 +45,8 @@ jobs:
 
       - name: Initialize DB Roles & Schema
         run: |
-          docker exec ${{ job.services.postgres.id }} psql -U postgres -d ragplatform -c "CREATE DATABASE ragplatform_test;"
-          docker exec ${{ job.services.postgres.id }} psql -U postgres -d ragplatform -f /workspace/infra/postgres/init.sql || true
+          docker cp infra/postgres/init.sql ${{ job.services.postgres.id }}:/tmp/init.sql
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -f /tmp/init.sql
 
       - name: Install Dependencies
         working-directory: ./backend
@@ -63,14 +63,27 @@ jobs:
         working-directory: ./backend
         run: mypy app
 
+      - name: Run Database Migrations
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://app_tenant:tenant_password@localhost:5432/ragplatform_test
+          PLATFORM_DATABASE_URL: postgresql+asyncpg://app_platform:platform_password@localhost:5432/ragplatform_test
+          MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ragplatform_test
+          REDIS_URL: redis://localhost:6379/1
+          SECRET_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          PLATFORM_SECRET_KEY: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          ENVIRONMENT: development
+        run: alembic upgrade head
+
       - name: Run Tests & Tenant Isolation Suite
         working-directory: ./backend
         env:
           DATABASE_URL: postgresql+asyncpg://app_tenant:tenant_password@localhost:5432/ragplatform_test
+          PLATFORM_DATABASE_URL: postgresql+asyncpg://app_platform:platform_password@localhost:5432/ragplatform_test
           MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ragplatform_test
           REDIS_URL: redis://localhost:6379/1
-          SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-          PLATFORM_SECRET_KEY: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          SECRET_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          PLATFORM_SECRET_KEY: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           ENVIRONMENT: development
         run: pytest
 
@@ -90,6 +103,14 @@ jobs:
       - name: Install Dependencies
         working-directory: ./frontend
         run: npm ci
+
+      - name: Lint
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Unit Tests
+        working-directory: ./frontend
+        run: npm test -- --run
 
       - name: Type Check
         working-directory: ./frontend
