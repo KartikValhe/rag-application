@@ -22,6 +22,7 @@ import {
   Palette,
   Type,
   ImageIcon,
+  Eye,
 } from "lucide-react";
 
 import { AppShell } from "@/components/layout/AppShell";
@@ -57,11 +58,12 @@ import {
 } from "../schemas/brandingSchema.ts";
 
 import { useBranding } from "../context/BrandingContext.tsx";
-import type {
-  BrandingResponse,
-  DesignTokens,
-  RadiusToken,
-  FontFamilyToken,
+import {
+  type BrandingResponse,
+  type DesignTokens,
+  type RadiusToken,
+  type FontFamilyToken,
+  DEFAULT_TOKENS,
 } from "../types.ts";
 
 const PREVIEW_STYLE_ID = "branding-preview-css";
@@ -76,6 +78,7 @@ export const BrandingEditorPage: React.FC = () => {
   const [currentBranding, setCurrentBranding] = useState<BrandingResponse | null>(null);
   const [previewDark, setPreviewDark] = useState<boolean>(false);
   const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
+  const [mobileActiveView, setMobileActiveView] = useState<"form" | "preview">("form");
 
   // Logo & Favicon upload state
   const [logoFile, setLogoFile] = useState<File | null>(null);
@@ -100,9 +103,9 @@ export const BrandingEditorPage: React.FC = () => {
       tagline: "",
       footer_text: "",
       support_email: "",
-      primary: "#2563eb",
-      secondary: "#475569",
-      accent: "#06b6d4",
+      primary: DEFAULT_TOKENS.primary,
+      secondary: DEFAULT_TOKENS.secondary,
+      accent: DEFAULT_TOKENS.accent,
       radius: "md",
       font_family: "system-ui",
     },
@@ -128,9 +131,9 @@ export const BrandingEditorPage: React.FC = () => {
         tagline: data.tagline || "",
         footer_text: data.footer_text || "",
         support_email: data.support_email || "",
-        primary: data.tokens.primary || "#2563eb",
-        secondary: data.tokens.secondary || "#475569",
-        accent: data.tokens.accent || "#06b6d4",
+        primary: data.tokens.primary || DEFAULT_TOKENS.primary,
+        secondary: data.tokens.secondary || DEFAULT_TOKENS.secondary,
+        accent: data.tokens.accent || DEFAULT_TOKENS.accent,
         radius: data.tokens.radius || "md",
         font_family: data.tokens.font_family || "system-ui",
       });
@@ -192,9 +195,9 @@ export const BrandingEditorPage: React.FC = () => {
     if (typeof document === "undefined") return;
 
     const draftTokens: DesignTokens = {
-      primary: isValidHex(watchedPrimary) ? watchedPrimary : "#2563eb",
-      secondary: isValidHex(watchedSecondary) ? watchedSecondary : "#475569",
-      accent: isValidHex(watchedAccent) ? watchedAccent : "#06b6d4",
+      primary: isValidHex(watchedPrimary) ? watchedPrimary : DEFAULT_TOKENS.primary,
+      secondary: isValidHex(watchedSecondary) ? watchedSecondary : DEFAULT_TOKENS.secondary,
+      accent: isValidHex(watchedAccent) ? watchedAccent : DEFAULT_TOKENS.accent,
       radius: (watchedRadius as RadiusToken) || "md",
       font_family: (watchedFontFamily as FontFamilyToken) || "system-ui",
     };
@@ -434,14 +437,14 @@ export const BrandingEditorPage: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap sm:flex-nowrap w-full sm:w-auto">
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => setShowResetConfirm(true)}
               disabled={isSaving}
-              className="text-text-muted hover:text-text"
+              className="flex-1 sm:flex-initial text-text-muted hover:text-text min-h-[44px] sm:min-h-[32px]"
             >
               <RefreshCw className="w-4 h-4 mr-1.5" />
               Reset to Defaults
@@ -454,6 +457,7 @@ export const BrandingEditorPage: React.FC = () => {
               onClick={handleSubmit(onSubmit)}
               isLoading={isSaving}
               disabled={isSaving || !hasUnsavedChanges || !contrastAnalysis.isValid}
+              className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-[32px]"
             >
               <Save className="w-4 h-4 mr-1.5" />
               {hasUnsavedChanges ? "Save Changes" : "Saved"}
@@ -461,10 +465,41 @@ export const BrandingEditorPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Mobile View Segmented Toggle (< lg) */}
+        <div className="lg:hidden flex items-center p-1 bg-surface-muted rounded-lg border border-border">
+          <button
+            type="button"
+            onClick={() => setMobileActiveView("form")}
+            className={`flex-1 py-2 text-xs font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 min-h-[44px] ${
+              mobileActiveView === "form"
+                ? "bg-surface text-text shadow-xs"
+                : "text-text-muted hover:text-text"
+            }`}
+          >
+            <Layout className="w-4 h-4" />
+            <span>Branding Settings</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMobileActiveView("preview")}
+            className={`flex-1 py-2 text-xs font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 min-h-[44px] ${
+              mobileActiveView === "preview"
+                ? "bg-surface text-text shadow-xs"
+                : "text-text-muted hover:text-text"
+            }`}
+          >
+            <Eye className="w-4 h-4" />
+            <span>Live Preview</span>
+          </button>
+        </div>
+
         {/* Main Content: Form (Left) & Live Preview (Right) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left Column: Configuration Form */}
-          <form onSubmit={handleSubmit(onSubmit)} className="lg:col-span-7 space-y-6">
+          <form
+            onSubmit={handleSubmit(onSubmit)}
+            className={`lg:col-span-7 space-y-6 ${mobileActiveView === "form" ? "block" : "hidden lg:block"}`}
+          >
             {/* Contrast Warning Banner */}
             {!contrastAnalysis.isValid && (
               <Alert variant="danger" title="WCAG AA Contrast Violation">
@@ -541,13 +576,13 @@ export const BrandingEditorPage: React.FC = () => {
                   <div className="flex items-center space-x-2">
                     <input
                       type="color"
-                      value={isValidHex(watchedPrimary) ? watchedPrimary : "#2563eb"}
+                      value={isValidHex(watchedPrimary) ? watchedPrimary : DEFAULT_TOKENS.primary}
                       onChange={(e) => setValue("primary", e.target.value, { shouldDirty: true })}
                       className="w-10 h-10 p-0 border border-border rounded-md cursor-pointer bg-surface shrink-0"
                       aria-label="Pick primary color"
                     />
                     <Input
-                      placeholder="#2563eb"
+                      placeholder={DEFAULT_TOKENS.primary}
                       error={errors.primary?.message}
                       className="font-mono text-xs uppercase"
                       {...register("primary")}
@@ -561,13 +596,13 @@ export const BrandingEditorPage: React.FC = () => {
                   <div className="flex items-center space-x-2">
                     <input
                       type="color"
-                      value={isValidHex(watchedSecondary) ? watchedSecondary : "#475569"}
+                      value={isValidHex(watchedSecondary) ? watchedSecondary : DEFAULT_TOKENS.secondary}
                       onChange={(e) => setValue("secondary", e.target.value, { shouldDirty: true })}
                       className="w-10 h-10 p-0 border border-border rounded-md cursor-pointer bg-surface shrink-0"
                       aria-label="Pick secondary color"
                     />
                     <Input
-                      placeholder="#475569"
+                      placeholder={DEFAULT_TOKENS.secondary}
                       error={errors.secondary?.message}
                       className="font-mono text-xs uppercase"
                       {...register("secondary")}
@@ -581,13 +616,13 @@ export const BrandingEditorPage: React.FC = () => {
                   <div className="flex items-center space-x-2">
                     <input
                       type="color"
-                      value={isValidHex(watchedAccent) ? watchedAccent : "#06b6d4"}
+                      value={isValidHex(watchedAccent) ? watchedAccent : DEFAULT_TOKENS.accent}
                       onChange={(e) => setValue("accent", e.target.value, { shouldDirty: true })}
                       className="w-10 h-10 p-0 border border-border rounded-md cursor-pointer bg-surface shrink-0"
                       aria-label="Pick accent color"
                     />
                     <Input
-                      placeholder="#06b6d4"
+                      placeholder={DEFAULT_TOKENS.accent}
                       error={errors.accent?.message}
                       className="font-mono text-xs uppercase"
                       {...register("accent")}
@@ -597,30 +632,30 @@ export const BrandingEditorPage: React.FC = () => {
               </div>
 
               {/* Contrast Metrics Detail */}
-              <div className="bg-surface-muted border border-border rounded-lg p-3 text-xs space-y-2 mt-2">
+              <div className="bg-surface-muted border border-border rounded-lg p-3 text-xs space-y-2.5 mt-2">
                 <span className="font-semibold text-text">Primary Color Contrast Analysis:</span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-text-muted">
-                  <div className="flex flex-col">
-                    <span>White Text</span>
-                    <span className="font-medium text-text">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-text-muted">
+                  <div className="flex flex-col p-2 bg-surface rounded border border-border/70">
+                    <span className="text-[11px]">White Text</span>
+                    <span className="font-semibold text-text text-sm">
                       {contrastAnalysis.whiteContrast.toFixed(2)}:1
                     </span>
                   </div>
-                  <div className="flex flex-col">
-                    <span>Dark Text</span>
-                    <span className="font-medium text-text">
+                  <div className="flex flex-col p-2 bg-surface rounded border border-border/70">
+                    <span className="text-[11px]">Dark Text</span>
+                    <span className="font-semibold text-text text-sm">
                       {contrastAnalysis.darkTextContrast.toFixed(2)}:1
                     </span>
                   </div>
-                  <div className="flex flex-col">
-                    <span>Light Surface (#FFF)</span>
-                    <span className="font-medium text-text">
+                  <div className="flex flex-col p-2 bg-surface rounded border border-border/70">
+                    <span className="text-[11px]">Light Surface</span>
+                    <span className="font-semibold text-text text-sm">
                       {contrastAnalysis.lightSurfaceContrast.toFixed(2)}:1
                     </span>
                   </div>
-                  <div className="flex flex-col">
-                    <span>Dark Surface (#0F172A)</span>
-                    <span className="font-medium text-text">
+                  <div className="flex flex-col p-2 bg-surface rounded border border-border/70">
+                    <span className="text-[11px]">Dark Surface</span>
+                    <span className="font-semibold text-text text-sm">
                       {contrastAnalysis.darkSurfaceContrast.toFixed(2)}:1
                     </span>
                   </div>
@@ -777,6 +812,8 @@ export const BrandingEditorPage: React.FC = () => {
                 </div>
               </div>
             </Card>
+
+
           </form>
 
           {/* Right Column: Live Interactive Preview */}
@@ -812,8 +849,7 @@ export const BrandingEditorPage: React.FC = () => {
 
             {/* Scoped Preview Container */}
             <div
-              className={`branding-preview-scope ${previewDark ? "preview-dark" : ""} bg-background text-text
-                } border border-border rounded-xl p-5 shadow-sm space-y-6 transition-colors`}
+              className={`branding-preview-scope ${previewDark ? "preview-dark" : ""} bg-background text-text border border-border rounded-xl p-5 shadow-sm space-y-6 transition-colors`}
             >
               {/* Mock 1: Brand Navigation Bar */}
               <div className="border border-border rounded-lg bg-surface p-3 flex items-center justify-between">

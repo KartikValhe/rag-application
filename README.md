@@ -158,6 +158,38 @@ When deploying to staging or production environments, observe the following mand
 
 ---
 
+---
+
+## 📱 Frontend Design System & Responsive Conventions
+
+The platform frontend follows a strict mobile-first architecture adhering to WCAG AA accessibility, zero inline styles, and semantic token theming.
+
+### 1. Viewport Breakpoints
+- **Mobile (375px):**
+  - App shell uses `h-dvh` / `min-h-dvh` and safe-area inset padding. Page body never scrolls horizontally.
+  - Sidebar collapses into an accessible slide-over drawer triggered by a 44px topbar hamburger.
+  - Tables automatically transform into accessible stacked cards (`Table.tsx`), partitioning action columns into card footers and providing a mobile sort dropdown toolbar.
+  - Modals and confirmation dialogs render as responsive bottom sheets with scrollable content and sticky action footers.
+  - Branding Editor features a segmented control switching between form configuration and live mock preview.
+- **Tablet (768px - `md:`):**
+  - Topbar hamburger retains slide-over drawer ergonomics.
+  - Tables transition into full data tables with horizontal scroll containment.
+  - Modals transition into centered floating dialogs with side-by-side action buttons.
+  - Audit log and search filters display in a responsive 2 to 4-column grid.
+- **Desktop (1280px - `lg:`):**
+  - Sidebar docks permanently on the left with collapse/expand toggle.
+  - Branding Editor displays side-by-side configuration form and sticky live preview.
+
+### 2. Touch Target Sizing (WCAG 2.5.5 / 2.5.8)
+- Every interactive element (buttons, inputs, select menus, hamburgers, dismiss icons, table actions) guarantees a minimum **44px touch target** on coarse pointers (`@media (pointer: coarse)` in `theme.css`).
+- Desktop pointers (`pointer: fine`) maintain compact, dense desktop layouts (`sm:min-h-[38px]`, `btn-sm` `sm:min-h-[32px]`).
+
+### 3. Style Guardrails & Quality Enforcers
+- **Zero Inline Styles:** Never use `style={{...}}` or `style={...}` in React components. All styling must use Tailwind utility classes or semantic CSS classes defined in `@layer components` within `theme.css`.
+- **Zero Direct DOM Style Mutations:** Never mutate `element.style` (e.g. `document.body.style.overflow = "hidden"`). Body scroll locking is managed via the `.body-scroll-lock` class toggled cleanly by the `useScrollLock` hook.
+- **No Hardcoded Hex Colors:** Component code must never contain raw hex codes (e.g. `bg-[#1e293b]`). Hex colors are strictly restricted to an exact allow-list of theme definitions and branding algorithms (`src/styles/theme.css`, `src/features/branding/utils/tokens.ts`, `src/features/branding/types.ts`).
+- **Automated Style Scanner:** Run `npm run check:styles` to verify zero violations across the codebase. This check runs automatically on every `npm run lint` and in CI.
+
 ## 🧪 Running Automated Tests
 
 Run backend test suite:
@@ -172,9 +204,10 @@ pytest backend/tests/ -v
 Run frontend verification:
 ```bash
 cd frontend
-npm run test       # 14 theme engine & form validation unit tests
-npm run typecheck  # TypeScript strict type checking
-npm run lint       # ESLint rules
-npm run build      # Vite production build
+npm run test          # 20 theme engine & style guardrail unit tests
+npm run check:styles  # Style rule guardrail scanner (zero inline styles, zero hardcoded colors)
+npm run typecheck     # TypeScript strict type checking
+npm run lint          # ESLint + check:styles
+npm run build         # Vite production build
 ```
 

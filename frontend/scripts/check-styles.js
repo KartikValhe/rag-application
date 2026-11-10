@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * check-styles.js
- * ────────────────
- * Style guardrail script:
- * 1. Checks that NO components use inline styles (style={{ or style={).
- * 2. Checks that NO code performs direct DOM element.style mutations (e.g. style.overflow).
- * 3. Checks that NO UI code uses hard-coded hex colors outside designated branding token utilities.
+ * scripts/check-styles.js
+ * ───────────────────────
+ * Style guardrail linter:
+ * 1. Guarantees ZERO inline styles (style={{ or style={).
+ * 2. Guarantees ZERO direct DOM element.style mutations (e.g. style.overflow).
+ * 3. Restricts hex colors exclusively to an exact allow-list of theme/branding utilities.
  */
 
 import fs from "fs";
@@ -14,100 +14,129 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcDir = path.resolve(__dirname, "../src");
+export const SRC_DIR = path.resolve(__dirname, "../src");
 
-let violations = [];
-
-const allowedHexFiles = [
-  "features/branding/utils/colorUtils.ts",
-  "features/branding/utils/tokens.ts",
-  "features/branding/schemas/brandingSchema.ts",
-  "features/branding/types.ts",
-  "features/branding/__tests__/theme_engine.test.ts",
-  "features/branding/components/BrandingEditorPage.tsx", // Allow input placeholders/defaults for the color picker
+/**
+ * Exact relative file paths (within src/) that legitimately define hex colors
+ * for theme variables, branding defaults, color algorithms, and test assertions.
+ * No whole folders or UI component files are allowed.
+ */
+export const EXACT_ALLOWED_HEX_FILES = new Set([
   "styles/theme.css",
-];
+  "features/branding/types.ts",
+  "features/branding/schemas/brandingSchema.ts",
+  "features/branding/utils/tokens.ts",
+  "features/branding/__tests__/theme_engine.test.ts",
+]);
 
-function scanDirectory(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    const relPath = path.relative(srcDir, fullPath).replace(/\\/g, "/");
-
-    if (entry.isDirectory()) {
-      scanDirectory(fullPath);
-    } else if (entry.isFile() && (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts"))) {
-      checkFile(fullPath, relPath);
-    }
-  }
-}
-
-function checkFile(filePath, relPath) {
-  const content = fs.readFileSync(filePath, "utf-8");
+/**
+ * Scans a single file's text for style violations.
+ * @param {string} content - Source code content
+ * @param {string} relPath - Relative file path from src/
+ * @returns {Array<{file: string, line: number, rule: string, text: string}>}
+ */
+export function scanSourceText(content, relPath) {
+  const violations = [];
   const lines = content.split(/\r?\n/);
-
-  const isAllowedForHex = allowedHexFiles.some((allowed) => relPath.endsWith(allowed));
+  const normalizedRelPath = relPath.replace(/\\/g, "/");
+  const isAllowedForHex = EXACT_ALLOWED_HEX_FILES.has(normalizedRelPath);
 
   lines.forEach((line, index) => {
     const lineNum = index + 1;
     const trimmed = line.trim();
 
-    // Ignore comments
+    // Skip comment lines
     if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
       return;
     }
 
-    // 1. Inline style check
+    // 1. Inline style attribute check
     if (/style\s*=\s*\{\{/i.test(line) || /style\s*=\s*\{[a-zA-Z]/i.test(line)) {
       violations.push({
-        file: relPath,
+        file: normalizedRelPath,
         line: lineNum,
-        rule: "NO inline styles (style={{...}})",
+        rule: "NO inline styles (style={{...}}). Use Tailwind or theme.css classes instead.",
         text: trimmed,
       });
     }
 
-    // 2. Direct DOM style mutation check
+    // 2. Direct DOM element.style mutation check
     if (/\.style\.[a-zA-Z]+\s*=/i.test(line)) {
       violations.push({
-        file: relPath,
+        file: normalizedRelPath,
         line: lineNum,
         rule: "NO direct DOM style mutation (.style.prop = ...). Use CSS classes instead.",
         text: trimmed,
       });
     }
 
-    // 3. Hardcoded hex colors in standard UI code
+    // 3. Disallowed hardcoded hex colors
     if (!isAllowedForHex) {
-      const hexMatch = line.match(/#[0-9a-fA-F]{3,8}\b/g);
-      if (hexMatch) {
-        // Exclude TypeScript hex regex definitions if any
+      const hexMatches = line.match(/#[0-9a-fA-F]{3,8}\b/g);
+      if (hexMatches) {
+        // Exclude regex definitions
         if (!line.includes("RegExp") && !line.includes("/^#") && !line.includes(".regex")) {
           violations.push({
-            file: relPath,
+            file: normalizedRelPath,
             line: lineNum,
-            rule: `NO hardcoded hex colors (${hexMatch.join(", ")}). Use semantic theme tokens.`,
+            rule: `NO hardcoded hex colors (${hexMatches.join(", ")}). Use semantic theme tokens.`,
             text: trimmed,
           });
         }
       }
     }
   });
+
+  return violations;
 }
 
-console.log("Scanning src/ for styling rule violations...");
-scanDirectory(srcDir);
+/**
+ * Recursively scans directory for TypeScript / TSX / CSS files.
+ * @param {string} dir
+ * @param {string} baseDir
+ * @returns {Array<{file: string, line: number, rule: string, text: string}>}
+ */
+export function scanDirectory(dir, baseDir = dir) {
+  let violations = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-if (violations.length > 0) {
-  console.error(`\n❌ Found ${violations.length} style rule violation(s):\n`);
-  for (const v of violations) {
-    console.error(`  ${v.file}:${v.line} [${v.rule}]`);
-    console.error(`    ${v.text}\n`);
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relPath = path.relative(baseDir, fullPath).replace(/\\/g, "/");
+
+    if (entry.isDirectory()) {
+      violations = violations.concat(scanDirectory(fullPath, baseDir));
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts") || entry.name.endsWith(".css"))
+    ) {
+      const content = fs.readFileSync(fullPath, "utf-8");
+      violations = violations.concat(scanSourceText(content, relPath));
+    }
   }
-  process.exit(1);
-} else {
-  console.log("✅ Style check passed: 0 inline styles, 0 direct DOM style mutations, 0 disallowed hex colors.");
-  process.exit(0);
+
+  return violations;
 }
 
+// Execute as CLI if run directly
+const isMain = process.argv[1] && (
+  process.argv[1].endsWith("check-styles.js") ||
+  process.argv[1].endsWith("check-styles.ts")
+);
+
+if (isMain) {
+  console.log("Scanning src/ for styling rule violations (restricted exact allow-list)...");
+  const violations = scanDirectory(SRC_DIR, SRC_DIR);
+
+  if (violations.length > 0) {
+    console.error(`\n❌ Found ${violations.length} style rule violation(s):\n`);
+    for (const v of violations) {
+      console.error(`  ${v.file}:${v.line} [${v.rule}]`);
+      console.error(`    ${v.text}\n`);
+    }
+    process.exit(1);
+  } else {
+    console.log("✅ Style check passed: 0 inline styles, 0 direct DOM style mutations, 0 disallowed hex colors.");
+    process.exit(0);
+  }
+}

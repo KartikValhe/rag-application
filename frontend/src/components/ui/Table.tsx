@@ -244,7 +244,8 @@ export function Table<T>({
                       key={col.key}
                       scope="col"
                       className={cn(
-                        "px-4 py-3 text-left transition-colors",
+                        "px-4 py-3 transition-colors",
+                        col.className?.includes("text-right") ? "text-right" : "text-left",
                         col.sortable && onSort ? "cursor-pointer hover:text-text hover:bg-surface-hover/50" : "",
                         col.className
                       )}
@@ -254,7 +255,7 @@ export function Table<T>({
                         }
                       }}
                     >
-                      <div className="inline-flex items-center space-x-1.5">
+                      <div className={cn("inline-flex items-center space-x-1.5", col.className?.includes("text-right") ? "justify-end w-full" : "")}>
                         <span>{col.header}</span>
                         {col.sortable && (
                           <span className="inline-flex">

@@ -60,6 +60,10 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         {!isLoading && leftIcon && <span className="mr-2 inline-flex">{leftIcon}</span>}
         <span>{children}</span>
         {!isLoading && rightIcon && <span className="ml-2 inline-flex">{rightIcon}</span>}
+        {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin text-current shrink-0" />}
+        {!isLoading && leftIcon && <span className="mr-1.5 inline-flex items-center shrink-0">{leftIcon}</span>}
+        <span className="inline-flex items-center whitespace-nowrap">{children}</span>
+        {!isLoading && rightIcon && <span className="ml-1.5 inline-flex items-center shrink-0">{rightIcon}</span>}
       </button>
     );
   }

@@ -194,21 +194,23 @@ export const RolesPage: React.FC = () => {
                 {
                   key: "actions",
                 header: "Manage Access",
-                className: "text-right",
-      render: (u) => (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="min-h-[44px] sm:min-h-[32px]"
-                  leftIcon={<UserCheck className="w-3.5 h-3.5" />}
-                  onClick={() => {
-                    setSelectedUserForRoles(u);
-                    setIsAssignModalOpen(true);
-                  }}
-                >
-                  Assign Roles
-                </Button>
-                ),
+        className: "text-right",
+        render: (u) => (
+          <div className="flex items-center justify-end w-full">
+            <Button
+              size="sm"
+              variant="outline"
+              className="min-h-[44px] sm:min-h-[32px]"
+              leftIcon={<UserCheck className="w-3.5 h-3.5" />}
+              onClick={() => {
+                setSelectedUserForRoles(u);
+                setIsAssignModalOpen(true);
+              }}
+            >
+              Assign Roles
+            </Button>
+          </div>
+        ),
     },
                 ];
 

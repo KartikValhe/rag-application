@@ -134,21 +134,24 @@ export const AssignmentsPage: React.FC = () => {
     {
       key: "actions",
       header: "Actions",
-      className: "text-right",
+      className: "text-right w-24",
       render: (a) => (
-        <Button
-          size="sm"
-          variant="ghost"
-          className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
-          onClick={() => {
-            setAssignmentToRemove(a);
-            setIsConfirmRemoveOpen(true);
-          }}
-          title="Remove assignment"
-          aria-label={`Remove assignment for ${a.teacher_name || a.teacher_email}`}
-        >
-          <Trash2 className="w-4 h-4" />
-        </Button>
+        <div className="flex items-center justify-end w-full">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] px-2.5 sm:p-2 inline-flex items-center justify-center"
+            onClick={() => {
+              setAssignmentToRemove(a);
+              setIsConfirmRemoveOpen(true);
+            }}
+            title="Remove assignment"
+            aria-label={`Remove assignment for ${a.teacher_name || a.teacher_email}`}
+          >
+            <Trash2 className="w-4 h-4 mr-1.5 sm:mr-0" />
+            <span className="text-xs sm:hidden font-medium">Remove</span>
+          </Button>
+        </div>
       ),
     },
   ];

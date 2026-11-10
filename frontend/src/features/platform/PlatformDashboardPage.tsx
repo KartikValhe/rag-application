@@ -170,24 +170,24 @@ export const PlatformDashboardPage: React.FC = () => {
     {
       key: "actions",
       header: "Actions",
-      className: "text-right",
+      className: "text-right whitespace-nowrap w-52",
       render: (t) => (
-        <div className="flex items-center justify-end gap-2">
+        <div className="flex items-center justify-end gap-2 flex-wrap sm:flex-nowrap w-full">
           <Button
             size="sm"
             variant="outline"
-            className="min-h-[44px] sm:min-h-[32px] px-3"
+            leftIcon={<UserPlus className="h-3.5 w-3.5" />}
+            className="whitespace-nowrap px-2.5 sm:px-3 text-xs"
             onClick={() => setSelectedTenantForAdmin(t)}
           >
-            <UserPlus className="h-3.5 w-3.5" />
-            <span>Create Admin</span>
+            Create Admin
           </Button>
 
           {t.status === "active" ? (
             <Button
               size="sm"
               variant="ghost"
-              className="min-h-[44px] sm:min-h-[32px] px-3 text-text-muted hover:text-text"
+              className="whitespace-nowrap px-2.5 sm:px-3 text-xs text-text-muted hover:text-text"
               onClick={() =>
                 updateTenantMutation.mutate({
                   tenantId: t.id,
@@ -201,7 +201,7 @@ export const PlatformDashboardPage: React.FC = () => {
             <Button
               size="sm"
               variant="ghost"
-              className="min-h-[44px] sm:min-h-[32px] px-3 text-primary hover:text-primary-hover"
+              className="whitespace-nowrap px-2.5 sm:px-3 text-xs text-primary hover:text-primary-hover"
               onClick={() =>
                 updateTenantMutation.mutate({
                   tenantId: t.id,

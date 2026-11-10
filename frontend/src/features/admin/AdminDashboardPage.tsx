@@ -210,14 +210,16 @@ export const AdminDashboardPage: React.FC = () => {
       className: "text-right",
       render: (u) =>
         u.status === "active" && !u.is_admin ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="text-danger hover:bg-danger-surface min-h-[44px] sm:min-h-[32px] px-3"
-            onClick={() => deactivateMutation.mutate(u.id)}
-          >
-            Deactivate
-          </Button>
+          <div className="flex items-center justify-end w-full">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-danger hover:bg-danger-surface min-h-[44px] sm:min-h-[32px] px-3"
+              onClick={() => deactivateMutation.mutate(u.id)}
+            >
+              Deactivate
+            </Button>
+          </div>
         ) : null,
     },
   ];
