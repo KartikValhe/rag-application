@@ -45,14 +45,16 @@ export const TabList: React.FC<React.HTMLAttributes<HTMLDivElement>> = ({
   ...props
 }) => {
   return (
-    <div
-      role="tablist"
-      className={cn(
-        "inline-flex h-10 items-center justify-start rounded-lg bg-surface-muted p-1 text-text-muted border border-border-subtle",
-        className
-      )}
-      {...props}
-    />
+    <div className="w-full overflow-x-auto scrollbar-none pb-1">
+      <div
+        role="tablist"
+        className={cn(
+          "inline-flex min-h-[44px] sm:min-h-[40px] items-center justify-start rounded-lg bg-surface-muted p-1 text-text-muted border border-border-subtle shrink-0",
+          className
+        )}
+        {...props}
+      />
+    </div>
   );
 };
 
@@ -78,7 +80,7 @@ export const TabTrigger: React.FC<TabTriggerProps> = ({
       aria-selected={isActive}
       onClick={() => context.setActiveTab(value)}
       className={cn(
-        "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3.5 py-1.5 text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50",
+        "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3.5 py-1.5 min-h-[38px] sm:min-h-[32px] text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50",
         isActive
           ? "bg-surface text-text shadow-sm font-semibold"
           : "hover:text-text hover:bg-surface/50",
@@ -109,6 +111,7 @@ export const TabContent: React.FC<TabContentProps> = ({
   return (
     <div
       role="tabpanel"
+      tabIndex={0}
       className={cn("focus-visible:outline-none", className)}
       {...props}
     >
@@ -116,4 +119,3 @@ export const TabContent: React.FC<TabContentProps> = ({
     </div>
   );
 };
-

@@ -113,7 +113,7 @@ export const AssignmentsPage: React.FC = () => {
           </div>
           <div>
             <div className="font-semibold text-text">{a.teacher_name || "Faculty Member"}</div>
-            <div className="text-xs text-text-muted">{a.teacher_email}</div>
+            <div className="text-xs text-text-muted break-all" title={a.teacher_email}>{a.teacher_email}</div>
           </div>
         </div>
       ),
@@ -139,7 +139,7 @@ export const AssignmentsPage: React.FC = () => {
         <Button
           size="sm"
           variant="ghost"
-          className="text-danger hover:bg-danger/10"
+          className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
           onClick={() => {
             setAssignmentToRemove(a);
             setIsConfirmRemoveOpen(true);
@@ -166,6 +166,7 @@ export const AssignmentsPage: React.FC = () => {
           <Button
             onClick={() => setIsAssignModalOpen(true)}
             leftIcon={<Plus className="w-4 h-4" />}
+            className="w-full sm:w-auto"
           >
             Assign Teacher
           </Button>

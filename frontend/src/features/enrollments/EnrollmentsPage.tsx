@@ -95,7 +95,7 @@ export const EnrollmentsPage: React.FC = () => {
           </div>
           <div>
             <div className="font-semibold text-text">{s.full_name || "Enrolled Student"}</div>
-            <div className="text-xs text-text-muted">{s.email}</div>
+            <div className="text-xs text-text-muted break-all" title={s.email}>{s.email}</div>
           </div>
         </div>
       ),
@@ -121,7 +121,7 @@ export const EnrollmentsPage: React.FC = () => {
         <Button
           size="sm"
           variant="ghost"
-          className="text-danger hover:bg-danger/10"
+          className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
           onClick={() => {
             setStudentToRemove(s);
             setIsConfirmRemoveOpen(true);
@@ -145,12 +145,13 @@ export const EnrollmentsPage: React.FC = () => {
           { label: "Enrollments" },
         ]}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
             <Button
               variant="outline"
               disabled={!currentClass}
               onClick={() => setIsCsvImportOpen(true)}
               leftIcon={<Upload className="w-4 h-4" />}
+              className="flex-1 sm:flex-initial"
             >
               CSV Import
             </Button>
@@ -158,6 +159,7 @@ export const EnrollmentsPage: React.FC = () => {
               disabled={!currentClass}
               onClick={() => setIsAddStudentOpen(true)}
               leftIcon={<UserPlus className="w-4 h-4" />}
+              className="flex-1 sm:flex-initial"
             >
               Enroll Student
             </Button>

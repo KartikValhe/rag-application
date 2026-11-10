@@ -179,7 +179,7 @@ export const AdminDashboardPage: React.FC = () => {
               </Badge>
             )}
           </div>
-          <div className="text-xs text-text-muted">{u.email}</div>
+          <div className="text-xs text-text-muted break-all" title={u.email}>{u.email}</div>
         </div>
       ),
     },
@@ -213,7 +213,7 @@ export const AdminDashboardPage: React.FC = () => {
           <Button
             size="sm"
             variant="ghost"
-            className="text-danger hover:bg-danger-surface"
+            className="text-danger hover:bg-danger-surface min-h-[44px] sm:min-h-[32px] px-3"
             onClick={() => deactivateMutation.mutate(u.id)}
           >
             Deactivate
@@ -239,6 +239,7 @@ export const AdminDashboardPage: React.FC = () => {
           <Button
             onClick={() => setIsInviteOpen(true)}
             leftIcon={<UserPlus className="w-4 h-4" />}
+            className="w-full sm:w-auto"
           >
             Invite User
           </Button>
@@ -253,7 +254,8 @@ export const AdminDashboardPage: React.FC = () => {
         )}
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-border space-x-6 text-sm font-medium">
+        <div className="w-full overflow-x-auto scrollbar-none pb-0.5">
+          <div className="flex border-b border-border space-x-4 sm:space-x-6 text-sm font-medium min-w-max">
           <button
             onClick={() => setActiveTab("users")}
             className={`pb-3 flex items-center gap-2 border-b-2 transition-colors ${
@@ -304,12 +306,13 @@ export const AdminDashboardPage: React.FC = () => {
             <span>Registration Mode</span>
           </button>
         </div>
+      </div>
 
         {/* Tab 1: Users Directory */}
         {activeTab === "users" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-4">
-              <div className="relative w-72">
+              <div className="relative w-full sm:w-72">
                 <Search className="absolute left-3 top-2.5 h-4 w-4 text-text-subtle" />
                 <input
                   type="text"
@@ -410,7 +413,7 @@ export const AdminDashboardPage: React.FC = () => {
                   render: (u) => (
                     <div>
                       <div className="font-semibold text-text">{u.full_name}</div>
-                      <div className="text-xs text-text-muted">{u.email}</div>
+                      <div className="text-xs text-text-muted break-all" title={u.email}>{u.email}</div>
                     </div>
                   ),
                 },
@@ -432,6 +435,7 @@ export const AdminDashboardPage: React.FC = () => {
                       <Button
                         size="sm"
                         variant="primary"
+                        className="min-h-[44px] sm:min-h-[32px] px-3"
                         onClick={() => approveMutation.mutate(u.id)}
                       >
                         Approve
@@ -439,7 +443,7 @@ export const AdminDashboardPage: React.FC = () => {
                       <Button
                         size="sm"
                         variant="ghost"
-                        className="text-danger hover:bg-danger-surface"
+                        className="text-danger hover:bg-danger-surface min-h-[44px] sm:min-h-[32px] px-3"
                         onClick={() => rejectMutation.mutate(u.id)}
                       >
                         Reject

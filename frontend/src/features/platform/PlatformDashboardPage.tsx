@@ -133,7 +133,7 @@ export const PlatformDashboardPage: React.FC = () => {
       render: (t) => (
         <div>
           <div className="font-semibold text-text">{t.name}</div>
-          <div className="text-xs text-text-muted">{t.slug}.platform.local</div>
+          <div className="text-xs text-text-muted break-all" title={`${t.slug}.platform.local`}>{t.slug}.platform.local</div>
         </div>
       ),
     },
@@ -176,6 +176,7 @@ export const PlatformDashboardPage: React.FC = () => {
           <Button
             size="sm"
             variant="outline"
+            className="min-h-[44px] sm:min-h-[32px] px-3"
             onClick={() => setSelectedTenantForAdmin(t)}
           >
             <UserPlus className="h-3.5 w-3.5" />
@@ -186,6 +187,7 @@ export const PlatformDashboardPage: React.FC = () => {
             <Button
               size="sm"
               variant="ghost"
+              className="min-h-[44px] sm:min-h-[32px] px-3 text-text-muted hover:text-text"
               onClick={() =>
                 updateTenantMutation.mutate({
                   tenantId: t.id,
@@ -199,6 +201,7 @@ export const PlatformDashboardPage: React.FC = () => {
             <Button
               size="sm"
               variant="ghost"
+              className="min-h-[44px] sm:min-h-[32px] px-3 text-primary hover:text-primary-hover"
               onClick={() =>
                 updateTenantMutation.mutate({
                   tenantId: t.id,
@@ -215,41 +218,43 @@ export const PlatformDashboardPage: React.FC = () => {
   ];
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-dvh bg-background">
       {/* Top Navbar */}
-      <header className="border-b border-border bg-surface px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-primary-light rounded-lg text-primary">
+      <header className="border-b border-border bg-surface px-4 sm:px-6 py-3.5 sm:py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 bg-primary-light rounded-lg text-primary shrink-0">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-text">Platform Superadmin</h1>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold text-text truncate">Platform Superadmin</h1>
             <p className="text-xs text-text-muted">Global Tenant Management</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <Button
-              onClick={() => setIsCreateTenantOpen(true)}
-              leftIcon={<Plus className="w-4 h-4" />}
-            >
-              Create Tenant
-            </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleLogout}
-                className="text-text-muted hover:text-danger hover:bg-danger/10"
-                title="Log Out"
-              >
-                <LogOut className="h-4 w-4" />
-              </Button>
-            </div>
-          </header>
+        <div className="flex items-center gap-2.5 sm:gap-3 w-full sm:w-auto justify-end flex-wrap">
+          <ThemeToggle />
+          <Button
+            onClick={() => setIsCreateTenantOpen(true)}
+            leftIcon={<Plus className="w-4 h-4" />}
+            className="flex-1 sm:flex-initial"
+          >
+            Create Tenant
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleLogout}
+            className="text-text-muted hover:text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[36px] sm:min-h-[36px] p-2 flex items-center justify-center shrink-0"
+            title="Log Out"
+            aria-label="Log Out"
+          >
+            <LogOut className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
 
           {/* Main Body */}
-          <main className="max-w-7xl mx-auto p-6 space-y-6">
+          <main className="max-w-7xl mx-auto p-4 sm:p-6 space-y-6">
             {actionSuccessMsg && (
               <Alert variant="success" title="Success">
                 {actionSuccessMsg}

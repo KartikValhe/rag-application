@@ -812,7 +812,7 @@ export const BrandingEditorPage: React.FC = () => {
 
             {/* Scoped Preview Container */}
             <div
-              className={`branding-preview-scope ${previewDark ? "preview-dark bg-[#090d16] text-[#f8fafc]" : "bg-[#f8fafc] text-[#0f172a]"
+              className={`branding-preview-scope ${previewDark ? "preview-dark" : ""} bg-background text-text
                 } border border-border rounded-xl p-5 shadow-sm space-y-6 transition-colors`}
             >
               {/* Mock 1: Brand Navigation Bar */}

@@ -167,10 +167,11 @@ export const AcademicPage: React.FC = () => {
       header: "Actions",
       className: "text-right",
       render: (c) => (
-        <div className="flex items-center justify-end space-x-2">
+        <div className="flex items-center justify-end space-x-2 flex-wrap gap-y-1.5">
           <Button
             size="sm"
             variant="outline"
+            className="min-h-[44px] sm:min-h-[32px]"
             leftIcon={<Layers className="w-3.5 h-3.5" />}
             onClick={() => {
               setTargetClassForSubjects(c);
@@ -182,6 +183,7 @@ export const AcademicPage: React.FC = () => {
           <Button
             size="sm"
             variant="ghost"
+            className="min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
             onClick={() => {
               setClassToEdit(c);
               setIsClassModalOpen(true);
@@ -194,7 +196,7 @@ export const AcademicPage: React.FC = () => {
           <Button
             size="sm"
             variant="ghost"
-            className="text-danger hover:bg-danger/10"
+            className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
             onClick={() => {
               setClassToDelete(c);
               setIsConfirmDeleteClassOpen(true);
@@ -252,10 +254,11 @@ export const AcademicPage: React.FC = () => {
       header: "Actions",
       className: "text-right",
       render: (s) => (
-        <div className="flex items-center justify-end space-x-1.5">
+        <div className="flex items-center justify-end space-x-1.5 flex-wrap gap-y-1.5">
           <Button
             size="sm"
             variant="ghost"
+            className="min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
             onClick={() => {
               setSubjectToEdit(s);
               setIsSubjectModalOpen(true);
@@ -268,7 +271,7 @@ export const AcademicPage: React.FC = () => {
           <Button
             size="sm"
             variant="ghost"
-            className="text-danger hover:bg-danger/10"
+            className="text-danger hover:bg-danger/10 min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] p-2 flex items-center justify-center"
             onClick={() => {
               setSubjectToDelete(s);
               setIsConfirmDeleteSubjectOpen(true);
