@@ -27,22 +27,22 @@ class Settings(BaseSettings):
     # ── Database ────────────────────────────────────────────────────────────
     # Transaction-mode pooler URL (used by the FastAPI app via asyncpg).
     # asyncpg requires the scheme postgresql+asyncpg://...
-    DATABASE_URL: str
+    DATABASE_URL: str = ""
 
     # Platform (superadmin) engine connecting as app_platform role.
-    PLATFORM_DATABASE_URL: str
+    PLATFORM_DATABASE_URL: str = ""
 
     # Direct (non-pooled) URL used exclusively by Alembic and long-running
     # worker processes that need session-mode semantics.
-    MIGRATION_DATABASE_URL: str
+    MIGRATION_DATABASE_URL: str = ""
 
     # ── Redis ───────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: str = ""
 
     # ── JWT / Auth ──────────────────────────────────────────────────────────
-    SECRET_KEY: str  # Signs tenant user JWTs.
-    PLATFORM_SECRET_KEY: str  # Signs platform (superadmin) JWTs — must differ.
+    SECRET_KEY: str = ""  # Signs tenant user JWTs.
+    PLATFORM_SECRET_KEY: str = ""  # Signs platform (superadmin) JWTs — must differ.
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     # Number of failed login attempts allowed before a 15-minute lockout.
@@ -91,6 +91,20 @@ class Settings(BaseSettings):
         # Return unique origins preserving order
         return list(dict.fromkeys(origins))
 
+    @field_validator(
+        "DATABASE_URL",
+        "PLATFORM_DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+        mode="before",
+    )
+    @classmethod
+    def _validate_db_urls(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                "DATABASE_URL, PLATFORM_DATABASE_URL, and MIGRATION_DATABASE_URL must be provided via environment variables."
+            )
+        return v
+
     @field_validator("SECRET_KEY", "PLATFORM_SECRET_KEY", mode="before")
     @classmethod
     def _validate_secret(cls, v: str) -> str:
@@ -135,7 +149,7 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return a cached singleton Settings instance."""
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 
 
 # Module-level convenience alias used throughout the codebase.
