@@ -19,8 +19,8 @@ import re
 import zipfile
 from typing import Any
 
-import defusedxml.common as defused_common  # type: ignore[import-untyped]
-import defusedxml.ElementTree as ET  # type: ignore[import-untyped]
+import defusedxml.common as defused_common
+import defusedxml.ElementTree as ET
 from fastapi import HTTPException, UploadFile, status
 
 MAX_UPLOAD_SIZE = 2 * 1024 * 1024  # 2 MB hard cap

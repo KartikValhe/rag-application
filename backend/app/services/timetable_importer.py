@@ -20,9 +20,9 @@ import io
 import re
 from typing import Any
 
-import openpyxl  # type: ignore[import-untyped]
-import pdfplumber  # type: ignore[import-untyped]
-from docx import Document  # type: ignore[import-untyped]
+import openpyxl
+import pdfplumber
+from docx import Document
 
 from app.core.upload_security import (
     UploadSecurityError,

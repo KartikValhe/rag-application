@@ -58,19 +58,21 @@ packages = ["app"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501", "B008"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
-ignore_missing_imports = true
-disable_error_code = ["import-untyped"]
 plugins = ["pydantic.mypy"]
 
+# Third-party libraries that lack official PEP 561 py.typed markers or type stub packages.
+# These libraries (openpyxl, python-docx, pdfplumber, defusedxml) do not ship type definitions,
+# so we instruct mypy to ignore missing imports for them while maintaining strict type
+# checking across all internal application code.
 [[tool.mypy.overrides]]
 module = [
     "defusedxml",
@@ -83,7 +85,6 @@ module = [
     "pdfplumber.*",
 ]
 ignore_missing_imports = true
-disable_error_code = ["import-untyped"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

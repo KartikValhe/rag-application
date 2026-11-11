@@ -213,7 +213,7 @@ async def import_users(
     """Bulk-import users from a CSV file."""
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "invalid_file_type", "message": "File must be a .csv."},
         )
     contents = await file.read()
@@ -305,7 +305,7 @@ async def set_tenant_timezone_setting(
         ZoneInfo(tz_clean)
     except Exception:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "invalid_timezone", "message": f"'{tz_clean}' is not a valid IANA timezone name."},
         ) from None
 

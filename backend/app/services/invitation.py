@@ -204,14 +204,14 @@ async def bulk_import_users(
         text = csv_content.decode("utf-8-sig")  # Handle BOM from Excel exports.
     except UnicodeDecodeError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "invalid_csv", "message": "CSV must be UTF-8 encoded."},
         ) from None
 
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "empty_csv", "message": "CSV file is empty."},
         )
 
@@ -220,7 +220,7 @@ async def bulk_import_users(
     missing = required_fields - actual_fields
     if missing:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "missing_columns",
                 "message": f"CSV is missing required columns: {missing}",
@@ -230,7 +230,7 @@ async def bulk_import_users(
     rows_list = list(reader)
     if len(rows_list) > MAX_ROWS:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "too_many_rows", "message": f"CSV exceeds maximum limit of {MAX_ROWS} rows."},
         )
 

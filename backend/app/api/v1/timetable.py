@@ -105,7 +105,7 @@ async def _validate_entry_relations(
     )
     if cs_res.scalar_one_or_none() is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "subject_not_linked", "message": "Subject is not linked to this class."},
         )
 
@@ -120,7 +120,7 @@ async def _validate_entry_relations(
         )
         if ta_res.scalar_one_or_none() is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "teacher_not_assigned", "message": "Teacher is not assigned to this class and subject."},
             )
 
@@ -418,7 +418,7 @@ async def create_draft_timetable(
     """Create a new draft timetable for this class."""
     if len(payload.entries) > MAX_TIMETABLE_ENTRIES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "entries_cap_exceeded", "message": f"A timetable cannot have more than {MAX_TIMETABLE_ENTRIES} entries."},
         )
 
@@ -529,7 +529,7 @@ async def update_draft_timetable(
     if payload.entries is not None:
         if len(payload.entries) > MAX_TIMETABLE_ENTRIES:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "entries_cap_exceeded", "message": f"A timetable cannot have more than {MAX_TIMETABLE_ENTRIES} entries."},
             )
 
@@ -626,7 +626,7 @@ async def add_draft_entry(
     total_entries = count_res.scalar_one() or 0
     if total_entries >= MAX_TIMETABLE_ENTRIES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "entries_cap_exceeded", "message": f"A timetable cannot have more than {MAX_TIMETABLE_ENTRIES} entries."},
         )
 
@@ -1242,12 +1242,12 @@ async def save_imported_draft(
             e_t = datetime.time.fromisoformat(item.end_time)
         except ValueError as err:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "invalid_time_format", "message": f"Row {idx+1}: invalid time format."},
             ) from err
         if e_t <= s_t:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "invalid_time_order", "message": f"Row {idx+1}: end_time must be after start_time."},
             )
 
