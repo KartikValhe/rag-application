@@ -66,8 +66,6 @@ export const AppShell: React.FC<AppShellProps> = ({
           <Topbar
             tenantName={tenantName}
             onToggleMobileNav={() => setIsMobileOpen((prev) => !prev)}
-            onToggleCollapse={handleToggleCollapse}
-            isSidebarCollapsed={isCollapsed}
             hamburgerRef={hamburgerRef}
           />
 

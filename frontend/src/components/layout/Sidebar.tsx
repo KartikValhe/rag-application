@@ -15,6 +15,8 @@ import {
   LogOut,
   Palette,
   User as UserIcon,
+  Calendar,
+  Clock,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useAuth } from "@/features/auth/AuthContext";
@@ -114,6 +116,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           permission: "assignment:manage",
         },
         {
+          label: "Timetables & Schedule",
+          href: "/admin/timetables",
+          icon: Calendar,
+          permission: "timetable:manage",
+        },
+        {
           label: "Users & Invites",
           href: "/admin/users",
           icon: Users,
@@ -147,6 +155,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           href: "/teacher/classes",
           icon: BookOpen,
         },
+        {
+          label: "My Schedule",
+          href: "/teacher/schedule",
+          icon: Clock,
+        },
+        {
+          label: "Timetable Editor",
+          href: "/teacher/timetables",
+          icon: Calendar,
+          permission: "timetable:manage",
+        },
       ],
     },
     {
@@ -162,6 +181,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: "My Enrolled Classes",
           href: "/student/classes",
           icon: BookOpen,
+        },
+        {
+          label: "Class Timetable",
+          href: "/student/schedule",
+          icon: Calendar,
         },
       ],
     },
@@ -195,46 +219,59 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const sidebarContent = (
     <div className="flex flex-col h-full bg-surface border-r border-border">
       {/* Brand & Collapse Header */}
-      <div className="flex items-center justify-between h-16 px-4 border-b border-border select-none">
-        <div className="flex items-center space-x-3 overflow-hidden">
-          {branding.logo_url && !logoFailed ? (
-            <img
-              src={branding.logo_url}
-              alt={branding.display_name}
-              className="w-9 h-9 object-contain rounded-lg shrink-0"
-              onError={() => setLogoFailed(true)}
-            />
-          ) : (
-            <div className="w-9 h-9 rounded-lg bg-primary text-primary-foreground flex items-center justify-center font-bold text-base shrink-0 shadow-sm">
-              {branding.display_name ? branding.display_name.charAt(0).toUpperCase() : "R"}
-            </div>
-          )}
-          {!isCollapsed && (
-            <div className="flex flex-col min-w-0">
-              <span className="font-bold text-sm tracking-tight text-text truncate">
-                {branding.display_name || "Academic Portal"}
-              </span>
+      <div
+        className={cn(
+          "flex items-center h-16 border-b border-border select-none",
+          isCollapsed ? "justify-center px-2" : "justify-between px-4"
+        )}
+      >
+        {isCollapsed ? (
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className="hidden lg:flex items-center justify-center p-2 rounded-lg text-text-muted hover:text-text hover:bg-surface-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer"
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+          >
+            <PanelLeftOpen className="w-5 h-5 text-text-muted hover:text-text" />
+          </button>
+        ) : (
+          <>
+            <div className="flex items-center space-x-3 overflow-hidden min-w-0">
+              {branding.logo_url && !logoFailed ? (
+                <img
+                  src={branding.logo_url}
+                  alt={branding.display_name}
+                  className="w-9 h-9 object-contain rounded-lg shrink-0"
+                  onError={() => setLogoFailed(true)}
+                />
+              ) : (
+                <div className="w-9 h-9 rounded-lg bg-primary text-primary-foreground flex items-center justify-center font-bold text-base shrink-0 shadow-sm">
+                  {branding.display_name ? branding.display_name.charAt(0).toUpperCase() : "R"}
+                </div>
+              )}
+              <div className="flex flex-col min-w-0">
+                <span className="font-bold text-sm tracking-tight text-text truncate">
+                  {branding.display_name || "Academic Portal"}
+                </span>
                 <span className="text-[10px] uppercase font-semibold text-text-muted tracking-wider truncate">
                   {branding.tagline || "Workspace"}
                 </span>
+              </div>
             </div>
-          )}
-        </div>
 
-        {/* Desktop Collapse Toggle at Top Left */}
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          className="hidden lg:flex p-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {isCollapsed ? (
-            <PanelLeftOpen className="w-4 h-4" />
-          ) : (
-            <PanelLeftClose className="w-4 h-4" />
-          )}
-        </button>
+            {/* Desktop Collapse Toggle */}
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="hidden lg:flex p-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer shrink-0"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
+          </>
+        )}
 
         {/* Mobile close button: 44px min touch target */}
         <button

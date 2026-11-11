@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+from datetime import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -26,6 +27,7 @@ from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, Tea
 from app.db.models.branding import TenantBranding
 from app.db.models.rbac import Permission, Role, RolePermission, UserRole
 from app.db.models.tenant import PlatformAdmin, Tenant
+from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 
 ALL_PERMISSIONS = [
@@ -37,7 +39,9 @@ ALL_PERMISSIONS = [
     ("assignment:manage", "Academic Management", "Assign and remove teachers from class subjects"),
     ("document:upload", "Content Management", "Upload course and syllabus documents"),
     ("document:delete", "Content Management", "Delete syllabus documents"),
+    ("timetable:manage", "Timetable Management", "Create, edit, and delete class draft timetables and entries"),
     ("timetable:publish", "Timetable Management", "Create and publish class timetables"),
+    ("timetable:view", "Timetable Management", "View published class timetables and schedules"),
     ("chat:use", "Student AI Chat", "Chat with scoped RAG syllabus assistant"),
     ("analytics:view", "Reporting", "View system and engagement analytics"),
     ("branding:manage", "Organization", "Manage white-label theme and branding"),
@@ -56,13 +60,16 @@ SYSTEM_ROLES = {
             "subject:manage",
             "document:upload",
             "document:delete",
+            "timetable:manage",
             "timetable:publish",
+            "timetable:view",
             "chat:use",
         ],
     },
     "student": {
         "description": "Student learner with access to enrolled classes and chat assistant",
         "permissions": [
+            "timetable:view",
             "chat:use",
         ],
     },
@@ -410,6 +417,144 @@ async def seed() -> None:
                     )
                 )
                 print(f"[OK] Seeded branding for '{slug}'")
+
+            # 7. Dev Demo Timetable for Acme (Class 10-A and Class 10-B)
+            if settings.is_development and slug == "acme":
+                c_10a = classes_by_name.get("Class 10-A")
+                c_10b = classes_by_name.get("Class 10-B")
+                math_obj = subjects_by_name.get("Mathematics")
+                phys_obj = subjects_by_name.get("Physics")
+                teacher_obj = teachers[0] if teachers else None
+
+                # Also assign teacher to Physics for 10-A and Math for 10-B
+                if teacher_obj and phys_obj and c_10a:
+                    res_ta_phys = await session.execute(
+                        select(TeacherAssignment).where(
+                            TeacherAssignment.tenant_id == tenant.id,
+                            TeacherAssignment.user_id == teacher_obj.id,
+                            TeacherAssignment.class_id == c_10a.id,
+                            TeacherAssignment.subject_id == phys_obj.id,
+                        )
+                    )
+                    if not res_ta_phys.scalar_one_or_none():
+                        session.add(
+                            TeacherAssignment(
+                                tenant_id=tenant.id,
+                                user_id=teacher_obj.id,
+                                class_id=c_10a.id,
+                                subject_id=phys_obj.id,
+                            )
+                        )
+
+                if teacher_obj and math_obj and c_10b:
+                    res_ta_10b = await session.execute(
+                        select(TeacherAssignment).where(
+                            TeacherAssignment.tenant_id == tenant.id,
+                            TeacherAssignment.user_id == teacher_obj.id,
+                            TeacherAssignment.class_id == c_10b.id,
+                            TeacherAssignment.subject_id == math_obj.id,
+                        )
+                    )
+                    if not res_ta_10b.scalar_one_or_none():
+                        session.add(
+                            TeacherAssignment(
+                                tenant_id=tenant.id,
+                                user_id=teacher_obj.id,
+                                class_id=c_10b.id,
+                                subject_id=math_obj.id,
+                            )
+                        )
+                await session.flush()
+
+                # Seed Timetable for Class 10-A
+                if c_10a and math_obj and phys_obj:
+                    res_tt_10a = await session.execute(
+                        select(Timetable).where(
+                            Timetable.tenant_id == tenant.id,
+                            Timetable.class_id == c_10a.id,
+                            Timetable.status == "published",
+                        )
+                    )
+                    if not res_tt_10a.scalar_one_or_none():
+                        tt_10a = Timetable(
+                            tenant_id=tenant.id,
+                            class_id=c_10a.id,
+                            academic_year="2026-2027",
+                            term="Term 1",
+                            status="published",
+                            version=1,
+                        )
+                        session.add(tt_10a)
+                        await session.flush()
+
+                        for dow in range(5):  # Mon - Fri
+                            session.add(
+                                TimetableEntry(
+                                    tenant_id=tenant.id,
+                                    timetable_id=tt_10a.id,
+                                    class_id=c_10a.id,
+                                    subject_id=math_obj.id,
+                                    teacher_id=teacher_obj.id if teacher_obj else None,
+                                    day_of_week=dow,
+                                    start_time=time(9, 0),
+                                    end_time=time(10, 0),
+                                    room="Room 101",
+                                    note="Core Mathematics Lecture",
+                                )
+                            )
+                            session.add(
+                                TimetableEntry(
+                                    tenant_id=tenant.id,
+                                    timetable_id=tt_10a.id,
+                                    class_id=c_10a.id,
+                                    subject_id=phys_obj.id,
+                                    teacher_id=teacher_obj.id if teacher_obj else None,
+                                    day_of_week=dow,
+                                    start_time=time(10, 15),
+                                    end_time=time(11, 15),
+                                    room="Lab 202",
+                                    note="Physics Laboratory & Seminar",
+                                )
+                            )
+                        print("[OK] Seeded demo published timetable for Acme Class 10-A")
+
+                # Seed Timetable for Class 10-B
+                if c_10b and math_obj:
+                    res_tt_10b = await session.execute(
+                        select(Timetable).where(
+                            Timetable.tenant_id == tenant.id,
+                            Timetable.class_id == c_10b.id,
+                            Timetable.status == "published",
+                        )
+                    )
+                    if not res_tt_10b.scalar_one_or_none():
+                        tt_10b = Timetable(
+                            tenant_id=tenant.id,
+                            class_id=c_10b.id,
+                            academic_year="2026-2027",
+                            term="Term 1",
+                            status="published",
+                            version=1,
+                        )
+                        session.add(tt_10b)
+                        await session.flush()
+
+                        for dow in range(5):  # Mon - Fri
+                            session.add(
+                                TimetableEntry(
+                                    tenant_id=tenant.id,
+                                    timetable_id=tt_10b.id,
+                                    class_id=c_10b.id,
+                                    subject_id=math_obj.id,
+                                    teacher_id=teacher_obj.id if teacher_obj else None,
+                                    day_of_week=dow,
+                                    start_time=time(11, 30),
+                                    end_time=time(12, 30),
+                                    room="Room 201",
+                                    note="Section B Mathematics Core",
+                                )
+                            )
+                        print("[OK] Seeded demo published timetable for Acme Class 10-B")
 
     await engine.dispose()
     print("\nPhase 2 seed completed successfully!")

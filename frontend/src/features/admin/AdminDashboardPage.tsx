@@ -18,6 +18,7 @@ import {
   FileUpload,
 } from "@/components/ui";
 import { AppShell, PageHeader } from "@/components/layout";
+import { NextLectureCard, TimezoneSettingsCard } from "@/features/timetable";
 import {
   Users,
   UserPlus,
@@ -255,6 +256,9 @@ export const AdminDashboardPage: React.FC = () => {
           </Alert>
         )}
 
+        {/* Real-time schedule intelligence card */}
+        <NextLectureCard isAdmin />
+
         {/* Tab Navigation */}
         <div className="w-full overflow-x-auto scrollbar-none pb-0.5">
           <div className="flex border-b border-border space-x-4 sm:space-x-6 text-sm font-medium min-w-max">
@@ -462,65 +466,70 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         )}
 
-        {/* Tab 4: Settings (Registration Mode) */}
+        {/* Tab 4: Settings (Registration Mode & Timezone) */}
         {activeTab === "settings" && (
-          <div className="space-y-6 max-w-lg bg-surface p-6 rounded-lg border border-border">
-            <div>
-              <h3 className="text-base font-semibold text-text">
-                Organization Registration Policy
-              </h3>
-              <p className="text-xs text-text-muted mt-1">
-                Configure how students and faculty join your workspace.
-              </p>
+          <div className="space-y-6 max-w-2xl">
+            <div className="space-y-6 bg-surface p-6 rounded-lg border border-border">
+              <div>
+                <h3 className="text-base font-semibold text-text">
+                  Organization Registration Policy
+                </h3>
+                <p className="text-xs text-text-muted mt-1">
+                  Configure how students and faculty join your workspace.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {[
+                  {
+                    mode: "invite_only",
+                    title: "Invite Only",
+                    desc: "Only administrators can invite users. Self-registration is completely disabled.",
+                  },
+                  {
+                    mode: "approval",
+                    title: "Approval Required",
+                    desc: "Anyone can self-register, but accounts remain pending until approved by an admin.",
+                  },
+                  {
+                    mode: "open",
+                    title: "Open Self-Registration",
+                    desc: "Anyone can register and instantly access the workspace (classroom enrollment still requires class permissions).",
+                  },
+                ].map(({ mode, title, desc }) => (
+                  <label
+                    key={mode}
+                    className={`flex items-start gap-3 p-3.5 border rounded-lg cursor-pointer transition-colors ${
+                      regModeData?.registration_mode === mode
+                        ? "border-primary bg-primary-light/10"
+                        : "border-border hover:bg-surface-hover"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="registration_mode"
+                      value={mode}
+                      checked={regModeData?.registration_mode === mode}
+                      onChange={() =>
+                        setModeMutation.mutate(
+                          mode as "open" | "approval" | "invite_only"
+                        )
+                      }
+                      className="mt-1 text-primary focus:ring-primary"
+                    />
+                    <div>
+                      <div className="font-semibold text-sm text-text">{title}</div>
+                      <div className="text-xs text-text-muted leading-relaxed mt-0.5">
+                        {desc}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
             </div>
 
-            <div className="space-y-3">
-              {[
-                {
-                  mode: "invite_only",
-                  title: "Invite Only",
-                  desc: "Only administrators can invite users. Self-registration is completely disabled.",
-                },
-                {
-                  mode: "approval",
-                  title: "Approval Required",
-                  desc: "Anyone can self-register, but accounts remain pending until approved by an admin.",
-                },
-                {
-                  mode: "open",
-                  title: "Open Self-Registration",
-                  desc: "Anyone can register and instantly access the workspace (classroom enrollment still requires class permissions).",
-                },
-              ].map(({ mode, title, desc }) => (
-                <label
-                  key={mode}
-                  className={`flex items-start gap-3 p-3.5 border rounded-lg cursor-pointer transition-colors ${
-                    regModeData?.registration_mode === mode
-                      ? "border-primary bg-primary-light/10"
-                      : "border-border hover:bg-surface-hover"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="registration_mode"
-                    value={mode}
-                    checked={regModeData?.registration_mode === mode}
-                    onChange={() =>
-                      setModeMutation.mutate(
-                        mode as "open" | "approval" | "invite_only"
-                      )
-                    }
-                    className="mt-1 text-primary focus:ring-primary"
-                  />
-                  <div>
-                    <div className="font-semibold text-sm text-text">{title}</div>
-                    <div className="text-xs text-text-muted leading-relaxed mt-0.5">
-                      {desc}
-                    </div>
-                  </div>
-                </label>
-              ))}
-            </div>
+            {/* Tenant Timezone Card */}
+            <TimezoneSettingsCard />
           </div>
         )}
       </div>

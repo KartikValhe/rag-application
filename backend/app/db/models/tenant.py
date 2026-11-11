@@ -71,6 +71,11 @@ class Tenant(Base):
     # Escape hatch: a non-NULL DSN routes all app queries for this tenant to a
     # dedicated database instead of the shared one.  NULL = shared (default).
     db_dsn: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default="Asia/Kolkata",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("now()"),

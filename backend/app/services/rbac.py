@@ -35,13 +35,16 @@ SYSTEM_ROLE_DEFINITIONS: dict[str, dict[str, Any]] = {
             "subject:manage",
             "document:upload",
             "document:delete",
+            "timetable:manage",
             "timetable:publish",
+            "timetable:view",
             "chat:use",
         ],
     },
     "student": {
         "description": "Student learner with access to enrolled classes and chat assistant",
         "permissions": [
+            "timetable:view",
             "chat:use",
         ],
     },

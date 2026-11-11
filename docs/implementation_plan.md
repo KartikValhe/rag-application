@@ -102,7 +102,7 @@ Student message
 |-------|----------|----------|
 | Async jobs | **ARQ** (Redis-backed, async-native, fits FastAPI). Alternative: Celery | ARQ is lighter but smaller ecosystem; Celery is heavier but battle-tested |
 | ORM / migrations | SQLAlchemy 2.0 (async) + Alembic | Async SQLAlchemy has sharp edges with RLS session handling; wrap it in one helper |
-| Auth | Short-lived JWT access token (10–15 min) + rotating refresh token (stored hashed, revocable via Redis/DB) | More moving parts than session cookies, but works for SPA + future mobile **Supabase Auth is deliberately not used in v1** (see 1.6). **Known trade-off:** Access tokens embed a roles and permissions snapshot; permission changes take up to 15 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`) to reach already-issued access tokens unless sessions are rotated or revoked. |
+| Auth | Short-lived JWT access token (10–15 min) + rotating refresh token (stored hashed, revocable via Redis/DB) | More moving parts than session cookies, but works for SPA + future mobile **Supabase Auth is deliberately not used in v1** (see 1.6). |
 | LLM access | Provider-agnostic `LLMClient` + `Embedder` interfaces; model names in config | One more abstraction, but lets you change models/vendors and run offline eval cheaply |
 | File storage | **Supabase Storage** (private buckets, accessed only by the backend; wrapped in an `ObjectStore` interface) | One less service to run, but plan limits (file size, storage) apply; the interface keeps S3/R2 as a drop-in alternative |
 | API contract | FastAPI generates OpenAPI → `openapi-typescript` generates TS types/client | Needs a CI step, but removes a whole class of frontend/backend drift bugs |
@@ -401,10 +401,12 @@ Each tenant's site looks like the organization's own. Build this **before** the 
 
 ---
 
-# PHASE 4: Timetables (2 weeks)
+# PHASE 4: Timetables, import, and the schedule lookup service (3 weeks)
 
 ## Goal
-Admins and teachers publish timetables; students view them. It is the simplest end-to-end feature and exercises roles, scopes, and branding together.
+Admins and teachers publish timetables, either by entering them manually or by importing a file (spreadsheet, Word, PDF). Students and teachers view them. A **deterministic schedule lookup service** answers questions such as "what is my next lecture?" straight from the structured timetable data, with **no LLM call** (the chat in Phase 6 will use this service; the LLM is reserved for syllabus questions).
+
+**Key rule:** the timetable's source of truth is always the structured `timetable_entries` rows. An uploaded file is never "read at question time". It is parsed once into draft rows, reviewed by a human, then published. Answers come from SQL, not from the file and not from a model.
 
 ## Components
 
@@ -415,12 +417,27 @@ Admins and teachers publish timetables; students view them. It is the simplest e
 - Students: `GET /api/me/timetable` returns published timetables for the classes they are enrolled in. Teachers also get "my teaching schedule".
 - Optional: `.ics` export link per class.
 - Audit entries on publish/unpublish.
+- **Schedule lookup service** (`services/schedule.py`, plain functions, no LLM, no network):
+  - `next_lecture(user, now, class_id=None)`, `todays_schedule(...)`, `schedule_for_day(...)`, `class_schedule(...)`, `whats_on_now(...)`.
+  - `now` is computed in the **tenant's timezone**. Handles: a lecture happening right now (report it as "current", then the next one), rolling over to the next weekday or next week, days with no lectures, and no published timetable ("no timetable has been published for your class yet").
+  - **Role rules (enforced inside the service, not in the chat layer):** a student sees only classes they are enrolled in (if enrolled in several, return all of them, labelled); a teacher sees their own lectures across all classes (and, for a class they are assigned to, that class's timetable); an admin may query any class or all classes. Every result is filtered by the caller's authorized scope first.
+  - Returns a structured result (class, subject, teacher, room, start/end, weekday, date). The chat layer only formats it with fixed templates.
+  - Exposed to the UI too: `GET /me/next-lecture` powers a "Next lecture" card on each dashboard, so the feature is useful and testable before the chat exists.
+- **Timetable import (draft only, never auto-published):**
+  - Formats, in order of reliability: **CSV and XLSX using a downloadable template** (primary path), **DOCX and text-based PDF tables** (best effort, using table extraction), manual entry (always available). Scanned PDFs, images and free-form layouts are **not** parsed in v1; the UI says so and offers manual entry or the template.
+  - Parsing runs in a background job with a timeout. It produces draft `timetable_entries` plus a per-row list of problems (unknown subject, unknown teacher, bad time, missing room). Nothing is saved as published.
+  - **Review screen is mandatory:** the user sees the parsed rows, fixes errors, maps unknown names to existing subjects/teachers, then saves the draft and publishes through the normal flow (conflict checks included).
+  - Upload hardening (shared module reused by Phase 5): content sniffing (not extension), size limit, page/row/sheet caps, reject macro-enabled files (`.xlsm`, `.xls`), read XLSX values only (never formulas or external links), guard against zip bombs, parse in an isolated worker with a time limit, neutralize CSV/formula-injection characters on output, random storage names, tenant-scoped paths.
+  - The original file may be stored for audit, but is **never used to answer questions**.
+  - Optional later (Phase 10, behind a feature flag and quota): LLM-assisted extraction for scanned or irregular timetables. It would run **once per upload**, still end in the review screen, and is separate from question answering.
 
 ### Data
 `timetables`, `timetable_entries` (with tenant_id, RLS, composite FKs to classes/subjects/users).
 
 ### Frontend
 - Timetable editor (weekly grid, add/edit/move entries, save draft, publish).
+- Import wizard: download template, upload file, see parsing progress, review/fix screen, save draft. Clear messages for unsupported or unreadable files.
+- "Next lecture" card on the student, teacher and admin dashboards (uses `GET /me/next-lecture`; admins can pick a class or "all classes").
 - Student view: weekly grid + "today" card on the home screen, responsive for phones (this is where most students will look).
 - Themed using tokens from Phase 3.
 
@@ -429,11 +446,18 @@ Admins and teachers publish timetables; students view them. It is the simplest e
 - [ ] Draft timetables are invisible to students.
 - [ ] Conflicts are surfaced before publish.
 - [ ] Permission and isolation tests extended to timetable endpoints.
+- [ ] Schedule lookup returns correct answers for: lecture in progress, next lecture today, next lecture tomorrow/next week, weekend, no lectures left today, no published timetable, student in several classes, teacher across classes, admin for one class and for all classes, tenant timezone vs server timezone. All covered by unit tests with a fixed clock.
+- [ ] A student can never get another class's schedule, a draft timetable, or another tenant's data from the lookup service (tests).
+- [ ] The lookup service makes **zero** LLM or network calls (test asserts this).
+- [ ] An XLSX/CSV template import and a DOCX table import produce draft rows with per-row errors; hostile files (macro workbook, formula cells, zip bomb, oversized file, renamed executable) are rejected or neutralized; nothing is ever auto-published.
 
 ## Risks
 | Risk | Mitigation |
 |------|------------|
 | Timetable complexity creep (substitutions, holidays, multiple terms) | v1 is a weekly recurring grid plus a free-text note; substitutions are Phase 10 |
+| PDF/DOCX timetables come in endless layouts, so parsing is unreliable | Template-based CSV/XLSX is the supported path; PDF/DOCX are best effort with a mandatory review screen; everything else falls back to manual entry. Time-box the parsers |
+| A wrong imported timetable misleads students | Import creates drafts only; human review and conflict checks before publish; audit entries |
+| Holidays and one-day changes make "next lecture" wrong | v1 documents this limitation; add a simple "cancelled/changed on date" override in Phase 10 |
 | Timezones | Store times as local wall-clock time plus a tenant timezone setting; do not convert per user |
 
 ---
@@ -513,7 +537,7 @@ If a document must be shared across several classes, v1 simply uploads it once p
 
 ---
 
-# PHASE 6: Scoped RAG chat (4 weeks)
+# PHASE 6: Chat router and scoped RAG chat (4 weeks)
 
 ## Goal
 A registered student asks a question and gets an answer **grounded only in that class's documents**, with citations, streamed to the UI.
@@ -521,6 +545,7 @@ A registered student asks a question and gets an answer **grounded only in that 
 ## Components
 
 ### Backend
+- **Chat router (before any retrieval or LLM call):** a deterministic, rule-based intent classifier (keyword and pattern rules, plus fuzzy matching of class and subject names against the caller's *authorized* classes only). Schedule intents ("next lecture/class/period", "today's/tomorrow's timetable", "when is <subject>", "which room") go to the Phase 4 schedule lookup service and are answered with fixed, localizable templates: **no embeddings, no retrieval, no LLM**. If the question is not a schedule intent, or confidence is low, it falls through to the RAG path below. Rules: role-aware (student, teacher, admin as in Phase 4); an admin asking about "all classes" gets all classes, or a named class gets subject, teacher, room and time; ambiguous class names produce a short clarification question; unknown or unpublished timetables produce a clear message. Log unmatched or low-confidence phrasing (without personal data) so the rules can be improved. Router decisions are written to the message record (`route = schedule | rag | refused`) for analytics and evaluation.
 - **Chat API:** `POST /api/chat/conversations` (class + optional subject), `POST /api/chat/conversations/{id}/messages` returning **Server-Sent Events** (tokens, then a final event with citations and message id). History endpoints for list/resume/delete.
 - **Authorization:** user must be enrolled in the class (or be a teacher assigned to it for previews). The class id is validated server-side; **the retrieval filter is built from the authorized scope, never from raw client input.**
 - **Retrieval service:**
@@ -542,6 +567,7 @@ A registered student asks a question and gets an answer **grounded only in that 
 - Mobile-first layout; most student usage will be on phones.
 
 ## Exit criteria
+- [ ] "What's my next lecture?" (student), "what's my next lecture?" (teacher), and "what's the next lecture for all classes / for Class 10-A?" (admin) are answered from the timetable with **no LLM call** (test asserts it), with correct role scoping, and without citations or retrieval.
 - [ ] Student in Class A asking about a topic that exists only in Class B's documents gets the "not found in your class material" response. **Automated cross-class and cross-tenant leakage tests** seed distinctive canary strings in each scope and assert they never appear in another scope's answers or citations.
 - [ ] Answers stream with first token in under ~2 s on typical queries (p50), and citations resolve to the correct page.
 - [ ] A student not enrolled in the class gets 403 on both conversation creation and message send.

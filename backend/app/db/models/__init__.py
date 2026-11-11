@@ -23,6 +23,7 @@ from app.db.models.rbac import (
     UserRole,
 )
 from app.db.models.tenant import PlatformAdmin, Tenant
+from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 
 __all__ = [
@@ -44,4 +45,6 @@ __all__ = [
     "TeacherAssignment",
     "AuditLog",
     "TenantBranding",
+    "Timetable",
+    "TimetableEntry",
 ]

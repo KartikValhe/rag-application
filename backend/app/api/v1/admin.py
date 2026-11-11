@@ -18,7 +18,7 @@ Routes:
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from app.core.authz import public_endpoint, require
 from app.core.tenant_db import get_platform_session
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
+from app.services.audit import record_audit_event
 from app.services.invitation import accept_invitation, bulk_import_users, create_invitation
 from app.services.rbac import deactivate_user_safely
 
@@ -89,6 +90,14 @@ class ImportResponse(BaseModel):
     succeeded: int
     failed: int
     rows: list[ImportResultRow]
+
+
+class TimezoneResponse(BaseModel):
+    timezone: str
+
+
+class TimezoneUpdateRequest(BaseModel):
+    timezone: str = Field(..., max_length=64, description="Valid IANA timezone, e.g. 'Asia/Kolkata'")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -266,6 +275,58 @@ async def set_registration_mode(
         .values(registration_mode=body.registration_mode)
     )
     return RegistrationModeResponse(registration_mode=body.registration_mode)
+
+
+@router.get("/settings/timezone", response_model=TimezoneResponse, dependencies=[Depends(require("branding:manage"))])
+async def get_tenant_timezone_setting(
+    admin: AdminUser,
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> TimezoneResponse:
+    """Get the configured timezone for this tenant."""
+    result = await platform_db.execute(
+        select(Tenant.timezone).where(Tenant.id == admin.tenant_id)
+    )
+    tz = result.scalar_one_or_none() or "Asia/Kolkata"
+    return TimezoneResponse(timezone=tz)
+
+
+@router.patch("/settings/timezone", response_model=TimezoneResponse, dependencies=[Depends(require("branding:manage"))])
+async def set_tenant_timezone_setting(
+    body: TimezoneUpdateRequest,
+    admin: AdminUser,
+    request: Request,
+    db: TenantDB,
+    platform_db: AsyncSession = Depends(get_platform_session),
+) -> TimezoneResponse:
+    """Update the tenant timezone, validated against IANA zoneinfo and audited."""
+    tz_clean = body.timezone.strip()
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz_clean)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_timezone", "message": f"'{tz_clean}' is not a valid IANA timezone name."},
+        ) from None
+
+    t_res = await platform_db.execute(select(Tenant).where(Tenant.id == admin.tenant_id))
+    tenant = t_res.scalar_one()
+    old_tz = tenant.timezone
+    tenant.timezone = tz_clean
+    await platform_db.commit()
+
+    await record_audit_event(
+        tenant_id=admin.tenant_id,
+        action="tenant:update_timezone",
+        target_type="tenant",
+        target_id=str(admin.tenant_id),
+        details={"previous_timezone": old_tz, "new_timezone": tz_clean},
+        actor_id=admin.id,
+        request=request,
+        db=db,
+    )
+
+    return TimezoneResponse(timezone=tz_clean)
 
 
 @router.get("/pending-approvals", response_model=UserListResponse, dependencies=[Depends(require("user:manage"))])

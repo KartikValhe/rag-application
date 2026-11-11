@@ -34,6 +34,7 @@ import { TeacherClassesPage } from "@/features/teacher/TeacherClassesPage";
 import { TeacherClassDetailPage } from "@/features/teacher/TeacherClassDetailPage";
 import { StudentClassesPage } from "@/features/student/StudentClassesPage";
 import { StudentClassDetailPage } from "@/features/student/StudentClassDetailPage";
+import { TimetableEditorPage, ScheduleViewPage } from "@/features/timetable";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -165,6 +166,22 @@ export const App: React.FC = () => {
                       </AdminRoute>
                     }
                   />
+                  <Route
+                    path="/admin/timetables"
+                    element={
+                      <AdminRoute>
+                        <TimetableEditorPage />
+                      </AdminRoute>
+                    }
+                  />
+                  <Route
+                    path="/admin/schedule"
+                    element={
+                      <AdminRoute>
+                        <ScheduleViewPage />
+                      </AdminRoute>
+                    }
+                  />
 
                   {/* Member & Portal Dashboards */}
                   <Route
@@ -201,6 +218,22 @@ export const App: React.FC = () => {
                       </TeacherRoute>
                     }
                   />
+                  <Route
+                    path="/teacher/schedule"
+                    element={
+                      <TeacherRoute>
+                        <ScheduleViewPage />
+                      </TeacherRoute>
+                    }
+                  />
+                  <Route
+                    path="/teacher/timetables"
+                    element={
+                      <TeacherRoute>
+                        <TimetableEditorPage />
+                      </TeacherRoute>
+                    }
+                  />
 
                   {/* Student Portal Routes */}
                   <Route
@@ -224,6 +257,14 @@ export const App: React.FC = () => {
                     element={
                       <StudentRoute>
                         <StudentClassDetailPage />
+                      </StudentRoute>
+                    }
+                  />
+                  <Route
+                    path="/student/schedule"
+                    element={
+                      <StudentRoute>
+                        <ScheduleViewPage />
                       </StudentRoute>
                     }
                   />

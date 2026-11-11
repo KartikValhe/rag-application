@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "lint": "eslint src && npm run check:styles",
     "check:styles": "node scripts/check-styles.js",
-    "test": "node --test --experimental-strip-types src/features/branding/__tests__/theme_engine.test.ts scripts/__tests__/check_styles.test.js",
+    "test": "node --test --experimental-strip-types src/features/branding/__tests__/theme_engine.test.ts scripts/__tests__/check_styles.test.js src/features/timetable/__tests__/timetable_helpers.test.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

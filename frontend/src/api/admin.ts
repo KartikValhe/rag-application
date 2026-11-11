@@ -87,5 +87,17 @@ export const adminApi = {
     );
     return res.data;
   },
+
+  getTimezone: async (): Promise<{ timezone: string }> => {
+    const res = await apiClient.get<{ timezone: string }>("/admin/settings/timezone");
+    return res.data;
+  },
+
+  setTimezone: async (timezone: string): Promise<{ timezone: string }> => {
+    const res = await apiClient.patch<{ timezone: string }>("/admin/settings/timezone", {
+      timezone,
+    });
+    return res.data;
+  },
 };
 

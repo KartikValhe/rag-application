@@ -16,7 +16,7 @@ isolation checks run automatically for the new table.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 import pytest
 from sqlalchemy import delete, insert, select, update
@@ -38,6 +38,7 @@ from app.db.models.rbac import (
     UserRole,
 )
 from app.db.models.tenant import Tenant
+from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 
 pytestmark = pytest.mark.asyncio
@@ -349,6 +350,123 @@ async def test_academic_and_rbac_junctions_isolation(
                 tenant_id=tenant_b.id,
                 user_id=user_b.id,
                 class_id=class_b.id,
+            )
+        )
+        await tenant_a_session.flush()
+
+
+async def test_timetables_and_entries_isolation(
+    raw_db: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+    tenant_a_session: AsyncSession,
+    user_a: User,
+    user_b: User,
+) -> None:
+    """
+    Verify that Timetable and TimetableEntry enforce tenant isolation and RLS boundaries:
+      1. SELECT as tenant A returns only tenant A's timetables and entries.
+      2. INSERT with tenant_id=B while in tenant A's context fails with RLS check.
+    """
+    # 1. Parents for Tenant A
+    class_a = Class(tenant_id=tenant_a.id, name=f"class-tt-a-{uuid.uuid4().hex[:6]}")
+    subject_a = Subject(tenant_id=tenant_a.id, name=f"sub-tt-a-{uuid.uuid4().hex[:6]}")
+    raw_db.add_all([class_a, subject_a])
+    await raw_db.flush()
+
+    tt_a = Timetable(
+        tenant_id=tenant_a.id,
+        class_id=class_a.id,
+        academic_year="2026-2027",
+        term="Fall",
+        status="published",
+        version=1,
+    )
+    raw_db.add(tt_a)
+    await raw_db.flush()
+
+    entry_a = TimetableEntry(
+        tenant_id=tenant_a.id,
+        timetable_id=tt_a.id,
+        class_id=class_a.id,
+        subject_id=subject_a.id,
+        teacher_id=user_a.id,
+        day_of_week=0,
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        room="Room 101",
+    )
+    raw_db.add(entry_a)
+
+    # 2. Parents for Tenant B
+    class_b = Class(tenant_id=tenant_b.id, name=f"class-tt-b-{uuid.uuid4().hex[:6]}")
+    subject_b = Subject(tenant_id=tenant_b.id, name=f"sub-tt-b-{uuid.uuid4().hex[:6]}")
+    raw_db.add_all([class_b, subject_b])
+    await raw_db.flush()
+
+    tt_b = Timetable(
+        tenant_id=tenant_b.id,
+        class_id=class_b.id,
+        academic_year="2026-2027",
+        term="Fall",
+        status="published",
+        version=1,
+    )
+    raw_db.add(tt_b)
+    await raw_db.flush()
+
+    entry_b = TimetableEntry(
+        tenant_id=tenant_b.id,
+        timetable_id=tt_b.id,
+        class_id=class_b.id,
+        subject_id=subject_b.id,
+        teacher_id=user_b.id,
+        day_of_week=0,
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        room="Room 202",
+    )
+    raw_db.add(entry_b)
+    await raw_db.commit()
+
+    # 3. SELECT as Tenant A: must ONLY see Tenant A's records
+    res_tt = await tenant_a_session.execute(select(Timetable))
+    tt_rows = res_tt.scalars().all()
+    assert len(tt_rows) >= 1
+    assert all(t.tenant_id == tenant_a.id for t in tt_rows)
+    assert not any(t.tenant_id == tenant_b.id for t in tt_rows)
+
+    res_entry = await tenant_a_session.execute(select(TimetableEntry))
+    entry_rows = res_entry.scalars().all()
+    assert len(entry_rows) >= 1
+    assert all(e.tenant_id == tenant_a.id for e in entry_rows)
+    assert not any(e.tenant_id == tenant_b.id for e in entry_rows)
+
+    # 4. Cross-tenant INSERT into Timetable inside Tenant A's session must fail
+    with pytest.raises(Exception):  # noqa: B017
+        await tenant_a_session.execute(
+            insert(Timetable).values(
+                tenant_id=tenant_b.id,
+                class_id=class_b.id,
+                academic_year="2026-2027",
+                term="Spring",
+                status="draft",
+                version=1,
+            )
+        )
+        await tenant_a_session.flush()
+
+    # 5. Cross-tenant INSERT into TimetableEntry inside Tenant A's session must fail
+    with pytest.raises(Exception):  # noqa: B017
+        await tenant_a_session.execute(
+            insert(TimetableEntry).values(
+                tenant_id=tenant_b.id,
+                timetable_id=tt_b.id,
+                class_id=class_b.id,
+                subject_id=subject_b.id,
+                day_of_week=1,
+                start_time=time(11, 0),
+                end_time=time(12, 0),
             )
         )
         await tenant_a_session.flush()

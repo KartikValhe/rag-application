@@ -1,5 +1,5 @@
 import React from "react";
-import { Menu, PanelLeft, User } from "lucide-react";
+import { Menu, User } from "lucide-react";
 import { useAuth } from "@/features/auth/AuthContext";
 import { usePermission } from "@/hooks/usePermission";
 import { Badge } from "@/components/ui/Badge";
@@ -8,16 +8,12 @@ import { useBranding } from "@/features/branding";
 
 export interface TopbarProps {
   onToggleMobileNav: () => void;
-  onToggleCollapse?: () => void;
-  isSidebarCollapsed?: boolean;
   tenantName?: string;
   hamburgerRef?: React.RefObject<HTMLButtonElement>;
 }
 
 export const Topbar: React.FC<TopbarProps> = ({
   onToggleMobileNav,
-  onToggleCollapse,
-  isSidebarCollapsed,
   tenantName,
   hamburgerRef,
 }) => {
@@ -57,19 +53,6 @@ export const Topbar: React.FC<TopbarProps> = ({
             >
               <Menu className="w-5 h-5" />
             </button>
-
-            {/* Desktop Sidebar Toggle in Top Left Corner */}
-            {onToggleCollapse && (
-              <button
-                type="button"
-                onClick={onToggleCollapse}
-                className="hidden lg:flex min-w-[44px] min-h-[44px] items-center justify-center rounded-md text-text-muted hover:text-text hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer transition-colors shrink-0"
-                aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              >
-                <PanelLeft className="w-4 h-4" />
-              </button>
-            )}
 
                 <div className="flex items-center space-x-2 min-w-0">
                   <span

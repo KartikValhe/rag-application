@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
 import { AppShell } from "@/components/layout/AppShell";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { NextLectureCard } from "@/features/timetable";
 import {
   GraduationCap,
   ShieldCheck,
@@ -129,6 +130,11 @@ export const DashboardPage: React.FC = () => {
             </CardDescription>
           </CardHeader>
         </Card>
+      </div>
+
+      {/* Next Lecture Real-Time Schedule Card */}
+      <div className="mb-8">
+        <NextLectureCard isAdmin={isAdmin && !isTeacherView && !isStudentView} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
