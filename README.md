@@ -204,10 +204,32 @@ pytest backend/tests/ -v
 Run frontend verification:
 ```bash
 cd frontend
-npm run test          # 20 theme engine & style guardrail unit tests
+npm run test          # Unit tests (theme engine, style guardrails, timetable helpers, API schemas)
 npm run check:styles  # Style rule guardrail scanner (zero inline styles, zero hardcoded colors)
 npm run typecheck     # TypeScript strict type checking
 npm run lint          # ESLint + check:styles
 npm run build         # Vite production build
 ```
+
+### 4. Running Playwright End-to-End Smoke Tests
+Smoke tests run in headless mode against the local development stack with seeded demo data:
+1. Ensure the backend and frontend dev servers are running with seeded demo data:
+   ```bash
+   # Terminal 1: backend (http://localhost:8000)
+   cd backend && uvicorn app.main:app --reload --port 8000
+
+   # Terminal 2: frontend (http://localhost:5173)
+   cd frontend && npm run dev
+   ```
+2. Execute the headless Playwright smoke tests:
+   ```bash
+   cd frontend
+   npm run test:e2e
+   ```
+The smoke suite verifies:
+- Admin, teacher, and student authentication on tenant `acme`.
+- Successful navigation across all sidebar pages with zero console errors or uncaught page exceptions.
+- Faculty timetable publishing and real-time student schedule synchronization.
+- Role-based route protection (students navigating to `/admin` receive the 403 Forbidden state).
+- White-label brand isolation showing distinct branding tokens on second tenant host (`default` vs `acme`).
 

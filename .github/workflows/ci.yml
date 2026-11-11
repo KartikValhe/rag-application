@@ -55,6 +55,10 @@ jobs:
           pip install hatchling
           pip install ".[dev]"
 
+      - name: Security Audit (pip-audit)
+        working-directory: ./backend
+        run: pip-audit
+
       - name: Lint (Ruff)
         working-directory: ./backend
         run: ruff check .
