@@ -35,6 +35,7 @@ import { TeacherClassDetailPage } from "@/features/teacher/TeacherClassDetailPag
 import { StudentClassesPage } from "@/features/student/StudentClassesPage";
 import { StudentClassDetailPage } from "@/features/student/StudentClassDetailPage";
 import { TimetableEditorPage, ScheduleViewPage } from "@/features/timetable";
+import { ErrorBoundary } from "@/components/layout";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -53,7 +54,8 @@ export const App: React.FC = () => {
           <ToastProvider>
             <AuthProvider>
               <BrowserRouter>
-                <Routes>
+                <ErrorBoundary>
+                  <Routes>
                   {/* Public Auth Routes */}
                   <Route
                     path="/login"
@@ -273,7 +275,8 @@ export const App: React.FC = () => {
                   <Route path="/" element={<Navigate to="/login" replace />} />
                   <Route path="*" element={<Navigate to="/login" replace />} />
                 </Routes>
-              </BrowserRouter>
+              </ErrorBoundary>
+            </BrowserRouter>
             </AuthProvider>
           </ToastProvider>
         </BrandingProvider>

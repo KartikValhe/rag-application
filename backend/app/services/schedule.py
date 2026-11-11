@@ -349,6 +349,7 @@ def _build_schedule_item(
     is_current: bool = False,
 ) -> ScheduleItem:
     return ScheduleItem(
+        entry_id=entry.id,
         class_id=entry.class_id,
         class_name=class_name,
         subject_id=entry.subject_id,

@@ -55,6 +55,7 @@ export const getTenantSlug = (): string => {
 
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "/api/v1",
+  timeout: 15000, // 15s timeout to prevent hanging UI
   withCredentials: true, // Sends and receives HttpOnly cookies (refresh_token)
   headers: {
     "X-Requested-With": "XMLHttpRequest",

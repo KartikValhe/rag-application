@@ -1,4 +1,11 @@
 import { apiClient } from "@/api/client";
+import {
+  validateResponse,
+  MyTimetableResponseSchema,
+  NextLectureResponseSchema,
+  TimetableItemSchema,
+  TimetableEntryItemSchema,
+} from "../schemas/timetableSchemas";
 import type {
   TimetableEntryItem,
   TimetableItem,
@@ -25,15 +32,25 @@ export type {
 
 export const timetableApi = {
   // Published or active timetable for a class
-  getClassTimetable: async (classId: string): Promise<TimetableItem> => {
-    const res = await apiClient.get<TimetableItem>(`/classes/${classId}/timetables`);
-    return res.data;
+  getClassTimetable: async (classId: string): Promise<TimetableItem | null> => {
+    const res = await apiClient.get<unknown>(`/classes/${classId}/timetables`);
+    if (Array.isArray(res.data)) {
+      const items = res.data.map((item) =>
+        validateResponse(TimetableItemSchema, item, "class timetable")
+      );
+      const published = items.find((t) => t.status === "published");
+      return published || items[0] || null;
+    }
+    if (res.data) {
+      return validateResponse(TimetableItemSchema, res.data, "class timetable");
+    }
+    return null;
   },
 
   // Get or auto-create draft timetable for editing
   getDraftTimetable: async (classId: string): Promise<TimetableItem> => {
-    const res = await apiClient.get<TimetableItem>(`/classes/${classId}/timetables/draft`);
-    return res.data;
+    const res = await apiClient.get<unknown>(`/classes/${classId}/timetables/draft`);
+    return validateResponse(TimetableItemSchema, res.data, "draft timetable");
   },
 
   // Explicitly create new draft
@@ -41,17 +58,17 @@ export const timetableApi = {
     classId: string,
     payload?: { academic_year?: string; term?: string }
   ): Promise<TimetableItem> => {
-    const res = await apiClient.post<TimetableItem>(`/classes/${classId}/timetables/draft`, payload || {});
-    return res.data;
+    const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/draft`, payload || {});
+    return validateResponse(TimetableItemSchema, res.data, "draft timetable");
   },
 
   // Add a single entry to draft
   addDraftEntry: async (classId: string, payload: EntryFormPayload): Promise<TimetableEntryItem> => {
-    const res = await apiClient.post<TimetableEntryItem>(
+    const res = await apiClient.post<unknown>(
       `/classes/${classId}/timetables/draft/entries`,
       payload
     );
-    return res.data;
+    return validateResponse(TimetableEntryItemSchema, res.data, "timetable entry");
   },
 
   // Update a single entry in draft
@@ -60,11 +77,11 @@ export const timetableApi = {
     entryId: string,
     payload: EntryFormPayload
   ): Promise<TimetableEntryItem> => {
-    const res = await apiClient.put<TimetableEntryItem>(
+    const res = await apiClient.put<unknown>(
       `/classes/${classId}/timetables/draft/entries/${entryId}`,
       payload
     );
-    return res.data;
+    return validateResponse(TimetableEntryItemSchema, res.data, "timetable entry");
   },
 
   // Delete an entry from draft
@@ -85,32 +102,32 @@ export const timetableApi = {
     classId: string,
     confirmConflicts = false
   ): Promise<TimetableItem> => {
-    const res = await apiClient.post<TimetableItem>(`/classes/${classId}/timetables/publish`, {
+    const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/publish`, {
       confirm_conflicts: confirmConflicts,
     });
-    return res.data;
+    return validateResponse(TimetableItemSchema, res.data, "published timetable");
   },
 
   // Revert published timetable to draft
   unpublishTimetable: async (classId: string): Promise<TimetableItem> => {
-    const res = await apiClient.post<TimetableItem>(`/classes/${classId}/timetables/unpublish`);
-    return res.data;
+    const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/unpublish`);
+    return validateResponse(TimetableItemSchema, res.data, "draft timetable");
   },
 
   // Next lecture for current user (student, teacher, or admin)
   getMyNextLecture: async (classId?: string): Promise<NextLectureResponse> => {
-    const res = await apiClient.get<NextLectureResponse>("/me/next-lecture", {
+    const res = await apiClient.get<unknown>("/me/next-lecture", {
       params: classId ? { class_id: classId } : undefined,
     });
-    return res.data;
+    return validateResponse(NextLectureResponseSchema, res.data, "next lecture");
   },
 
   // Published timetables for current user
   getMyTimetable: async (classId?: string): Promise<MyTimetableResponse> => {
-    const res = await apiClient.get<MyTimetableResponse>("/me/timetable", {
+    const res = await apiClient.get<unknown>("/me/timetable", {
       params: classId ? { class_id: classId } : undefined,
     });
-    return res.data;
+    return validateResponse(MyTimetableResponseSchema, res.data, "user timetable");
   },
 
   // Timezone endpoints

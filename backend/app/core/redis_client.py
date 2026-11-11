@@ -28,6 +28,8 @@ async def get_redis() -> aioredis.Redis:  # type: ignore[type-arg]
             "encoding": "utf-8",
             "decode_responses": True,
             "max_connections": 20,
+            "socket_connect_timeout": 1.0,
+            "socket_timeout": 1.0,
         }
         if settings.REDIS_PASSWORD:
             kwargs["password"] = settings.REDIS_PASSWORD

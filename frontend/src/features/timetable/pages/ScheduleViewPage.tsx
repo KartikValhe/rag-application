@@ -60,26 +60,18 @@ export const ScheduleViewPage: React.FC = () => {
     setIsLoading(true);
     setError(null);
 
-    const fetchPromise: Promise<MyTimetableResponse> =
-      isAdmin && !isTeacherPortal && !isStudentPortal && selectedClassId
-        ? timetableApi.getClassTimetable(selectedClassId).then((tt) => ({
-            tenant_timezone: "",
-            classes: [tt],
-            teaching_entries: [],
-          }))
-        : timetableApi.getMyTimetable();
-
-    fetchPromise
+    timetableApi
+      .getMyTimetable(selectedClassId || undefined)
       .then((data) => {
         if (!isMounted) return;
-        setTimetableData(data || null);
+        setTimetableData(data);
       })
       .catch((err) => {
         if (!isMounted) return;
         if (err.response?.status === 404) {
           setTimetableData({ tenant_timezone: "", classes: [], teaching_entries: [] });
         } else {
-          setError(err.response?.data?.detail?.message || "Failed to load schedule.");
+          setError(err.message || err.response?.data?.detail?.message || "Failed to load schedule.");
         }
       })
       .finally(() => {
@@ -89,49 +81,27 @@ export const ScheduleViewPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [isAdmin, isTeacherPortal, isStudentPortal, selectedClassId]);
+  }, [selectedClassId]);
 
-  // Flatten all entries across published timetables defensively
+  // Extract entries directly from the single typed contract
   const allEntries: TimetableEntryItem[] = useMemo(() => {
     if (!timetableData) return [];
 
-    const list: TimetableEntryItem[] = [];
-
-    // For teacher: their teaching_entries has all sessions they instruct
-    if (
-      isTeacherPortal &&
-      Array.isArray(timetableData.teaching_entries) &&
-      timetableData.teaching_entries.length > 0
-    ) {
-      return timetableData.teaching_entries;
-    }
-
-    // Collect from classes
-    if (Array.isArray(timetableData.classes)) {
-      for (const tt of timetableData.classes) {
-        if (Array.isArray(tt?.entries)) {
-          list.push(...tt.entries);
-        }
+    if (isTeacherPortal) {
+      if ((timetableData.teaching_entries?.length ?? 0) > 0) {
+        return timetableData.teaching_entries;
       }
+      return (timetableData.classes || []).flatMap((c) => c?.entries || []);
     }
 
-    // Also include any teaching_entries not already in list
-    if (Array.isArray(timetableData.teaching_entries)) {
-      for (const te of timetableData.teaching_entries) {
-        if (!list.some((existing) => existing.id === te.id)) {
-          list.push(te);
-        }
-      }
-    }
-
-    return list;
+    return (timetableData.classes || []).flatMap((c) => c?.entries || []);
   }, [timetableData, isTeacherPortal]);
 
   // Today's lectures
   const todayEntries = useMemo(() => {
     return allEntries
-      .filter((e) => e.day_of_week === todayIndex)
-      .sort((a, b) => a.start_time.localeCompare(b.start_time));
+      .filter((e) => e && e.day_of_week === todayIndex)
+      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
   }, [allEntries, todayIndex]);
 
   const pageTitle = isTeacherPortal

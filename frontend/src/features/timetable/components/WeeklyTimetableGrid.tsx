@@ -112,7 +112,7 @@ export const WeeklyTimetableGrid: React.FC<WeeklyTimetableGridProps> = ({
                 onClick={() => setSelectedMobileDay(day.index)}
                 className={`flex-1 min-w-[70px] min-h-[44px] px-2.5 py-2 rounded-lg text-xs font-semibold flex flex-col items-center justify-center border transition-colors ${
                   isSelected
-                    ? "bg-primary text-text-inverse border-primary shadow-sm"
+                    ? "bg-primary text-primary-foreground border-primary shadow-sm"
                     : isToday
                     ? "bg-surface-hover text-primary border-primary/40"
                     : "bg-surface text-text-muted border-border hover:bg-surface-hover"
@@ -123,7 +123,7 @@ export const WeeklyTimetableGrid: React.FC<WeeklyTimetableGridProps> = ({
                 <span
                   className={`text-[10px] mt-0.5 px-1.5 py-0.2 rounded-full ${
                     isSelected
-                      ? "bg-surface/20 text-text-inverse"
+                      ? "bg-surface/20 text-primary-foreground"
                       : "bg-surface-hover text-text-muted"
                   }`}
                 >

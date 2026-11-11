@@ -8,9 +8,10 @@
     "build": "tsc && vite build",
     "lint": "eslint src && npm run check:styles",
     "check:styles": "node scripts/check-styles.js",
-    "test": "node --test --experimental-strip-types src/features/branding/__tests__/theme_engine.test.ts scripts/__tests__/check_styles.test.js src/features/timetable/__tests__/timetable_helpers.test.ts",
+    "test": "node --test --experimental-strip-types src/features/branding/__tests__/theme_engine.test.ts scripts/__tests__/check_styles.test.js src/features/timetable/__tests__/timetable_helpers.test.ts src/features/timetable/__tests__/api_contract.test.ts",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -26,6 +27,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/node": "^22.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

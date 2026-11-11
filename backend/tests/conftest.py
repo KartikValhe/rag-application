@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
@@ -54,11 +55,10 @@ _test_engine = create_async_engine(
 _TestSession = async_sessionmaker(_test_engine, expire_on_commit=False, autoflush=False)
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def setup_database() -> AsyncGenerator[None, None]:
+@pytest.fixture(scope="session", autouse=True)
+def setup_database():
     """Ensure database schema is ready for tests."""
     yield
-    await _test_engine.dispose()
 
 
 @pytest_asyncio.fixture

@@ -343,7 +343,7 @@ export const TimetableEditorPage: React.FC = () => {
               onClick={() => setViewMode("draft")}
               className={`min-h-[44px] px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-colors ${
                 viewMode === "draft"
-                  ? "bg-primary text-text-inverse border-primary"
+                  ? "bg-primary text-primary-foreground border-primary"
                   : "bg-surface text-text-muted border-border hover:bg-surface-hover"
               }`}
             >
@@ -358,7 +358,7 @@ export const TimetableEditorPage: React.FC = () => {
               onClick={() => setViewMode("published")}
               className={`min-h-[44px] px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-colors ${
                 viewMode === "published"
-                  ? "bg-primary text-text-inverse border-primary"
+                  ? "bg-primary text-primary-foreground border-primary"
                   : "bg-surface text-text-muted border-border hover:bg-surface-hover"
               }`}
             >

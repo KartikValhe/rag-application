@@ -2,13 +2,14 @@ export interface TimetableEntryItem {
   id: string;
   timetable_id: string;
   class_id: string;
+  class_name?: string | null;
   subject_id: string;
-  subject_name: string;
+  subject_name?: string | null;
   subject_code?: string | null;
   teacher_id?: string | null;
   teacher_name?: string | null;
   day_of_week: number; // 0 = Monday, ..., 6 = Sunday
-  day_name: string;
+  day_name?: string | null;
   start_time: string; // "09:00" or "09:00:00"
   end_time: string;
   room?: string | null;
@@ -54,11 +55,11 @@ export interface ConflictCheckResponse {
 }
 
 export interface NextLectureItem {
-  entry_id: string;
+  entry_id?: string | null;
   class_id: string;
   class_name: string;
   subject_id: string;
-  subject_name: string;
+  subject_name?: string | null;
   subject_code?: string | null;
   teacher_id?: string | null;
   teacher_name?: string | null;
@@ -73,12 +74,11 @@ export interface NextLectureItem {
 }
 
 export interface NextLectureResponse {
-  now_local: string;
-  timezone: string;
+  status: string;
+  message: string;
   current_lecture: NextLectureItem | null;
   next_lecture: NextLectureItem | null;
-  has_timetable: boolean;
-  has_more_today: boolean;
+  tenant_timezone: string;
 }
 
 export interface EntryFormPayload {
