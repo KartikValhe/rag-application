@@ -18,7 +18,7 @@ import signal
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
@@ -254,25 +254,26 @@ async def parse_concurrency_guard(tenant_id: uuid.UUID) -> AsyncGenerator[None, 
                     )
 
                 acquired = True
-            yield
-        except (TimeoutError, Exception) as err:
-            if isinstance(err, HTTPException):
-                raise
-            # If Redis connection fails or times out, fallback to in-memory
-            async with _parse_concurrency_guard_mem(tenant_id):
+        except HTTPException:
+            raise
+        except Exception:
+            # Redis operation failed or timed out during acquisition: fallback to in-memory
+            redis = None
+
+        if acquired and redis is not None:
+            active_redis = redis
+            try:
                 yield
-            return
-        finally:
-            if acquired:
+            finally:
                 with suppress(Exception):
-                    g_rem = await redis.decr(global_key)
+                    g_rem = await active_redis.decr(global_key)
                     if g_rem <= 0:
-                        await redis.delete(global_key)
+                        await active_redis.delete(global_key)
                 with suppress(Exception):
-                    t_rem = await redis.decr(tenant_key)
+                    t_rem = await active_redis.decr(tenant_key)
                     if t_rem <= 0:
-                        await redis.delete(tenant_key)
-        return
+                        await active_redis.delete(tenant_key)
+            return
 
     async with _parse_concurrency_guard_mem(tenant_id):
         yield
@@ -312,6 +313,10 @@ def _isolated_worker(data: bytes, format_type: str, queue: Any) -> None:
         queue.put({"success": False, "error_code": "parse_failure", "error_msg": f"Failed to parse file: {str(e)}"})
 
 
+WorkerCallable = Callable[[bytes, str, Any], None]
+isolated_worker = _isolated_worker
+
+
 # ─── Kill-able Process Execution ──────────────────────────────────────────────
 
 async def run_killable_parse(
@@ -319,33 +324,40 @@ async def run_killable_parse(
     format_type: str,
     tenant_id: uuid.UUID,
     timeout_seconds: float = 10.0,
+    worker_fn: WorkerCallable = _isolated_worker,
+    _process_holder: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Execute parsing in a multiprocessing.Process with a strict force-killable timeout.
     Guarantees that hung or malicious processes are forcefully terminated.
+    Uses explicit 'spawn' start method on both Linux and Windows to prevent deadlocks
+    caused by forking in multi-threaded async event loops.
     """
     async with parse_concurrency_guard(tenant_id):
-        # Create a multiprocessing Queue
-        ctx = multiprocessing.get_context()
+        # Create a multiprocessing Queue and Process using explicit spawn context
+        ctx = multiprocessing.get_context("spawn")
         queue = ctx.Queue()
 
         process = ctx.Process(
-            target=_isolated_worker,
+            target=worker_fn,
             args=(data, format_type, queue),
         )
+
+        if _process_holder is not None:
+            _process_holder.append(process)
 
         process.start()
         start_time = time.time()
         completed = False
 
         try:
-            while time.time() - start_time < timeout_seconds:
+            while (time.time() - start_time) < timeout_seconds:
                 if not process.is_alive():
                     completed = True
                     break
                 await asyncio.sleep(0.05)
 
-            if not completed and process.is_alive():
+            if not completed:
                 # Force kill the hung process
                 with suppress(Exception):
                     process.terminate()
@@ -390,5 +402,9 @@ async def run_killable_parse(
             if process.is_alive():
                 with suppress(Exception):
                     process.kill()
+                with suppress(Exception):
                     process.join(timeout=0.5)
-            queue.close()
+            with suppress(Exception):
+                queue.close()
+            with suppress(Exception):
+                queue.cancel_join_thread()

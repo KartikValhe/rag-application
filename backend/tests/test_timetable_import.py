@@ -14,6 +14,7 @@ Phase 4c Timetable File Import & Template Ingestion:
 """
 
 import io
+import time
 import uuid
 import zipfile
 from typing import Any
@@ -450,15 +451,76 @@ def test_sniffing_rejects_csv_with_nul_bytes() -> None:
 
 # ─── 4. Kill-able Process & Concurrency Limits Tests ──────────────────────────
 
+def _sleeping_test_worker(data: bytes, format_type: str, queue: Any) -> None:
+    """
+    Top-level worker function for testing timeout termination.
+    Must be a top-level importable function so multiprocessing 'spawn' context
+    can import and execute it in the child process.
+    Sleeps for 10 seconds, far longer than the test timeout of 1.0 second.
+    """
+    import time
+    time.sleep(10.0)
+
+
 @pytest.mark.asyncio
 async def test_killable_parse_timeout_terminates_process() -> None:
-    """A parser that exceeds timeout must be terminated cleanly and raise 408/timeout error."""
+    """
+    A parser that exceeds timeout must be terminated cleanly and raise 408/timeout error.
+    Deterministic test: passes a top-level worker that sleeps 10s with a 1s timeout.
+    Verifies:
+    1. UploadSecurityError is raised with code 'parse_timeout' and status 408.
+    2. Elapsed time is close to timeout (~1s), not the full sleep duration (10s).
+    3. The child process is cleanly terminated and reaped (not alive, no zombie).
+    4. Per-tenant and global concurrency counters are released immediately.
+    """
+    from app.services import timetable_parser_runner as tpr
+
     tenant_id = uuid.uuid4()
+    process_holder: list[Any] = []
+
+    t0 = time.time()
     with pytest.raises(UploadSecurityError) as exc:
-        # CSV structure with near-zero timeout (0.00001s)
-        await run_killable_parse(b"weekday,time\nMon,9-10", "csv", tenant_id, timeout_seconds=0.00001)
+        await run_killable_parse(
+            data=b"dummy_data",
+            format_type="csv",
+            tenant_id=tenant_id,
+            timeout_seconds=1.0,
+            worker_fn=_sleeping_test_worker,
+            _process_holder=process_holder,
+        )
+    elapsed = time.time() - t0
+
+    # 1. Error structure & status code
+    assert exc.value.status_code == 408
     assert isinstance(exc.value.detail, dict)
     assert exc.value.detail["code"] == "parse_timeout"
+
+    # 2. Timing check: took near the 1s timeout, definitely terminated before the 10s sleep
+    assert 0.8 <= elapsed < 5.0, f"Expected elapsed time near 1.0s, got {elapsed:.2f}s"
+
+    # 3. Child process state: must not be alive, exitcode must be set (reaped, no zombie)
+    assert len(process_holder) == 1
+    child_proc = process_holder[0]
+    assert not child_proc.is_alive(), "Worker process must be killed"
+    assert child_proc.exitcode is not None, "Worker process must have an exit code (reaped)"
+
+    # 4. Concurrency counters must be released
+    assert tpr._global_active_parses == 0, "Global active parses counter must be 0"
+    assert tpr._tenant_active_parses.get(tenant_id, 0) == 0, "Tenant active parses counter must be 0"
+
+    # If Redis is available, verify Redis counters were released
+    if tpr.is_redis_available():
+        from app.core import redis_client
+        redis = await redis_client.get_redis()
+        if redis is not None:
+            g_val = await redis.get(tpr.GLOBAL_CONCURRENCY_KEY)
+            assert g_val is None or int(g_val) <= 0, f"Global Redis concurrency key was not released: {g_val}"
+            t_val = await redis.get(f"{tpr.TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}")
+            assert t_val is None or int(t_val) <= 0, f"Tenant Redis concurrency key was not released: {t_val}"
+
+    # Verify concurrency guard can be immediately re-acquired for this tenant up to full capacity (2)
+    async with tpr.parse_concurrency_guard(tenant_id), tpr.parse_concurrency_guard(tenant_id):
+        pass
 
 
 @pytest.mark.asyncio
