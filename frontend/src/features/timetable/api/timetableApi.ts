@@ -5,6 +5,7 @@ import {
   NextLectureResponseSchema,
   TimetableItemSchema,
   TimetableEntryItemSchema,
+  AssignedTeacherListSchema,
 } from "../schemas/timetableSchemas";
 import type {
   TimetableEntryItem,
@@ -16,6 +17,7 @@ import type {
   EntryFormPayload,
   TimezoneResponse,
   MyTimetableResponse,
+  AssignedTeacher,
 } from "../types";
 
 export type {
@@ -28,6 +30,7 @@ export type {
   EntryFormPayload,
   TimezoneResponse,
   MyTimetableResponse,
+  AssignedTeacher,
 };
 
 export const timetableApi = {
@@ -128,6 +131,15 @@ export const timetableApi = {
       params: classId ? { class_id: classId } : undefined,
     });
     return validateResponse(MyTimetableResponseSchema, res.data, "user timetable");
+  },
+
+  // Teachers assigned to a class (optionally one subject). Scoped endpoint, no admin rights needed.
+  listAssignedTeachers: async (classId: string, subjectId?: string): Promise<AssignedTeacher[]> => {
+    const url = subjectId
+      ? `/classes/${classId}/subjects/${subjectId}/assigned-teachers`
+      : `/classes/${classId}/assigned-teachers`;
+    const res = await apiClient.get<unknown>(url);
+    return validateResponse(AssignedTeacherListSchema, res.data, "assigned teachers");
   },
 
   // Timezone endpoints

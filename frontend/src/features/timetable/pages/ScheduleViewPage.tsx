@@ -12,6 +12,7 @@ import { Select } from "@/components/ui/Select";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { getFriendlyError, parseApiError } from "@/api/errorMessages";
 import { usePermission } from "@/hooks/usePermission";
 import {
   getPythonWeekday,
@@ -50,7 +51,7 @@ export const ScheduleViewPage: React.FC = () => {
     if (!isAdmin || isTeacherPortal || isStudentPortal) return;
     academicApi
       .listClasses({ page_size: 100 })
-      .then((res) => setClasses(res.items || []))
+      .then((res) => setClasses(res.items))
       .catch(() => {});
   }, [isAdmin, isTeacherPortal, isStudentPortal]);
 
@@ -68,10 +69,10 @@ export const ScheduleViewPage: React.FC = () => {
       })
       .catch((err) => {
         if (!isMounted) return;
-        if (err.response?.status === 404) {
+        if (parseApiError(err).status === 404) {
           setTimetableData({ tenant_timezone: "", classes: [], teaching_entries: [] });
         } else {
-          setError(err.message || err.response?.data?.detail?.message || "Failed to load schedule.");
+          setError(getFriendlyError(err, "Failed to load your schedule."));
         }
       })
       .finally(() => {
@@ -83,25 +84,18 @@ export const ScheduleViewPage: React.FC = () => {
     };
   }, [selectedClassId]);
 
-  // Extract entries directly from the single typed contract
+  // The typed contract has one shape: teachers use teaching_entries, everyone else the class entries
   const allEntries: TimetableEntryItem[] = useMemo(() => {
     if (!timetableData) return [];
-
-    if (isTeacherPortal) {
-      if ((timetableData.teaching_entries?.length ?? 0) > 0) {
-        return timetableData.teaching_entries;
-      }
-      return (timetableData.classes || []).flatMap((c) => c?.entries || []);
-    }
-
-    return (timetableData.classes || []).flatMap((c) => c?.entries || []);
+    if (isTeacherPortal) return timetableData.teaching_entries;
+    return timetableData.classes.flatMap((c) => c.entries);
   }, [timetableData, isTeacherPortal]);
 
   // Today's lectures
   const todayEntries = useMemo(() => {
     return allEntries
-      .filter((e) => e && e.day_of_week === todayIndex)
-      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+      .filter((e) => e.day_of_week === todayIndex)
+      .sort((a, b) => a.start_time.localeCompare(b.start_time));
   }, [allEntries, todayIndex]);
 
   const pageTitle = isTeacherPortal
@@ -159,7 +153,7 @@ export const ScheduleViewPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <Clock className="w-5 h-5 text-primary" />
             <h3 className="text-base font-bold text-text">
-              Today&rsquo;s Schedule ({WEEKDAYS[todayIndex]?.label})
+              Today&rsquo;s Schedule ({WEEKDAYS[todayIndex].label})
             </h3>
           </div>
           <Badge variant={todayEntries.length > 0 ? "primary" : "default"} size="sm">

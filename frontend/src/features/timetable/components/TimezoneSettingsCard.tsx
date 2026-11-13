@@ -4,6 +4,8 @@ import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
 import { useToast } from "@/components/ui/Toast";
+import { Can } from "@/components/auth/Can";
+import { getFriendlyError, isForbidden } from "@/api/errorMessages";
 import { timetableApi } from "../api/timetableApi";
 import { Globe, Clock, Check } from "lucide-react";
 
@@ -23,7 +25,7 @@ const COMMON_TIMEZONES = [
   { value: "America/Los_Angeles", label: "America/Los_Angeles (PST/PDT, UTC-8/-7)" },
 ];
 
-export const TimezoneSettingsCard: React.FC = () => {
+const TimezoneSettingsCardInner: React.FC = () => {
   const toast = useToast();
   const [currentTimezone, setCurrentTimezone] = useState<string>("Asia/Kolkata");
   const [selectedTimezone, setSelectedTimezone] = useState<string>("Asia/Kolkata");
@@ -43,7 +45,11 @@ export const TimezoneSettingsCard: React.FC = () => {
       })
       .catch((err) => {
         if (!isMounted) return;
-        setError(err.response?.data?.detail?.message || "Failed to load tenant timezone setting.");
+        setError(
+          isForbidden(err)
+            ? "You do not have permission to view or change the organization timezone."
+            : getFriendlyError(err, "Failed to load the timezone setting.")
+        );
       })
       .finally(() => {
         if (isMounted) setIsLoading(false);
@@ -65,8 +71,9 @@ export const TimezoneSettingsCard: React.FC = () => {
       setSelectedTimezone(res.timezone);
       toast.success("Tenant timezone successfully updated.");
     } catch (err: unknown) {
-      const respErr = err as { response?: { data?: { detail?: { message?: string } } } };
-      const msg = respErr.response?.data?.detail?.message || "Failed to update timezone.";
+      const msg = isForbidden(err)
+        ? "You do not have permission to change the organization timezone."
+        : getFriendlyError(err, "Failed to update timezone.");
       setError(msg);
       toast.error(msg);
     } finally {
@@ -135,3 +142,9 @@ export const TimezoneSettingsCard: React.FC = () => {
     </Card>
   );
 };
+
+export const TimezoneSettingsCard: React.FC = () => (
+  <Can permission="settings:manage">
+    <TimezoneSettingsCardInner />
+  </Can>
+);

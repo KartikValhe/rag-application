@@ -160,3 +160,9 @@ export function formatConflictDetails(conflict: ConflictItem): {
       };
   }
 }
+
+/** Display name for a teacher. Uses the name only and never falls back to an email. */
+export function teacherDisplayName(t: { full_name?: string | null }): string {
+  const name = t.full_name?.trim();
+  return name ? name : "Unnamed teacher";
+}

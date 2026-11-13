@@ -4,10 +4,10 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Alert } from "@/components/ui/Alert";
-import { TimetableEntryItem, EntryFormPayload } from "../api/timetableApi";
-import { WEEKDAYS, isEndTimeAfterStartTime, normalizeTimeString } from "../utils/timetableHelpers";
+import { timetableApi, TimetableEntryItem, EntryFormPayload, AssignedTeacher } from "../api/timetableApi";
+import { WEEKDAYS, isEndTimeAfterStartTime, normalizeTimeString, teacherDisplayName } from "../utils/timetableHelpers";
 import { academicApi, SubjectItem } from "@/features/academic/api/academicApi";
-import { assignmentsApi, TeacherAssignmentItem } from "@/features/assignments/api/assignmentsApi";
+import { getFriendlyError } from "@/api/errorMessages";
 
 export interface EntryFormModalProps {
   isOpen: boolean;
@@ -27,7 +27,7 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
   isSaving = false,
 }) => {
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
-  const [assignments, setAssignments] = useState<TeacherAssignmentItem[]>([]);
+  const [teachers, setTeachers] = useState<AssignedTeacher[]>([]);
   const [isLoadingRelations, setIsLoadingRelations] = useState(false);
 
   // Form states
@@ -40,7 +40,7 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
   const [note, setNote] = useState<string>("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Load valid linked subjects and teacher assignments for this class
+  // Load subjects linked to this class
   useEffect(() => {
     if (!isOpen || !classId) return;
 
@@ -48,18 +48,15 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
     setIsLoadingRelations(true);
     setErrorMessage(null);
 
-    Promise.all([
-      academicApi.listClassSubjects(classId),
-      assignmentsApi.listAssignments({ class_id: classId, page_size: 100 }),
-    ])
-      .then(([subList, assignList]) => {
+    academicApi
+      .listClassSubjects(classId)
+      .then((subList) => {
         if (!isMounted) return;
         setSubjects(subList || []);
-        setAssignments(assignList.items || []);
       })
       .catch((err) => {
         if (!isMounted) return;
-        setErrorMessage(err.response?.data?.detail?.message || "Failed to load subjects or teachers for this class.");
+        setErrorMessage(getFriendlyError(err, "Failed to load subjects for this class."));
       })
       .finally(() => {
         if (isMounted) setIsLoadingRelations(false);
@@ -69,6 +66,28 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
       isMounted = false;
     };
   }, [isOpen, classId]);
+
+  // Load teachers from the scoped endpoint; narrows to the chosen subject
+  useEffect(() => {
+    if (!isOpen || !classId) return;
+
+    let isMounted = true;
+    timetableApi
+      .listAssignedTeachers(classId, subjectId || undefined)
+      .then((list) => {
+        if (!isMounted) return;
+        setTeachers(list);
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setTeachers([]);
+        setErrorMessage(getFriendlyError(err, "Failed to load teachers for this class."));
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, classId, subjectId]);
 
   // Populate or reset form values
   useEffect(() => {
@@ -92,21 +111,10 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
     setErrorMessage(null);
   }, [initialData, isOpen]);
 
-  // Filter teachers assigned to the currently selected subject (or all teachers in class if none selected)
-  const availableTeachers = React.useMemo(() => {
-    const map = new Map<string, string>();
-    for (const a of assignments) {
-      if (!subjectId || a.subject_id === subjectId) {
-        if (!map.has(a.user_id)) {
-          map.set(a.user_id, a.teacher_name || a.teacher_email);
-        }
-      }
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({
-      value: id,
-      label: name,
-    }));
-  }, [assignments, subjectId]);
+  const availableTeachers = React.useMemo(
+    () => teachers.map((t) => ({ value: t.id, label: teacherDisplayName(t) })),
+    [teachers]
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -137,10 +145,7 @@ export const EntryFormModal: React.FC<EntryFormModalProps> = ({
       });
       onClose();
     } catch (err: unknown) {
-      const respErr = err as { response?: { data?: { detail?: { message?: string } } } };
-      setErrorMessage(
-        respErr.response?.data?.detail?.message || "Failed to save lecture entry. Please check the values."
-      );
+      setErrorMessage(getFriendlyError(err, "Failed to save lecture entry. Please check the values."));
     }
   };
 

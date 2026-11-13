@@ -67,10 +67,10 @@ export interface NextLectureItem {
   note?: string | null;
   day_of_week: number;
   day_name: string;
-  date: string;
+  date?: string;
   start_time: string;
   end_time: string;
-  is_current: boolean;
+  is_current?: boolean;
 }
 
 export interface NextLectureResponse {
@@ -102,3 +102,9 @@ export interface MyTimetableResponse {
 }
 
 
+
+export interface AssignedTeacher {
+  id: string;
+  full_name?: string | null;
+  email?: string | null; // admins only; null or absent for everyone else
+}

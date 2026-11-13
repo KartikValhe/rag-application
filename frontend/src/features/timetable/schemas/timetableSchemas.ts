@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SCHEMA_MISMATCH_NAME } from "../../../api/errorMessages.ts";
 
 export const TimetableEntryItemSchema = z.object({
   id: z.string(),
@@ -52,10 +53,10 @@ export const NextLectureItemSchema = z.object({
   note: z.string().nullable().optional(),
   day_of_week: z.number().int().min(0).max(6),
   day_name: z.string(),
-  date: z.string(),
+  date: z.string().optional(),
   start_time: z.string(),
   end_time: z.string(),
-  is_current: z.boolean(),
+  is_current: z.boolean().optional(),
 });
 
 export const NextLectureResponseSchema = z.object({
@@ -65,6 +66,15 @@ export const NextLectureResponseSchema = z.object({
   next_lecture: NextLectureItemSchema.nullable(),
   tenant_timezone: z.string(),
 });
+
+// Email is only sent to tenant admins; for everyone else it is null or missing.
+export const AssignedTeacherSchema = z.object({
+  id: z.string(),
+  full_name: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+});
+
+export const AssignedTeacherListSchema = z.array(AssignedTeacherSchema);
 
 /**
  * Validates data from an API response against a Zod schema.
@@ -93,9 +103,11 @@ export function validateResponse<T>(
         data
       );
     }
-    throw new Error(
+    const mismatch = new Error(
       `Data format error while loading ${endpointName}. Please refresh or contact support.`
     );
+    mismatch.name = SCHEMA_MISMATCH_NAME;
+    throw mismatch;
   }
   return result.data;
 }

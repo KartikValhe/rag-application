@@ -8,6 +8,7 @@ import {
   NextLectureResponse,
   NextLectureItem,
 } from "../api/timetableApi";
+import { getFriendlyError } from "@/api/errorMessages";
 import { formatTimeRange } from "../utils/timetableHelpers";
 import { Clock, User, DoorOpen, Calendar, AlertCircle, Sparkles } from "lucide-react";
 import { academicApi, ClassItem } from "@/features/academic/api/academicApi";
@@ -50,7 +51,7 @@ export const NextLectureCard: React.FC<NextLectureCardProps> = ({
       })
       .catch((err) => {
         if (!isMounted) return;
-        setError(err.response?.data?.detail?.message || "Failed to load schedule intelligence.");
+        setError(getFriendlyError(err, "Failed to load your next lecture."));
       })
       .finally(() => {
         if (isMounted) setIsLoading(false);
@@ -63,7 +64,7 @@ export const NextLectureCard: React.FC<NextLectureCardProps> = ({
 
   const renderLectureItem = (lecture: NextLectureItem, isCurrent: boolean) => (
     <div
-      key={lecture.entry_id || `${lecture.class_id}-${lecture.start_time}`}
+      key={`${lecture.class_id}-${lecture.day_of_week}-${lecture.start_time}`}
       className={`p-4 rounded-lg border transition-colors ${
         isCurrent
           ? "bg-primary/5 border-primary/30"
@@ -166,22 +167,22 @@ export const NextLectureCard: React.FC<NextLectureCardProps> = ({
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{error}</span>
           </div>
-        ) : data?.status === "no_published_timetable" ? (
+        ) : !data ? null : data.status === "no_published_timetable" ? (
           <div className="p-6 text-center border border-dashed border-border rounded-lg bg-surface/50 space-y-2">
             <Calendar className="w-8 h-8 text-text-muted mx-auto opacity-50" />
             <h5 className="text-sm font-semibold text-text">No Published Timetable</h5>
             <p className="text-xs text-text-muted max-w-sm mx-auto">
-              {data.message || "No official timetable has been published yet for this cohort. Once published by administration, your schedule will appear here."}
+              {data.message}
             </p>
           </div>
-        ) : !data?.current_lecture && !data?.next_lecture ? (
+        ) : !data.current_lecture && !data.next_lecture ? (
           <div className="p-6 text-center border border-dashed border-border rounded-lg bg-surface/50 space-y-2">
             <Clock className="w-8 h-8 text-primary mx-auto opacity-60" />
             <h5 className="text-sm font-semibold text-text">
-              {data?.status === "no_more_today" ? "All Lectures Completed Today" : "No Upcoming Lectures"}
+              {data.status === "no_more_today" ? "All Lectures Completed Today" : "No Upcoming Lectures"}
             </h5>
             <p className="text-xs text-text-muted max-w-sm mx-auto">
-              {data?.message || "No upcoming lectures scheduled for today or subsequent days this week."}
+              {data.message}
             </p>
           </div>
         ) : (

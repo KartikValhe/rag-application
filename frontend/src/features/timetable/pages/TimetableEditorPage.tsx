@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { getFriendlyError, parseApiError } from "@/api/errorMessages";
 import { Can } from "@/components/auth/Can";
 import { usePermission } from "@/hooks/usePermission";
 import { useToast } from "@/components/ui/Toast";
@@ -88,9 +89,7 @@ export const TimetableEditorPage: React.FC = () => {
       })
       .catch((err) => {
         if (!isMounted) return;
-        toast.error(
-          err.response?.data?.detail?.message || "Failed to load classes for timetable editing."
-        );
+        toast.error(getFriendlyError(err, "Failed to load classes for timetable editing."));
       })
       .finally(() => {
         if (!isMounted) return;
@@ -123,14 +122,11 @@ export const TimetableEditorPage: React.FC = () => {
         setTimetable(res);
       }
     } catch (err: unknown) {
-      const respErr = err as { response?: { status?: number; data?: { detail?: { message?: string } } } };
-      if (viewMode === "published" && respErr.response?.status === 404) {
+      if (viewMode === "published" && parseApiError(err).status === 404) {
         setTimetable(null);
         setTimetableError("No published timetable exists for this class yet. Switch to Draft to edit and publish.");
       } else {
-        setTimetableError(
-          respErr.response?.data?.detail?.message || "Failed to load timetable for this class."
-        );
+        setTimetableError(getFriendlyError(err, "Failed to load timetable for this class."));
       }
     } finally {
       setIsLoadingTimetable(false);
@@ -193,8 +189,7 @@ export const TimetableEditorPage: React.FC = () => {
       setDeletingEntry(null);
       await loadTimetable();
     } catch (err: unknown) {
-      const respErr = err as { response?: { data?: { detail?: { message?: string } } } };
-      toast.error(respErr.response?.data?.detail?.message || "Failed to delete lecture entry.");
+      toast.error(getFriendlyError(err, "Failed to delete lecture entry."));
     } finally {
       setIsEntryDeleting(false);
     }
@@ -223,9 +218,7 @@ export const TimetableEditorPage: React.FC = () => {
         setDetectedConflicts(respErr.response.data.detail.conflicts);
         setIsConflictModalOpen(true);
       } else {
-        toast.error(
-          respErr.response?.data?.detail?.message || "Failed to publish timetable."
-        );
+        toast.error(getFriendlyError(err, "Failed to publish timetable."));
       }
     } finally {
       setIsPublishing(false);
@@ -242,8 +235,7 @@ export const TimetableEditorPage: React.FC = () => {
       setViewMode("published");
       await loadTimetable();
     } catch (err: unknown) {
-      const respErr = err as { response?: { data?: { detail?: { message?: string } } } };
-      toast.error(respErr.response?.data?.detail?.message || "Failed to publish timetable.");
+      toast.error(getFriendlyError(err, "Failed to publish timetable."));
     } finally {
       setIsPublishing(false);
     }
@@ -259,8 +251,7 @@ export const TimetableEditorPage: React.FC = () => {
       setViewMode("draft");
       await loadTimetable();
     } catch (err: unknown) {
-      const respErr = err as { response?: { data?: { detail?: { message?: string } } } };
-      toast.error(respErr.response?.data?.detail?.message || "Failed to unpublish timetable.");
+      toast.error(getFriendlyError(err, "Failed to unpublish timetable."));
     } finally {
       setIsUnpublishing(false);
     }
