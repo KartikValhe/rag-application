@@ -17,6 +17,7 @@ Routes:
 """
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr, Field
@@ -220,7 +221,7 @@ async def import_users(
     MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB
     if len(contents) > MAX_FILE_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail={"code": "file_too_large", "message": "CSV file exceeds maximum limit of 2MB."},
         )
 
@@ -277,28 +278,29 @@ async def set_registration_mode(
     return RegistrationModeResponse(registration_mode=body.registration_mode)
 
 
-@router.get("/settings/timezone", response_model=TimezoneResponse, dependencies=[Depends(require("branding:manage"))])
+@router.get("/settings/timezone", response_model=TimezoneResponse)
 async def get_tenant_timezone_setting(
-    admin: AdminUser,
-    platform_db: AsyncSession = Depends(get_platform_session),
+    admin: Annotated[User, Depends(require("settings:manage"))],
+    db: TenantDB,
 ) -> TimezoneResponse:
     """Get the configured timezone for this tenant."""
-    result = await platform_db.execute(
-        select(Tenant.timezone).where(Tenant.id == admin.tenant_id)
-    )
+    result = await db.execute(select(Tenant.timezone).where(Tenant.id == admin.tenant_id))
     tz = result.scalar_one_or_none() or "Asia/Kolkata"
     return TimezoneResponse(timezone=tz)
 
 
-@router.patch("/settings/timezone", response_model=TimezoneResponse, dependencies=[Depends(require("branding:manage"))])
+@router.patch("/settings/timezone", response_model=TimezoneResponse)
 async def set_tenant_timezone_setting(
     body: TimezoneUpdateRequest,
-    admin: AdminUser,
+    admin: Annotated[User, Depends(require("settings:manage"))],
     request: Request,
     db: TenantDB,
-    platform_db: AsyncSession = Depends(get_platform_session),
 ) -> TimezoneResponse:
-    """Update the tenant timezone, validated against IANA zoneinfo and audited."""
+    """
+    Update the tenant timezone, validated against IANA zoneinfo.
+    The change and its audit event share the tenant session's single transaction:
+    if the audit write fails, the change is rolled back.
+    """
     tz_clean = body.timezone.strip()
     try:
         from zoneinfo import ZoneInfo
@@ -309,11 +311,8 @@ async def set_tenant_timezone_setting(
             detail={"code": "invalid_timezone", "message": f"'{tz_clean}' is not a valid IANA timezone name."},
         ) from None
 
-    t_res = await platform_db.execute(select(Tenant).where(Tenant.id == admin.tenant_id))
-    tenant = t_res.scalar_one()
-    old_tz = tenant.timezone
-    tenant.timezone = tz_clean
-    await platform_db.commit()
+    old_tz = (await db.execute(select(Tenant.timezone).where(Tenant.id == admin.tenant_id))).scalar_one()
+    await db.execute(update(Tenant).where(Tenant.id == admin.tenant_id).values(timezone=tz_clean))
 
     await record_audit_event(
         tenant_id=admin.tenant_id,

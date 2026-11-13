@@ -40,11 +40,13 @@ from sqlalchemy import delete, desc, func, select
 from app.api.deps import TenantDB
 from app.core.authz import GENERIC_NOT_FOUND, Scope, ScopeType, require
 from app.core.upload_security import (
+    attachment_header,
     sanitize_filename,
     sniff_and_validate_file_type,
     stream_upload_with_limit,
 )
 from app.db.models.academic import Class, ClassSubject, Subject, TeacherAssignment
+from app.db.models.rbac import Role, UserRole
 from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 from app.schemas.timetable import (
@@ -86,6 +88,18 @@ router = APIRouter(tags=["Timetables"])
 
 
 MAX_TIMETABLE_ENTRIES = 200
+
+
+async def _can_see_emails(db: TenantDB, user: User) -> bool:
+    """Teacher email addresses are shown to tenant admins only; everyone else sees names."""
+    if user.is_admin:
+        return True
+    res = await db.execute(
+        select(Role.name)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(UserRole.tenant_id == user.tenant_id, UserRole.user_id == user.id, Role.name == "tenant_admin")
+    )
+    return res.first() is not None
 
 
 async def _validate_entry_relations(
@@ -328,9 +342,10 @@ async def list_class_subject_assigned_teachers(
         )
         .order_by(User.full_name)
     )
+    show_email = await _can_see_emails(db, current_user)
     res = await db.execute(stmt)
     return [
-        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2])
+        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2] if show_email else None)
         for row in res.all()
     ]
 
@@ -366,9 +381,10 @@ async def list_class_assigned_teachers(
     if subject_id is not None:
         query = query.where(TeacherAssignment.subject_id == subject_id)
     query = query.distinct().order_by(User.full_name)
+    show_email = await _can_see_emails(db, current_user)
     res = await db.execute(query)
     return [
-        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2])
+        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2] if show_email else None)
         for row in res.all()
     ]
 
@@ -1126,11 +1142,13 @@ async def download_csv_template(
     )
     teachers = teach_res.scalars().all()
 
-    csv_content = generate_csv_template(class_obj.name, list(subjects), list(teachers))
+    csv_content = generate_csv_template(
+        class_obj.name, list(subjects), list(teachers), include_emails=await _can_see_emails(db, current_user)
+    )
     return Response(
         content=csv_content,
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="timetable_template_{class_obj.name.replace(" ", "_")}.csv"'},
+        headers={"Content-Disposition": attachment_header(f"timetable_template_{class_obj.name}", "csv")},
     )
 
 
@@ -1169,11 +1187,13 @@ async def download_xlsx_template(
     )
     teachers = teach_res.scalars().all()
 
-    xlsx_content = generate_xlsx_template(class_obj.name, list(subjects), list(teachers))
+    xlsx_content = generate_xlsx_template(
+        class_obj.name, list(subjects), list(teachers), include_emails=await _can_see_emails(db, current_user)
+    )
     return Response(
         content=xlsx_content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="timetable_template_{class_obj.name.replace(" ", "_")}.xlsx"'},
+        headers={"Content-Disposition": attachment_header(f"timetable_template_{class_obj.name}", "xlsx")},
     )
 
 
@@ -1257,6 +1277,12 @@ async def preview_timetable_import(
         db=db,
     )
 
+    # Emails are admin-only; matching above already used them, the response must not echo them
+    show_email = await _can_see_emails(db, current_user)
+    if not show_email:
+        for row in matched_data["rows"]:
+            row["teacher_email"] = None
+
     # Build available options
     available_subjects = [
         AvailableSubjectItem(id=s.id, code=s.code, name=s.name) for s in class_subjects
@@ -1269,7 +1295,7 @@ async def preview_timetable_import(
         if u and u.id not in seen_teachers:
             seen_teachers.add(u.id)
             available_teachers.append(
-                AvailableTeacherItem(id=u.id, full_name=u.full_name, email=u.email)
+                AvailableTeacherItem(id=u.id, full_name=u.full_name, email=u.email if show_email else None)
             )
 
     return ImportPreviewResponse(

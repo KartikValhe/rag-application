@@ -235,7 +235,7 @@ class AvailableSubjectItem(BaseModel):
 class AvailableTeacherItem(BaseModel):
     id: uuid.UUID
     full_name: str
-    email: str
+    email: str | None = None  # only returned to admins
 
 
 class ImportPreviewResponse(BaseModel):

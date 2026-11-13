@@ -840,7 +840,7 @@ async def bulk_import_enrollments(
     content = await file.read()
     if len(content) > MAX_FILE_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail={"code": "file_too_large", "message": "CSV file exceeds maximum limit of 2MB."},
         )
 

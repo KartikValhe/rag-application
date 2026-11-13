@@ -156,6 +156,27 @@ When deploying to staging or production environments, observe the following mand
      ```
    - Passwords must meet the strong password policy (at least 12 characters, uppercase, lowercase, digit, and special symbol).
 
+5. **Timetable Import Sandbox & Limits:**
+   - Every file parse runs in a fresh subprocess (`python -m app.services.timetable_parse_child`) with a minimal environment (no `DATABASE_URL`, `SECRET_KEY`, `PLATFORM_SECRET_KEY`, `REDIS_*` or other secrets), an empty temporary working directory, input over stdin and a JSON result over stdout (capped at 5 MB). A hard 10 s timeout kills the whole process tree.
+   - **Linux:** the child also applies `RLIMIT_AS` (~1 GB) and `RLIMIT_CPU` (15 s).
+   - **Windows (development only):** rlimits are not available and are skipped. The other protections (clean environment, temp directory, stdin/stdout, output cap, timeout, tree kill) still apply.
+   - **Production:** run the API/worker as a **non-root user** in a **container without outbound network access**. The subprocess sandbox does not restrict network or filesystem access by itself.
+   - Concurrency caps and rate limits use an atomic Redis slot manager. Slots expire on their own if a worker dies. If Redis is unreachable and `ENVIRONMENT` is not `development`, imports fail closed with HTTP 503; in `development` an in-memory fallback is used and a loud error is logged.
+
+6. **Timetable Permission Model (intentional design):**
+   - A teacher who holds class-level `timetable:manage` (assigned to the class) controls the **whole class draft**, not just their own subjects. The class timetable is one shared draft.
+   - Teacher double-booking and room clashes are not blocked while editing. They are reported by the pre-publish conflict check and must be acknowledged with the `confirm_conflicts` flag at publish time.
+   - Teacher email addresses in pickers, templates and import previews are shown to tenant admins only; other callers see names. Import matching works by email or exact full name for everyone.
+   - The tenant timezone endpoints require the dedicated `settings:manage` permission (tenant_admin only by default). The change and its audit event are one transaction.
+
+7. **Upload Body Limits (Reverse Proxy Must Cap Too):**
+   - The API rejects multipart and timetable import/template requests above 2 MB + 64 KB with HTTP 413 (`BodyLimitMiddleware`). It checks `Content-Length` and also counts the bytes actually received, so chunked requests without `Content-Length` are cut off, and it allows at most 5 multipart parts.
+   - The application can only stop reading after the bytes reach it. The **reverse proxy / load balancer MUST also cap the request body** (e.g. NGINX `client_max_body_size 3m;`, Caddy `request_body { max_size 3MB }`, AWS ALB/WAF body limits) and use short body-read timeouts.
+   - Upload errors return fixed messages with stable error codes. Details (exception class only, never file names, content or filesystem paths) go to the server log.
+   - **PDF scan is best effort.** PDFs are rejected if their raw bytes contain `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/OpenAction` or `/AA` (after decoding `#xx` name escapes), or exceed 20,000 objects or 100 pages. It cannot see inside compressed object streams, so the real protection is the sandboxed, time- and memory-limited parser subprocess above.
+   - OpenXML relationships: only plain hyperlink relationships (`.../relationships/hyperlink`) may use `TargetMode="External"`; they are never followed or fetched. Every other external target (oleObject, attachedTemplate, externalLink, frame, external images or media) is rejected.
+   - OpenXML files (xlsx, docx, pptx) are typed by content (`xl/workbook.xml`, `word/document.xml`, `ppt/presentation.xml`), must match their extension, and are rejected on any `vbaProject.bin`, `/embeddings/` part, nested ZIP or OLE content, external relationship, or malformed XML.
+
 ---
 
 ---

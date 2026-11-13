@@ -15,13 +15,17 @@ Provides:
 """
 
 import io
+import logging
 import re
 import zipfile
 from typing import Any
+from urllib.parse import quote
 
 import defusedxml.common as defused_common
 import defusedxml.ElementTree as ET
 from fastapi import HTTPException, UploadFile, status
+
+logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_SIZE = 2 * 1024 * 1024  # 2 MB hard cap
 MAX_FILENAME_LENGTH = 100
@@ -38,12 +42,23 @@ EXE_MAGIC_MZ = b"MZ"
 ELF_MAGIC = b"\x7fELF"
 SHELL_MAGIC = b"#!"
 
-# Macro identifiers in OpenXML packages
-MACRO_PARTS = {
-    "vbaproject.bin",
-    "word/vbaproject.bin",
-    "xl/vbaproject.bin",
+# OpenXML package types: the main part that proves the type
+OPENXML_MAIN_PARTS = {
+    "xlsx": "xl/workbook.xml",
+    "docx": "word/document.xml",
+    "pptx": "ppt/presentation.xml",
 }
+
+# PDF best-effort limits (the sandboxed subprocess is the real protection)
+MAX_PDF_OBJECTS = 20000
+MAX_PDF_PAGES = 100
+PDF_FORBIDDEN_NAMES = ("JavaScript", "JS", "Launch", "EmbeddedFile", "OpenAction", "AA")
+# A PDF name ends at whitespace or a delimiter, so /JSON or /AAA must not match /JS or /AA
+_PDF_NAME_END = rb"(?![^\s()<>\[\]{}/%])"
+PDF_FORBIDDEN_RE = re.compile(rb"/(?:" + b"|".join(n.encode() for n in PDF_FORBIDDEN_NAMES) + rb")" + _PDF_NAME_END)
+PDF_HEX_ESCAPE_RE = re.compile(rb"#([0-9A-Fa-f]{2})")
+PDF_OBJ_RE = re.compile(rb"\d+\s+\d+\s+obj\b")
+PDF_PAGE_RE = re.compile(rb"/Type\s*/Page" + _PDF_NAME_END)
 
 # Control characters to strip from plain text (preserve \t, \n, \r)
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
@@ -92,6 +107,19 @@ def sanitize_filename(filename: str | None, max_length: int = MAX_FILENAME_LENGT
     return name
 
 
+def attachment_header(base_name: str, extension: str) -> str:
+    """
+    Build a safe Content-Disposition value for a download named after user-controlled text.
+    The name goes through sanitize_filename, then an ASCII fallback is used for filename=
+    and the full name is added as RFC 5987 filename*. No quotes, CR/LF or non-latin-1 bytes
+    can reach the header.
+    """
+    safe = sanitize_filename(base_name, max_length=80).replace(" ", "_")
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe)
+    utf8_name = quote(f"{safe}.{extension}", safe="")
+    return f"attachment; filename=\"{ascii_name}.{extension}\"; filename*=UTF-8''{utf8_name}"
+
+
 async def stream_upload_with_limit(
     upload_file: UploadFile,
     max_bytes: int = MAX_UPLOAD_SIZE,
@@ -113,7 +141,7 @@ async def stream_upload_with_limit(
             raise UploadSecurityError(
                 code="file_too_large",
                 message=f"File exceeds maximum allowed size of {max_bytes // (1024 * 1024)} MB.",
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             )
         buffer.write(chunk)
 
@@ -148,6 +176,7 @@ def sniff_and_validate_file_type(data: bytes, filename: str) -> str:
 
     # 3. Check PDF magic
     if data.startswith(b"%PDF-"):
+        validate_pdf_bytes(data)
         return "pdf"
 
     # 4. Check Zip-based formats (XLSX, DOCX)
@@ -177,71 +206,129 @@ def sniff_and_validate_file_type(data: bytes, filename: str) -> str:
             ) from err
 
 
+def _parse_xml(zf: zipfile.ZipFile, name: str) -> Any:
+    """Parse one package part with defusedxml. Any failure rejects the file (fail closed)."""
+    try:
+        return ET.fromstring(zf.read(name))
+    except defused_common.DefusedXmlException as err:
+        raise UploadSecurityError(
+            code="xml_entity_expansion_forbidden",
+            message="XML entity expansion (XXE/billion-laughs) detected and blocked.",
+        ) from err
+    except Exception as err:
+        # Log only the exception type: no file names, content or paths
+        logger.warning("openxml_part_unparseable error_type=%s", type(err).__name__)
+        raise UploadSecurityError(
+            code="invalid_xml", message="The document contains malformed or unreadable XML."
+        ) from err
+
+
+def _reject_macro() -> UploadSecurityError:
+    return UploadSecurityError(
+        code="macro_enabled_file",
+        message="Macro-enabled workbooks/documents (.xlsm, .docm, .pptm) are not allowed.",
+    )
+
+
+def _reject_embedded() -> UploadSecurityError:
+    return UploadSecurityError(
+        code="embedded_content", message="Documents with embedded objects or files are not allowed."
+    )
+
+
+def _check_members(zf: zipfile.ZipFile) -> set[str]:
+    """Reject macro parts, embeddings, nested archives and OLE blobs. Returns lower-case part names."""
+    names: set[str] = set()
+    for info in zf.infolist():
+        name = info.filename.replace("\\", "/").lower()
+        if name.startswith("/") or ".." in name.split("/"):
+            raise UploadSecurityError(code="invalid_openxml_format", message="The archive contains invalid entries.")
+        names.add(name)
+        if info.is_dir():
+            continue
+        if name.rsplit("/", 1)[-1] == "vbaproject.bin":
+            raise _reject_macro()
+        if "/embeddings/" in "/" + name:
+            raise _reject_embedded()
+        with zf.open(info) as member:
+            head = member.read(8)
+        if head.startswith(b"PK\x03\x04") or head.startswith(OLE2_MAGIC):
+            raise _reject_embedded()
+    return names
+
+
 def _sniff_openxml_format(data: bytes, filename: str) -> str:
     """
-    Validate and inspect ZIP-based OpenXML container (XLSX or DOCX).
-    Enforces zip safety and macro rejection.
+    Validate a ZIP-based OpenXML container (XLSX, DOCX, PPTX).
+    The type comes from the CONTENT; the extension must agree with it.
+    Every XML check fails closed.
     """
     validate_zip_archive(data)
 
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-            namelist_lower = [name.lower() for name in zf.namelist()]
+            names = _check_members(zf)
 
-            # Reject macro-enabled projects
-            for macro_part in MACRO_PARTS:
-                if macro_part in namelist_lower:
-                    raise UploadSecurityError(
-                        code="macro_enabled_file",
-                        message="Macro-enabled workbooks/documents (.xlsm, .docm) are not allowed.",
-                    )
+            if "[content_types].xml" not in names:
+                raise UploadSecurityError(code="invalid_openxml_format", message="File is not a valid Office document.")
+            real = {i.filename.lower(): i.filename for i in zf.infolist()}
+            ct_root = _parse_xml(zf, real["[content_types].xml"])
+            for el in ct_root.iter():
+                content_type = (el.get("ContentType") or "").lower()
+                if "macroenabled" in content_type or "vbaproject" in content_type:
+                    raise _reject_macro()
 
-            # Check [Content_Types].xml for macro types
-            # Parse key XML package parts with defusedxml to block XXE / entity expansion
-            for xml_name in ("[Content_Types].xml", "xl/workbook.xml", "word/document.xml"):
-                if xml_name in zf.namelist():
-                    xml_data = zf.read(xml_name)
-                    try:
-                        root = ET.fromstring(xml_data)
-                        if xml_name == "[Content_Types].xml":
-                            xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8").lower()
-                            if "macroenabled" in xml_str or "vba" in xml_str:
-                                raise UploadSecurityError(
-                                    code="macro_enabled_file",
-                                    message="Macro-enabled workbooks/documents (.xlsm, .docm) are not allowed.",
-                                )
-                    except defused_common.DefusedXmlException as err:
-                        raise UploadSecurityError(
-                            code="xml_entity_expansion_forbidden",
-                            message="XML entity expansion (XXE/billion-laughs) detected and blocked.",
-                        ) from err
-                    except UploadSecurityError:
-                        raise
-                    except Exception:
-                        pass
+            # Relationship parts must parse and must not point outside the package
+            for lower, original in real.items():
+                if lower.endswith(".rels"):
+                    for rel in _parse_xml(zf, original).iter():
+                        # Only plain hyperlinks may be external; the target is never fetched
+                        rel_type = (rel.get("Type") or "").rstrip("/").lower()
+                        is_hyperlink = rel_type.endswith("/relationships/hyperlink")
+                        if (rel.get("TargetMode") or "").lower() == "external" and not is_hyperlink:
+                            raise UploadSecurityError(
+                                code="external_relationship",
+                                message="Documents with links to external resources are not allowed.",
+                            )
 
-            is_xlsx = any(name.startswith("xl/") for name in namelist_lower)
-            is_docx = any(name.startswith("word/") for name in namelist_lower)
+            detected = [kind for kind, part in OPENXML_MAIN_PARTS.items() if part in names]
+            if len(detected) != 1:
+                raise UploadSecurityError(
+                    code="invalid_openxml_format",
+                    message="File is not a valid Excel (.xlsx), Word (.docx) or PowerPoint (.pptx) document.",
+                )
+            kind = detected[0]
+            # The main part must parse too (this also blocks entity expansion in it)
+            _parse_xml(zf, real[OPENXML_MAIN_PARTS[kind]])
 
-            if is_xlsx and not is_docx:
-                return "xlsx"
-            if is_docx and not is_xlsx:
-                return "docx"
-
-            # Fallback to extension if structure is ambiguous
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-            if ext == "xlsx":
-                return "xlsx"
-            if ext == "docx":
-                return "docx"
-
-            raise UploadSecurityError(
-                code="invalid_openxml_format",
-                message="File is not a valid Excel (.xlsx) or Word (.docx) document.",
-            )
+            if ext != kind:
+                raise UploadSecurityError(
+                    code="file_type_mismatch",
+                    message="The file extension does not match the file content.",
+                )
+            return kind
 
     except zipfile.BadZipFile as err:
-        raise UploadSecurityError(code="corrupt_archive", message="Uploaded archive is corrupted or not a valid zip container.") from err
+        raise UploadSecurityError(
+            code="corrupt_archive", message="Uploaded archive is corrupted or not a valid zip container."
+        ) from err
+
+
+def validate_pdf_bytes(data: bytes) -> None:
+    """
+    Best-effort scan of the raw PDF bytes for active content and excessive size.
+    It cannot see inside compressed object streams; the real protection is the sandboxed parser.
+    """
+    # Decode #xx name escapes first, so /J#61vaScript is seen as /JavaScript
+    plain = PDF_HEX_ESCAPE_RE.sub(lambda m: bytes([int(m.group(1), 16)]), data)
+    if PDF_FORBIDDEN_RE.search(plain):
+        raise UploadSecurityError(
+            code="pdf_active_content",
+            message="PDFs with scripts, launch actions or embedded files are not allowed.",
+        )
+    if len(PDF_OBJ_RE.findall(plain)) > MAX_PDF_OBJECTS or len(PDF_PAGE_RE.findall(plain)) > MAX_PDF_PAGES:
+        raise UploadSecurityError(code="pdf_too_complex", message="The PDF is too large or complex to process.")
 
 
 def validate_zip_archive(data: bytes) -> None:
@@ -263,7 +350,7 @@ def validate_zip_archive(data: bytes) -> None:
     if len(infolist) > MAX_ZIP_MEMBERS:
         raise UploadSecurityError(
             code="zip_bomb_detected",
-            message=f"Archive contains too many files ({len(infolist)} > {MAX_ZIP_MEMBERS}).",
+            message="Archive contains too many files.",
         )
 
     total_uncompressed = 0
@@ -279,7 +366,7 @@ def validate_zip_archive(data: bytes) -> None:
         if info.file_size > MAX_ZIP_MEMBER_UNCOMPRESSED:
             raise UploadSecurityError(
                 code="zip_member_too_large",
-                message=f"Archive member {info.filename} exceeds maximum size of {MAX_ZIP_MEMBER_UNCOMPRESSED // (1024*1024)} MB.",
+                message=f"An archive member exceeds the maximum size of {MAX_ZIP_MEMBER_UNCOMPRESSED // (1024*1024)} MB.",
             )
 
         total_uncompressed += info.file_size
@@ -295,7 +382,7 @@ def validate_zip_archive(data: bytes) -> None:
             if ratio > MAX_ZIP_COMPRESSION_RATIO:
                 raise UploadSecurityError(
                     code="zip_bomb_detected",
-                    message=f"Archive member {info.filename} has an abnormally high compression ratio ({ratio:.1f}:1).",
+                    message="An archive member has an abnormally high compression ratio.",
                 )
 
 

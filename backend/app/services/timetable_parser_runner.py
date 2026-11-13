@@ -1,44 +1,48 @@
 """
 app/services/timetable_parser_runner.py
 ───────────────────────────────────────
-Kill-able process runner with concurrency and rate limits for timetable parsing.
+Hardened runner for timetable parsing: limits, slots and a sandboxed child process.
 
-Key security requirements:
-- Runs parsing in a dedicated multiprocessing.Process that can be force-killed.
-- Hard 10-second timeout.
-- Global concurrency cap (max 5 simultaneous parses).
-- Per-tenant concurrency cap (max 2 simultaneous parses).
-- Per-user and per-tenant rate limits (sliding window).
+Each parse runs in a FRESH subprocess (`python -m <child module>`):
+- minimal environment: no DATABASE_URL, SECRET_KEY, REDIS_* or any other secret;
+- empty temporary working directory, deleted afterwards;
+- file bytes in over stdin, one JSON result out over stdout (capped at 5 MB);
+- hard wall-clock timeout that kills the whole process tree;
+- the parent reads output while it waits, so large results never look like a timeout;
+- on Linux the child applies RLIMIT_AS / RLIMIT_CPU (see timetable_parse_child.py).
+
+Concurrency caps and rate limits use the atomic slot manager in app/core/slots.py.
 """
 
 import asyncio
-import multiprocessing
+import json
+import logging
 import os
+import shutil
 import signal
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 import uuid
-from collections import defaultdict
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, status
 
-from app.core import redis_client
+from app.core.slots import SlotLease, SlotLimit, SlotManager, SlotRejected, default_manager
 from app.core.upload_security import UploadSecurityError
-from app.services.timetable_importer import (
-    extract_raw_records,
-    parse_raw_csv,
-    parse_raw_docx,
-    parse_raw_pdf,
-    parse_raw_xlsx,
-)
+
+logger = logging.getLogger(__name__)
 
 # ─── Concurrency Limits ───────────────────────────────────────────────────────
 MAX_GLOBAL_CONCURRENT_PARSES = 5
 MAX_TENANT_CONCURRENT_PARSES = 2
-CONCURRENCY_KEY_TTL = 30  # short 30s TTL prevents stuck counters if a worker crashes
-REDIS_OP_TIMEOUT = 0.5  # fast timeout falls back cleanly to in-memory if Redis is offline
+# A slot token expires by itself after this long, so a crashed worker cannot block anyone.
+SLOT_LEASE_SECONDS = 30.0
 
 GLOBAL_CONCURRENCY_KEY = "concurrency:timetable_parse:global"
 TENANT_CONCURRENCY_KEY_PREFIX = "concurrency:timetable_parse:tenant:"
@@ -52,359 +56,273 @@ TENANT_RATE_LIMIT_COUNT = 30
 TENANT_RATE_LIMIT_WINDOW = 600  # 10 minutes
 TENANT_RATELIMIT_KEY_PREFIX = "ratelimit:timetable_parse:tenant:"
 
-# In-memory tracking structures (fallback when Redis is unavailable)
-_concurrency_lock: asyncio.Lock | None = None
-_global_active_parses = 0
-_tenant_active_parses: dict[uuid.UUID, int] = defaultdict(int)
+# ─── Child process ────────────────────────────────────────────────────────────
+DEFAULT_CHILD_MODULE = "app.services.timetable_parse_child"
+MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 
-_user_rate_history: dict[uuid.UUID, list[float]] = defaultdict(list)
-_tenant_rate_history: dict[uuid.UUID, list[float]] = defaultdict(list)
-
-
-def _check_and_record_rate_limit_mem(user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
-    """In-memory fallback for rate limiting."""
-    now = time.time()
-    user_times = [t for t in _user_rate_history[user_id] if now - t < USER_RATE_LIMIT_WINDOW]
-    if len(user_times) >= USER_RATE_LIMIT_COUNT:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": "rate_limit_exceeded",
-                "message": f"User upload rate limit exceeded ({USER_RATE_LIMIT_COUNT} uploads per 10 minutes). Please wait before importing again.",
-            },
-        )
-    user_times.append(now)
-    _user_rate_history[user_id] = user_times
-
-    tenant_times = [t for t in _tenant_rate_history[tenant_id] if now - t < TENANT_RATE_LIMIT_WINDOW]
-    if len(tenant_times) >= TENANT_RATE_LIMIT_COUNT:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": "tenant_rate_limit_exceeded",
-                "message": f"Organization upload rate limit exceeded ({TENANT_RATE_LIMIT_COUNT} uploads per 10 minutes). Please wait before importing again.",
-            },
-        )
-    tenant_times.append(now)
-    _tenant_rate_history[tenant_id] = tenant_times
+# Fixed client-facing messages keyed by stable error code. Anything else becomes "parse_failed".
+CHILD_ERROR_MESSAGES: dict[str, str] = {
+    "parse_failed": "The file could not be processed. Please check it and try again.",
+    "unsupported_format": "This file type cannot be imported here.",
+    "nul_byte_in_csv": "CSV file contains forbidden NUL bytes.",
+    "invalid_encoding": "CSV file encoding not supported (must be UTF-8 or CP1252).",
+    "empty_workbook": "Workbook contains no sheets.",
+    "scanned_pdf": (
+        "This PDF contains scanned images or no selectable text. "
+        "Please use the CSV/XLSX template or manual entry."
+    ),
+    "password_protected_pdf": (
+        "Password-protected PDFs cannot be imported. "
+        "Please provide an unencrypted PDF or use the CSV/XLSX template."
+    ),
+    "corrupt_pdf": "The PDF document could not be read.",
+}
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]  # directory that contains the `app` package
 
 
-def _probe_redis_available() -> bool:
-    try:
-        import socket
-        import urllib.parse
-
-        from app.core.config import settings
-
-        parsed = urllib.parse.urlparse(settings.REDIS_URL)
-        host = parsed.hostname or "127.0.0.1"
-        if host == "localhost":
-            host = "127.0.0.1"
-        port = parsed.port or 6379
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.02)
-            return s.connect_ex((host, port)) == 0
-    except Exception:
-        return False
+def _slots() -> SlotManager:
+    return default_manager
 
 
-_redis_available: bool = _probe_redis_available()
-
-
-def is_redis_available() -> bool:
-    """Fast probe to verify Redis port is reachable before attempting async connection."""
-    return _redis_available
+def _too_many(code: str, message: str, retry_after: int | None = None) -> HTTPException:
+    detail: dict[str, Any] = {"code": code, "message": message}
+    headers = None
+    if retry_after is not None:
+        detail["retry_after_seconds"] = retry_after
+        headers = {"Retry-After": str(retry_after)}
+    return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=detail, headers=headers)
 
 
 async def check_and_record_rate_limit(user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
     """
-    Enforce sliding window rate limits for imports per-user and per-tenant using Redis.
-    Falls back to in-memory tracking if Redis is unreachable.
+    Sliding-window limits per user and per tenant. Both windows are checked and recorded in one
+    atomic step, so a tenant-level rejection never consumes the user's quota.
+    Fails closed with 503 when Redis is unreachable outside development.
     """
-    user_key = f"{USER_RATELIMIT_KEY_PREFIX}{user_id}"
-    tenant_key = f"{TENANT_RATELIMIT_KEY_PREFIX}{tenant_id}"
-
-    if is_redis_available():
-        try:
-            redis = await redis_client.get_redis()
-            if redis is not None:
-                async with asyncio.timeout(REDIS_OP_TIMEOUT):
-                    u_count = await redis.incr(user_key)
-                    if u_count == 1:
-                        await redis.expire(user_key, USER_RATE_LIMIT_WINDOW)
-                    elif u_count > USER_RATE_LIMIT_COUNT:
-                        ttl = await redis.ttl(user_key)
-                        raise HTTPException(
-                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail={
-                                "code": "rate_limit_exceeded",
-                                "message": f"User upload rate limit exceeded ({USER_RATE_LIMIT_COUNT} uploads per 10 minutes). Please wait before importing again.",
-                                "retry_after_seconds": max(ttl, 0),
-                            },
-                            headers={"Retry-After": str(max(ttl, 0))},
-                        )
-
-                    t_count = await redis.incr(tenant_key)
-                    if t_count == 1:
-                        await redis.expire(tenant_key, TENANT_RATE_LIMIT_WINDOW)
-                    elif t_count > TENANT_RATE_LIMIT_COUNT:
-                        ttl = await redis.ttl(tenant_key)
-                        raise HTTPException(
-                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail={
-                                "code": "tenant_rate_limit_exceeded",
-                                "message": f"Organization upload rate limit exceeded ({TENANT_RATE_LIMIT_COUNT} uploads per 10 minutes). Please wait before importing again.",
-                                "retry_after_seconds": max(ttl, 0),
-                            },
-                            headers={"Retry-After": str(max(ttl, 0))},
-                        )
-                    return
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-
-    _check_and_record_rate_limit_mem(user_id, tenant_id)
+    limits = [
+        SlotLimit(f"{USER_RATELIMIT_KEY_PREFIX}{user_id}", USER_RATE_LIMIT_COUNT, USER_RATE_LIMIT_WINDOW),
+        SlotLimit(f"{TENANT_RATELIMIT_KEY_PREFIX}{tenant_id}", TENANT_RATE_LIMIT_COUNT, TENANT_RATE_LIMIT_WINDOW),
+    ]
+    try:
+        await _slots().acquire(limits)
+    except SlotRejected as rej:
+        if rej.index == 0:
+            raise _too_many(
+                "rate_limit_exceeded",
+                f"User upload rate limit exceeded ({USER_RATE_LIMIT_COUNT} uploads per 10 minutes). "
+                "Please wait before importing again.",
+                rej.retry_after_seconds,
+            ) from None
+        raise _too_many(
+            "tenant_rate_limit_exceeded",
+            f"Organization upload rate limit exceeded ({TENANT_RATE_LIMIT_COUNT} uploads per 10 minutes). "
+            "Please wait before importing again.",
+            rej.retry_after_seconds,
+        ) from None
 
 
 @asynccontextmanager
-async def _parse_concurrency_guard_mem(tenant_id: uuid.UUID) -> AsyncGenerator[None, None]:
-    """In-memory fallback for concurrency caps."""
-    global _global_active_parses, _concurrency_lock
-    if _concurrency_lock is None:
-        _concurrency_lock = asyncio.Lock()
-
-    async with _concurrency_lock:
-        if _global_active_parses >= MAX_GLOBAL_CONCURRENT_PARSES:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={
-                    "code": "too_many_concurrent_parses",
-                    "message": "The system is currently busy parsing files. Please retry in a few moments.",
-                },
-            )
-
-        if _tenant_active_parses[tenant_id] >= MAX_TENANT_CONCURRENT_PARSES:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={
-                    "code": "tenant_concurrent_limit_exceeded",
-                    "message": "Your organization already has concurrent timetable imports running. Please wait for them to finish.",
-                },
-            )
-
-        _global_active_parses += 1
-        _tenant_active_parses[tenant_id] += 1
-
+async def parse_concurrency_guard(
+    tenant_id: uuid.UUID, lease_seconds: float = SLOT_LEASE_SECONDS
+) -> AsyncGenerator[None, None]:
+    """
+    Global and per-tenant concurrency caps. The slot is released in a finally block; if that
+    fails or the process dies, the token expires on its own after `lease_seconds`.
+    """
+    manager = _slots()
+    lease: SlotLease
+    try:
+        lease = await manager.acquire(
+            [
+                SlotLimit(GLOBAL_CONCURRENCY_KEY, MAX_GLOBAL_CONCURRENT_PARSES, lease_seconds),
+                SlotLimit(
+                    f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}", MAX_TENANT_CONCURRENT_PARSES, lease_seconds
+                ),
+            ]
+        )
+    except SlotRejected as rej:
+        if rej.index == 0:
+            raise _too_many(
+                "too_many_concurrent_parses",
+                "The system is currently busy parsing files. Please retry in a few moments.",
+            ) from None
+        raise _too_many(
+            "tenant_concurrent_limit_exceeded",
+            "Your organization already has concurrent timetable imports running. Please wait for them to finish.",
+        ) from None
     try:
         yield
     finally:
-        async with _concurrency_lock:
-            _global_active_parses = max(0, _global_active_parses - 1)
-            _tenant_active_parses[tenant_id] = max(0, _tenant_active_parses[tenant_id] - 1)
-            if _tenant_active_parses[tenant_id] == 0:
-                _tenant_active_parses.pop(tenant_id, None)
+        await manager.release(lease)
 
 
-@asynccontextmanager
-async def parse_concurrency_guard(tenant_id: uuid.UUID) -> AsyncGenerator[None, None]:
-    """
-    Guarantees global and per-tenant concurrency caps during parsing using Redis.
-    Uses short TTL (30s) so worker crashes never leave stuck counters.
-    Decrements and releases keys in a finally block.
-    Falls back to in-memory tracking if Redis is unreachable.
-    """
-    global_key = GLOBAL_CONCURRENCY_KEY
-    tenant_key = f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}"
+# ─── Sandboxed child process ──────────────────────────────────────────────────
 
-    redis = None
-    if is_redis_available():
-        try:
-            redis = await redis_client.get_redis()
-        except Exception:
-            redis = None
-
-    if redis is not None:
-        acquired = False
-        try:
-            async with asyncio.timeout(REDIS_OP_TIMEOUT):
-                g_count = await redis.incr(global_key)
-                await redis.expire(global_key, CONCURRENCY_KEY_TTL)
-                if g_count > MAX_GLOBAL_CONCURRENT_PARSES:
-                    await redis.decr(global_key)
-                    raise HTTPException(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail={
-                            "code": "too_many_concurrent_parses",
-                            "message": "The system is currently busy parsing files. Please retry in a few moments.",
-                        },
-                    )
-
-                t_count = await redis.incr(tenant_key)
-                await redis.expire(tenant_key, CONCURRENCY_KEY_TTL)
-                if t_count > MAX_TENANT_CONCURRENT_PARSES:
-                    await redis.decr(tenant_key)
-                    await redis.decr(global_key)
-                    raise HTTPException(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail={
-                            "code": "tenant_concurrent_limit_exceeded",
-                            "message": "Your organization already has concurrent timetable imports running. Please wait for them to finish.",
-                        },
-                    )
-
-                acquired = True
-        except HTTPException:
-            raise
-        except Exception:
-            # Redis operation failed or timed out during acquisition: fallback to in-memory
-            redis = None
-
-        if acquired and redis is not None:
-            active_redis = redis
-            try:
-                yield
-            finally:
-                with suppress(Exception):
-                    g_rem = await active_redis.decr(global_key)
-                    if g_rem <= 0:
-                        await active_redis.delete(global_key)
-                with suppress(Exception):
-                    t_rem = await active_redis.decr(tenant_key)
-                    if t_rem <= 0:
-                        await active_redis.delete(tenant_key)
-            return
-
-    async with _parse_concurrency_guard_mem(tenant_id):
-        yield
+def _child_env(workdir: str) -> dict[str, str]:
+    """Minimal environment. Nothing is inherited from the parent except what Python itself needs."""
+    env = {
+        "PYTHONPATH": str(_BACKEND_ROOT),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TMPDIR": workdir,
+        "TEMP": workdir,
+        "TMP": workdir,
+    }
+    if sys.platform == "win32":
+        # Windows cannot start Python (winsock, random) without SYSTEMROOT
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    return env
 
 
-# ─── Worker Process Function ──────────────────────────────────────────────────
+def _kill_tree(proc: "subprocess.Popen[bytes]") -> None:
+    """Kill the child and everything it started."""
+    if sys.platform == "win32":
+        with suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    else:
+        with suppress(Exception):
+            os.killpg(proc.pid, signal.SIGKILL)  # child is its own session/process group leader
+    with suppress(Exception):
+        proc.kill()
 
-def _isolated_worker(data: bytes, format_type: str, queue: Any) -> None:
-    """
-    Isolated worker function running inside a separate multiprocessing.Process.
-    Catches all exceptions and sends back structured result through the queue.
-    """
+
+def _run_child_blocking(
+    data: bytes, format_type: str, child_module: str, timeout_seconds: float, max_output_bytes: int
+) -> bytes:
+    workdir = tempfile.mkdtemp(prefix="ttparse_")
+    proc: subprocess.Popen[bytes] | None = None
     try:
-        merged_cells = None
-        if format_type == "csv":
-            rows = parse_raw_csv(data)
-        elif format_type == "xlsx":
-            rows, merged_cells = parse_raw_xlsx(data)
-        elif format_type == "docx":
-            rows = parse_raw_docx(data)
-        elif format_type == "pdf":
-            rows = parse_raw_pdf(data)
+        popen_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         else:
-            queue.put({"success": False, "error_code": "unsupported_format", "error_msg": f"Unsupported format: {format_type}"})
-            return
+            popen_kwargs["start_new_session"] = True
 
-        records = extract_raw_records(rows, merged_cells)
-        queue.put({"success": True, "records": records})
-    except UploadSecurityError as ue:
-        detail = ue.detail if isinstance(ue.detail, dict) else {"message": str(ue.detail)}
-        queue.put({
-            "success": False,
-            "error_code": detail.get("code", "security_error"),
-            "error_msg": detail.get("message", str(ue)),
-        })
-    except Exception as e:
-        queue.put({"success": False, "error_code": "parse_failure", "error_msg": f"Failed to parse file: {str(e)}"})
+        proc = subprocess.Popen(
+            [sys.executable, "-P", "-m", child_module, format_type],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=workdir,
+            env=_child_env(workdir),
+            close_fds=True,
+            **popen_kwargs,
+        )
+        child = proc
+        chunks: list[bytes] = []
+        overflow = threading.Event()
 
+        def write_input() -> None:
+            try:
+                assert child.stdin is not None
+                child.stdin.write(data)
+                child.stdin.close()
+            except (OSError, ValueError):
+                pass  # child died or was killed before reading everything
 
-WorkerCallable = Callable[[bytes, str, Any], None]
-isolated_worker = _isolated_worker
+        def read_output() -> None:
+            total = 0
+            assert child.stdout is not None
+            try:
+                while True:
+                    chunk = child.stdout.read(65536)
+                    if not chunk:
+                        return
+                    total += len(chunk)
+                    if total > max_output_bytes:
+                        overflow.set()
+                        _kill_tree(child)
+                        return
+                    chunks.append(chunk)
+            except (OSError, ValueError):
+                return
 
+        writer = threading.Thread(target=write_input, daemon=True)
+        reader = threading.Thread(target=read_output, daemon=True)
+        writer.start()
+        reader.start()
 
-# ─── Kill-able Process Execution ──────────────────────────────────────────────
+        deadline = time.monotonic() + timeout_seconds
+        reader.join(timeout_seconds)
+        timed_out = reader.is_alive()
+        if not timed_out and not overflow.is_set():
+            try:
+                child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+
+        if overflow.is_set():
+            raise UploadSecurityError(
+                code="parse_output_too_large",
+                message="The parsed result is too large to process.",
+            )
+        if timed_out:
+            _kill_tree(child)
+            raise UploadSecurityError(
+                code="parse_timeout",
+                message="File parsing exceeded the 10-second timeout and was terminated.",
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            )
+        writer.join(timeout=1.0)
+        return b"".join(chunks)
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                _kill_tree(proc)
+            with suppress(Exception):
+                proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe is not None:
+                    with suppress(Exception):
+                        pipe.close()
+        shutil.rmtree(workdir, ignore_errors=True)
+
 
 async def run_killable_parse(
     data: bytes,
     format_type: str,
     tenant_id: uuid.UUID,
     timeout_seconds: float = 10.0,
-    worker_fn: WorkerCallable = _isolated_worker,
-    _process_holder: list[Any] | None = None,
+    child_module: str = DEFAULT_CHILD_MODULE,
 ) -> list[dict[str, Any]]:
     """
-    Execute parsing in a multiprocessing.Process with a strict force-killable timeout.
-    Guarantees that hung or malicious processes are forcefully terminated.
-    Uses explicit 'spawn' start method on both Linux and Windows to prevent deadlocks
-    caused by forking in multi-threaded async event loops.
+    Parse an uploaded file in a fresh, sandboxed subprocess with a hard timeout.
+    `child_module` is the module started with `python -m`; it must follow the stdin/stdout
+    contract described in timetable_parse_child.py.
     """
-    async with parse_concurrency_guard(tenant_id):
-        # Create a multiprocessing Queue and Process using explicit spawn context
-        ctx = multiprocessing.get_context("spawn")
-        queue = ctx.Queue()
-
-        process = ctx.Process(
-            target=worker_fn,
-            args=(data, format_type, queue),
+    async with parse_concurrency_guard(tenant_id, lease_seconds=max(SLOT_LEASE_SECONDS, timeout_seconds + 20)):
+        raw = await asyncio.to_thread(
+            _run_child_blocking, data, format_type, child_module, timeout_seconds, MAX_OUTPUT_BYTES
         )
 
-        if _process_holder is not None:
-            _process_holder.append(process)
-
-        process.start()
-        start_time = time.time()
-        completed = False
-
-        try:
-            while (time.time() - start_time) < timeout_seconds:
-                if not process.is_alive():
-                    completed = True
-                    break
-                await asyncio.sleep(0.05)
-
-            if not completed:
-                # Force kill the hung process
-                with suppress(Exception):
-                    process.terminate()
-
-                with suppress(Exception):
-                    process.kill()
-
-                # If pid still exists, attempt OS-level kill
-                if process.pid:
-                    with suppress(Exception):
-                        if hasattr(signal, "SIGKILL"):
-                            os.kill(process.pid, signal.SIGKILL)
-
-                process.join(timeout=1.0)
-                raise UploadSecurityError(
-                    code="parse_timeout",
-                    message="File parsing exceeded the 10-second timeout and was terminated.",
-                    status_code=status.HTTP_408_REQUEST_TIMEOUT,
-                )
-
-            process.join(timeout=1.0)
-
-            if queue.empty():
-                raise UploadSecurityError(
-                    code="worker_crash",
-                    message="Parsing process exited unexpectedly without returning data.",
-                )
-
-            res = queue.get_nowait()
-            if not res.get("success"):
-                code = res.get("error_code", "parse_failed")
-                msg = res.get("error_msg", "Failed to parse file content.")
-                raise UploadSecurityError(code=code, message=msg)
-
-            records_res = res.get("records", [])
-            if not isinstance(records_res, list):
-                return []
-            return records_res
-
-        finally:
-            # Guarantee process is cleaned up
-            if process.is_alive():
-                with suppress(Exception):
-                    process.kill()
-                with suppress(Exception):
-                    process.join(timeout=0.5)
-            with suppress(Exception):
-                queue.close()
-            with suppress(Exception):
-                queue.cancel_join_thread()
+    if not raw:
+        raise UploadSecurityError(
+            code="worker_crash",
+            message="Parsing process exited unexpectedly without returning data.",
+        )
+    try:
+        res = json.loads(raw)
+    except ValueError:
+        raise UploadSecurityError(
+            code="worker_crash",
+            message="Parsing process returned an unreadable result.",
+        ) from None
+    if not isinstance(res, dict):
+        raise UploadSecurityError(code="worker_crash", message="Parsing process returned an unreadable result.")
+    if not res.get("success"):
+        child_code = res.get("error_code")
+        if child_code == "parse_failure":
+            # Server-side detail only: the exception class, never its text, file names or content
+            logger.warning("timetable_parse_failed error_type=%s", str(res.get("error_type", "unknown"))[:80])
+        code = child_code if child_code in CHILD_ERROR_MESSAGES else "parse_failed"
+        # The child's own free-text message is ignored on purpose
+        raise UploadSecurityError(code=code, message=CHILD_ERROR_MESSAGES[code])
+    records = res.get("records", [])
+    return records if isinstance(records, list) else []

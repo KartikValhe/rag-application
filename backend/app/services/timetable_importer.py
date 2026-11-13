@@ -17,6 +17,7 @@ Strict rules:
 import csv
 import datetime
 import io
+import logging
 import re
 from typing import Any
 
@@ -29,6 +30,8 @@ from app.core.upload_security import (
     clean_plain_text,
     neutralize_formula_cells,
 )
+
+logger = logging.getLogger(__name__)
 
 # ─── Synonyms and Dictionaries ────────────────────────────────────────────────
 
@@ -273,7 +276,9 @@ def parse_raw_pdf(data: bytes) -> list[list[str]]:
                 code="password_protected_pdf",
                 message="Password-protected PDFs cannot be imported. Please provide an unencrypted PDF or use the CSV/XLSX template.",
             ) from exc
-        raise UploadSecurityError("corrupt_pdf", f"Could not read PDF document: {exc}") from exc
+        # Log only the exception type; the message may hold paths or library details
+        logger.warning("pdf_read_failed error_type=%s", type(exc).__name__)
+        raise UploadSecurityError("corrupt_pdf", "The PDF document could not be read.") from exc
 
     return rows
 
@@ -653,10 +658,16 @@ def match_and_validate_records(
 
 # ─── Template Generation (with Formula Neutralization) ─────────────────────────
 
+def _teacher_header(include_emails: bool) -> str:
+    """Non-admin templates use the teacher's full name, so no email address is exposed."""
+    return "teacher_email" if include_emails else "teacher"
+
+
 def generate_csv_template(
     class_name: str,
     subjects: list[Any],
     teachers: list[Any],
+    include_emails: bool = True,
 ) -> str:
     """
     Generate downloadable CSV template pre-populated with headers and sample rows.
@@ -666,7 +677,7 @@ def generate_csv_template(
     writer = csv.writer(output)
 
     # Header row
-    writer.writerow(["weekday", "start_time", "end_time", "subject_code", "teacher_email", "room", "note"])
+    writer.writerow(["weekday", "start_time", "end_time", "subject_code", _teacher_header(include_emails), "room", "note"])
 
     # Sample rows using actual class subjects & teachers
     if subjects and teachers:
@@ -677,7 +688,7 @@ def generate_csv_template(
                 f"{9 + i:02d}:00",
                 f"{10 + i:02d}:00",
                 neutralize_formula_cells(s.code),
-                neutralize_formula_cells(t.email),
+                neutralize_formula_cells(t.email if include_emails else t.full_name),
                 neutralize_formula_cells(f"Room {101 + i}"),
                 neutralize_formula_cells(f"{s.name} lecture"),
             ])
@@ -692,6 +703,7 @@ def generate_xlsx_template(
     class_name: str,
     subjects: list[Any],
     teachers: list[Any],
+    include_emails: bool = True,
 ) -> bytes:
     """
     Generate downloadable XLSX template with headers, sample rows, and valid codes sheet.
@@ -701,7 +713,7 @@ def generate_xlsx_template(
     ws = wb.active
     ws.title = "Timetable Template"
 
-    headers = ["weekday", "start_time", "end_time", "subject_code", "teacher_email", "room", "note"]
+    headers = ["weekday", "start_time", "end_time", "subject_code", _teacher_header(include_emails), "room", "note"]
     ws.append(headers)
 
     # Style header row
@@ -717,7 +729,7 @@ def generate_xlsx_template(
                 f"{9 + i:02d}:00",
                 f"{10 + i:02d}:00",
                 neutralize_formula_cells(s.code),
-                neutralize_formula_cells(t.email),
+                neutralize_formula_cells(t.email if include_emails else t.full_name),
                 neutralize_formula_cells(f"Room {101 + i}"),
                 neutralize_formula_cells(f"{s.name} lecture"),
             ])
@@ -731,9 +743,12 @@ def generate_xlsx_template(
         ws_ref.append([neutralize_formula_cells(s.code), neutralize_formula_cells(s.name)])
 
     ws_ref.append([])
-    ws_ref.append(["TEACHER NAME", "TEACHER EMAIL"])
+    ws_ref.append(["TEACHER NAME", "TEACHER EMAIL"] if include_emails else ["TEACHER NAME"])
     for t in teachers:
-        ws_ref.append([neutralize_formula_cells(t.full_name), neutralize_formula_cells(t.email)])
+        row = [neutralize_formula_cells(t.full_name)]
+        if include_emails:
+            row.append(neutralize_formula_cells(t.email))
+        ws_ref.append(row)
 
     buf = io.BytesIO()
     wb.save(buf)

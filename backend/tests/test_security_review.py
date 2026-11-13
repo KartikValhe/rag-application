@@ -226,35 +226,39 @@ async def test_csrf_header_required_on_refresh_and_logout(
     assert login_resp.status_code == 200
 
     # 1. Missing CSRF header on /refresh
+    client.cookies.clear()
+    client.cookies.update(login_resp.cookies)
     res_refresh_nocsrf = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug},
-        cookies=login_resp.cookies,
     )
     assert res_refresh_nocsrf.status_code == 403
     assert res_refresh_nocsrf.json()["detail"]["code"] == "csrf_detected"
 
     # 2. Missing CSRF header on /logout
+    client.cookies.clear()
+    client.cookies.update(login_resp.cookies)
     res_logout_nocsrf = await client.post(
         "/api/v1/auth/logout",
         headers={"X-Tenant-Slug": tenant_a.slug},
-        cookies=login_resp.cookies,
     )
     assert res_logout_nocsrf.status_code == 403
     assert res_logout_nocsrf.json()["detail"]["code"] == "csrf_detected"
 
     # 3. With valid CSRF header, both succeed
+    client.cookies.clear()
+    client.cookies.update(login_resp.cookies)
     res_refresh_ok = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=login_resp.cookies,
     )
     assert res_refresh_ok.status_code == 200
 
+    client.cookies.clear()
+    client.cookies.update(res_refresh_ok.cookies)
     res_logout_ok = await client.post(
         "/api/v1/auth/logout",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=res_refresh_ok.cookies,
     )
     assert res_logout_ok.status_code == 204
 
@@ -282,10 +286,11 @@ async def test_refresh_token_reuse_outside_grace_window_wipes_all_sessions(
     token1_cookie = login_resp.cookies
 
     # Rotate token1 -> receive token2
+    client.cookies.clear()
+    client.cookies.update(token1_cookie)
     rotate_resp = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=token1_cookie,
     )
     assert rotate_resp.status_code == 200
 
@@ -305,10 +310,11 @@ async def test_refresh_token_reuse_outside_grace_window_wipes_all_sessions(
     await raw_db.commit()
 
     # Replay token1 (outside grace window) -> theft detected!
+    client.cookies.clear()
+    client.cookies.update(token1_cookie)
     replay_resp = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=token1_cookie,
     )
     assert replay_resp.status_code == 401
     assert replay_resp.json()["detail"]["code"] == "token_reused"
@@ -342,18 +348,20 @@ async def test_refresh_token_replay_within_grace_window_succeeds(
     token1_cookie = login_resp.cookies
 
     # Rotate token1 in Tab 1
+    client.cookies.clear()
+    client.cookies.update(token1_cookie)
     rotate_resp = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=token1_cookie,
     )
     assert rotate_resp.status_code == 200
 
     # Replay token1 immediately in Tab 2 (within 10s grace window)
+    client.cookies.clear()
+    client.cookies.update(token1_cookie)
     concurrent_resp = await client.post(
         "/api/v1/auth/refresh",
         headers={"X-Tenant-Slug": tenant_a.slug, "X-Requested-With": "XMLHttpRequest"},
-        cookies=token1_cookie,
     )
     assert concurrent_resp.status_code == 200
     assert "access_token" in concurrent_resp.json()

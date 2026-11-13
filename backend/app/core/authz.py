@@ -47,6 +47,7 @@ ALL_SYSTEM_PERMISSIONS = {
     "chat:use",
     "analytics:view",
     "branding:manage",
+    "settings:manage",
     "audit:view",
 }
 

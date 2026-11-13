@@ -111,6 +111,7 @@ Allows teachers managing a class timetable to populate teacher select dropdowns 
     }
   ]
   ```
+- **Email visibility**: `email` is returned only to tenant admins. For every other caller it is `null`; show `full_name`.
 - **Error Codes**:
   - `401 Unauthorized`: Missing or invalid token.
   - `403 Forbidden`: Caller lacks `timetable:manage`.
@@ -127,6 +128,8 @@ Allows teachers managing a class timetable to populate teacher select dropdowns 
 ---
 
 ## 4. Timetable Management Endpoints
+
+> **Design decision: class-level control.** A teacher who holds `timetable:manage` for a class (that is, assigned to the class) controls the **whole class draft**, not only their own subjects or lessons. This is intentional: the class timetable is one shared draft. Teacher double-booking and room clashes are not blocked while editing; they are reported by the pre-publish conflict check (4.8) and must be acknowledged with the `confirm_conflicts` flag when publishing (4.9).
 
 Draft creation, entry manipulation, conflict checking, and publish/unpublish workflow.
 
@@ -260,21 +263,24 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
 
 ### 5.1 Download CSV Template
 
-- **Route**: `GET /api/v1/classes/{class_id}/timetables/templates/csv`
+- **Route**: `GET /api/v1/classes/{class_id}/timetables/template.csv`
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
-- **Response**: `text/csv; charset=utf-8` stream with formula-neutralized prefilled class subjects and assigned teachers.
+- **Response**: `text/csv; charset=utf-8` with formula-neutralized prefilled class subjects and assigned teachers.
+- **Teacher column**: admins get `teacher_email` filled with emails. Other callers get a `teacher` column filled with full names (no emails). Import accepts either form.
+- **Content-Disposition**: the class name is sanitized; the header has an ASCII `filename=` plus an RFC 5987 `filename*=UTF-8''...`. It never contains quotes, CR/LF or non-latin-1 characters.
 
 ### 5.2 Download XLSX Template
 
-- **Route**: `GET /api/v1/classes/{class_id}/timetables/templates/xlsx`
+- **Route**: `GET /api/v1/classes/{class_id}/timetables/template.xlsx`
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
-- **Response**: `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` stream with data-validation dropdowns.
+- **Response**: `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`. Same email visibility and Content-Disposition rules as 5.1; the reference sheet lists teacher emails for admins only.
 
 ### 5.3 Import Preview (Dry-run parser)
 
 - **Route**: `POST /api/v1/classes/{class_id}/timetables/import-preview`
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
-- **Request**: `multipart/form-data` with `file: UploadFile` (max size: 2 MB)
+- **Request**: `multipart/form-data` with `file: UploadFile` (max size: 2 MB, at most 5 multipart parts). Accepted content: CSV, XLSX, DOCX, PDF (PPTX passes validation but is not importable here).
+- **Email visibility**: `teacher_email` in each row and `email` in `available_teachers` are `null` unless the caller is a tenant admin. Matching by email or exact full name still works for everyone; `teacher_name` is always returned.
 - **Response Model**: `ImportPreviewResponse` (HTTP 200)
   ```json
   {
@@ -309,11 +315,38 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
 - **Hardening Rules**:
   - Does NOT create or change database records.
   - Does NOT store original uploaded file to disk or log file content.
-  - Rate limited (3 req / 60s per user) and concurrency-capped (1 concurrent parse per tenant, 5 globally) in Redis with short TTL and `finally` release.
-- **Error Codes**:
-  - `413 Content Too Large`: `file_too_large` (>2 MB).
-  - `422 Unprocessable Content`: `scanned_pdf_unsupported`, `unreadable_file`, `unsupported_file_type`.
-  - `429 Too Many Requests`: `import_rate_limit_exceeded`, `import_concurrency_limit_exceeded`.
+  - Rate limited (10 imports / 10 min per user, 30 / 10 min per tenant) and concurrency-capped (2 concurrent parses per tenant, 5 globally) in Redis with short TTL and `finally` release.
+- **Error responses** all use `{"detail": {"code": "<code>", "message": "<fixed text>"}}`. Messages are fixed per code and never contain file names, file content, filesystem paths or library error text; show your own localized text per `code`. Details are logged server-side only.
+
+  | Status | `code` | Meaning |
+  |---|---|---|
+  | 413 | `file_too_large` | Request body over 2 MB + 64 KB (Content-Length or counted stream) or file over 2 MB. Sent before the body is parsed. |
+  | 413 | `too_many_parts` | More than 5 multipart parts. |
+  | 408 | `parse_timeout` | Parser exceeded 10 s and was killed. |
+  | 422 | `empty_file` | File is empty. |
+  | 422 | `disallowed_file_type` | Executable, script, legacy OLE (.xls/.doc), binary or undecodable text. |
+  | 422 | `invalid_openxml_format` | ZIP lacks `xl/workbook.xml`, `word/document.xml` or `ppt/presentation.xml` (or has several), or is missing `[Content_Types].xml`. |
+  | 422 | `file_type_mismatch` | File extension does not match the detected content. |
+  | 422 | `macro_enabled_file` | `vbaProject.bin` anywhere, or macro-enabled content type. |
+  | 422 | `embedded_content` | `/embeddings/` part, nested ZIP or OLE content. |
+  | 422 | `external_relationship` | External relationship other than a plain hyperlink (attachedTemplate, oleObject, externalLink, frame, external image/media). Ordinary hyperlinks are allowed and never fetched. |
+  | 422 | `invalid_xml` | Malformed or unreadable XML in the package (fails closed). |
+  | 422 | `xml_entity_expansion_forbidden` | XXE or entity-expansion attempt. |
+  | 422 | `corrupt_archive`, `encrypted_file`, `zip_bomb_detected`, `zip_member_too_large` | Invalid, password-protected or oversized archive. |
+  | 422 | `pdf_active_content` | PDF contains `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/OpenAction` or `/AA` (best-effort scan). |
+  | 422 | `pdf_too_complex` | PDF over 20,000 objects or 100 pages. |
+  | 422 | `scanned_pdf`, `password_protected_pdf`, `corrupt_pdf` | PDF has no text, is encrypted, or cannot be read. |
+  | 422 | `nul_byte_in_csv`, `invalid_encoding`, `empty_workbook` | Content problems found by the parser. |
+  | 422 | `unsupported_format` | Valid file of a type the importer does not handle (for example PPTX). |
+  | 422 | `parse_failed` | Any other parser failure (generic fixed message). |
+  | 422 | `parse_output_too_large`, `worker_crash` | Parser produced too much output or died. |
+  | 429 | `rate_limit_exceeded` | Per-user import limit. Has `retry_after_seconds` and a `Retry-After` header. |
+  | 429 | `tenant_rate_limit_exceeded` | Per-organization import limit (same fields). |
+  | 429 | `too_many_concurrent_parses` | Global parser capacity reached; retry shortly. |
+  | 429 | `tenant_concurrent_limit_exceeded` | Organization already has parses running. |
+  | 503 | `service_unavailable` | Redis is unreachable outside `development`; imports fail closed. Retry later. |
+
+  The template endpoints (5.1, 5.2) can also return `413 file_too_large` for requests that declare a body above the limit.
 
 ### 5.4 Save Imported Draft
 
@@ -349,7 +382,7 @@ Configure and read tenant timezone validated against standard IANA names (`zonei
 ### 6.1 Get Tenant Timezone
 
 - **Route**: `GET /api/v1/admin/settings/timezone`
-- **Permission**: `tenant:view` / `tenant_admin`
+- **Permission**: `settings:manage` (granted to `tenant_admin`; it replaces `branding:manage` for this endpoint)
 - **Response Model**: `TimezoneResponse` (HTTP 200)
   ```json
   {
@@ -360,7 +393,7 @@ Configure and read tenant timezone validated against standard IANA names (`zonei
 ### 6.2 Update Tenant Timezone
 
 - **Route**: `PATCH /api/v1/admin/settings/timezone`
-- **Permission**: `tenant:manage` / `tenant_admin`
+- **Permission**: `settings:manage` (granted to `tenant_admin`)
 - **Request Model**: `TimezoneUpdateRequest`
   ```json
   {
@@ -368,8 +401,8 @@ Configure and read tenant timezone validated against standard IANA names (`zonei
   }
   ```
 - **Response Model**: `TimezoneResponse` (HTTP 200)
-- **Audited**: `tenant:update_timezone`
+- **Audited**: `tenant:update_timezone`, written in the same database transaction as the change. If the audit write fails, the timezone change is rolled back and the call fails.
 - **Error Codes**:
-  - `403 Forbidden`: `permission_denied` (teacher / student callers rejected).
+  - `403 Forbidden`: `permission_denied` (callers without `settings:manage`, including teachers, students and users who only hold `branding:manage`).
   - `422 Unprocessable Content`: `invalid_timezone` (rejected if not present in `zoneinfo.available_timezones()`).
 

@@ -358,53 +358,45 @@ def test_csv_bom_cp1252_and_nul_handling() -> None:
 @pytest.mark.asyncio
 async def test_redis_concurrency_and_rate_limits() -> None:
     """Concurrency caps and rate limits must use Redis with short TTL and finally release."""
-    from unittest.mock import AsyncMock, patch
-
     from fastapi import HTTPException
 
+    from app.core.slots import SlotManager
+    from app.services import timetable_parser_runner as tpr
     from app.services.timetable_parser_runner import (
-        CONCURRENCY_KEY_TTL,
         GLOBAL_CONCURRENCY_KEY,
         TENANT_CONCURRENCY_KEY_PREFIX,
+        USER_RATE_LIMIT_COUNT,
         USER_RATELIMIT_KEY_PREFIX,
         check_and_record_rate_limit,
         parse_concurrency_guard,
     )
 
-    mock_redis = AsyncMock()
-    mock_redis.incr = AsyncMock(return_value=1)
-    mock_redis.expire = AsyncMock(return_value=True)
-    mock_redis.decr = AsyncMock(return_value=0)
-    mock_redis.delete = AsyncMock(return_value=True)
-    mock_redis.ttl = AsyncMock(return_value=300)
-
+    mgr = SlotManager()
     user_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
+    user_key = f"{USER_RATELIMIT_KEY_PREFIX}{user_id}"
+    tenant_key = f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}"
 
-    with patch("app.core.redis_client.get_redis", AsyncMock(return_value=mock_redis)):
-        # 1. Normal rate limit check
+    # 1. Normal rate limit check is recorded
+    await check_and_record_rate_limit(user_id, tenant_id)
+    assert await mgr.count(user_key) == 1
+
+    # 2. Rate limit exceed
+    for _ in range(USER_RATE_LIMIT_COUNT - 1):
         await check_and_record_rate_limit(user_id, tenant_id)
-        mock_redis.incr.assert_any_call(f"{USER_RATELIMIT_KEY_PREFIX}{user_id}")
-        mock_redis.expire.assert_any_call(f"{USER_RATELIMIT_KEY_PREFIX}{user_id}", 600)
+    with pytest.raises(HTTPException) as exc:
+        await check_and_record_rate_limit(user_id, tenant_id)
+    assert exc.value.status_code == 429
+    assert exc.value.detail["code"] == "rate_limit_exceeded"
 
-        # 2. Rate limit exceed
-        mock_redis.incr = AsyncMock(return_value=15)
-        with pytest.raises(HTTPException) as exc:
-            await check_and_record_rate_limit(user_id, tenant_id)
-        assert exc.value.status_code == 429
-        assert exc.value.detail["code"] == "rate_limit_exceeded"
-
-        # 3. Concurrency guard acquires with TTL and releases in finally
-        mock_redis.incr = AsyncMock(return_value=1)
-        async with parse_concurrency_guard(tenant_id):
-            mock_redis.incr.assert_any_call(GLOBAL_CONCURRENCY_KEY)
-            mock_redis.expire.assert_any_call(GLOBAL_CONCURRENCY_KEY, CONCURRENCY_KEY_TTL)
-            mock_redis.incr.assert_any_call(f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}")
-            mock_redis.expire.assert_any_call(f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}", CONCURRENCY_KEY_TTL)
-
-        # In finally: decr called
-        mock_redis.decr.assert_any_call(GLOBAL_CONCURRENCY_KEY)
-        mock_redis.decr.assert_any_call(f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}")
+    # 3. Concurrency guard holds global + tenant slots and releases them in finally
+    global_before = await mgr.count(GLOBAL_CONCURRENCY_KEY)
+    async with parse_concurrency_guard(tenant_id):
+        assert await mgr.count(GLOBAL_CONCURRENCY_KEY) == global_before + 1
+        assert await mgr.count(tenant_key) == 1
+    assert await mgr.count(GLOBAL_CONCURRENCY_KEY) == global_before
+    assert await mgr.count(tenant_key) == 0
+    assert tpr.SLOT_LEASE_SECONDS <= 60  # leaked slots must expire quickly
 
 
 # ─── 3. Magic Byte & Hostile File Rejection Tests ─────────────────────────────
@@ -452,42 +444,33 @@ def test_sniffing_rejects_csv_with_nul_bytes() -> None:
 
 # ─── 4. Kill-able Process & Concurrency Limits Tests ──────────────────────────
 
-def _sleeping_test_worker(data: bytes, format_type: str, queue: Any) -> None:
-    """
-    Top-level worker function for testing timeout termination.
-    Must be a top-level importable function so multiprocessing 'spawn' context
-    can import and execute it in the child process.
-    Sleeps for 10 seconds, far longer than the test timeout of 1.0 second.
-    """
-    import time
-    time.sleep(10.0)
-
-
 @pytest.mark.asyncio
-async def test_killable_parse_timeout_terminates_process() -> None:
+async def test_killable_parse_timeout_terminates_process(tmp_path: Any) -> None:
     """
     A parser that exceeds timeout must be terminated cleanly and raise 408/timeout error.
-    Deterministic test: passes a top-level worker that sleeps 10s with a 1s timeout.
+    Deterministic test: a test-only child module (tests/_tt_children.py, mode "sleep") hangs
+    for 60s with a 1s timeout. It is started through the normal runner spawn path.
     Verifies:
     1. UploadSecurityError is raised with code 'parse_timeout' and status 408.
-    2. Elapsed time is close to timeout (~1s), not the full sleep duration (10s).
-    3. The child process is cleanly terminated and reaped (not alive, no zombie).
-    4. Per-tenant and global concurrency counters are released immediately.
+    2. Elapsed time is close to timeout (~1s), not the full sleep duration.
+    3. The child process is really gone (it wrote its pid into a file for us).
+    4. Per-tenant and global concurrency slots are released immediately.
     """
+    from app.core.slots import SlotManager
     from app.services import timetable_parser_runner as tpr
 
     tenant_id = uuid.uuid4()
-    process_holder: list[Any] = []
+    pid_file = tmp_path / "pid.txt"
+    global_before = await SlotManager().count(tpr.GLOBAL_CONCURRENCY_KEY)
 
     t0 = time.time()
     with pytest.raises(UploadSecurityError) as exc:
         await run_killable_parse(
-            data=b"dummy_data",
-            format_type="csv",
+            data=str(pid_file).encode(),
+            format_type="sleep",
             tenant_id=tenant_id,
             timeout_seconds=1.0,
-            worker_fn=_sleeping_test_worker,
-            _process_holder=process_holder,
+            child_module="tests._tt_children",
         )
     elapsed = time.time() - t0
 
@@ -499,25 +482,17 @@ async def test_killable_parse_timeout_terminates_process() -> None:
     # 2. Timing check: took near the 1s timeout, definitely terminated before the 10s sleep
     assert 0.8 <= elapsed < 5.0, f"Expected elapsed time near 1.0s, got {elapsed:.2f}s"
 
-    # 3. Child process state: must not be alive, exitcode must be set (reaped, no zombie)
-    assert len(process_holder) == 1
-    child_proc = process_holder[0]
-    assert not child_proc.is_alive(), "Worker process must be killed"
-    assert child_proc.exitcode is not None, "Worker process must have an exit code (reaped)"
+    # 3. Child process state: it must really be gone (killed and reaped)
+    from test_timetable_hardening import _pid_alive, _wait_dead
 
-    # 4. Concurrency counters must be released
-    assert tpr._global_active_parses == 0, "Global active parses counter must be 0"
-    assert tpr._tenant_active_parses.get(tenant_id, 0) == 0, "Tenant active parses counter must be 0"
+    child_pid = int(pid_file.read_text())
+    assert await _wait_dead(child_pid), "Worker process must be killed"
+    assert not _pid_alive(child_pid)
 
-    # If Redis is available, verify Redis counters were released
-    if tpr.is_redis_available():
-        from app.core import redis_client
-        redis = await redis_client.get_redis()
-        if redis is not None:
-            g_val = await redis.get(tpr.GLOBAL_CONCURRENCY_KEY)
-            assert g_val is None or int(g_val) <= 0, f"Global Redis concurrency key was not released: {g_val}"
-            t_val = await redis.get(f"{tpr.TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}")
-            assert t_val is None or int(t_val) <= 0, f"Tenant Redis concurrency key was not released: {t_val}"
+    # 4. Concurrency slots must be released
+    mgr = SlotManager()
+    assert await mgr.count(tpr.GLOBAL_CONCURRENCY_KEY) == global_before, "Global slot must be released"
+    assert await mgr.count(f"{tpr.TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}") == 0, "Tenant slot must be released"
 
     # Verify concurrency guard can be immediately re-acquired for this tenant up to full capacity (2)
     async with tpr.parse_concurrency_guard(tenant_id), tpr.parse_concurrency_guard(tenant_id):

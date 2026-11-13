@@ -45,6 +45,7 @@ ALL_PERMISSIONS = [
     ("chat:use", "Student AI Chat", "Chat with scoped RAG syllabus assistant"),
     ("analytics:view", "Reporting", "View system and engagement analytics"),
     ("branding:manage", "Organization", "Manage white-label theme and branding"),
+    ("settings:manage", "Organization", "Manage organization settings such as the timezone"),
     ("audit:view", "Security", "View tenant audit log history"),
 ]
 

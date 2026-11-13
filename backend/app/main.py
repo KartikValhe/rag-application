@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router as v1_router
 from app.core.authz import public_endpoint
+from app.core.body_limit import BodyLimitMiddleware
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
@@ -82,6 +83,9 @@ app.add_middleware(
     ],
     expose_headers=["X-Request-ID"],
 )
+
+# Outermost: reject oversized uploads before any other layer reads the body.
+app.add_middleware(BodyLimitMiddleware)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
