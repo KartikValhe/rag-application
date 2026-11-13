@@ -76,6 +76,37 @@ export const AssignedTeacherSchema = z.object({
 
 export const AssignedTeacherListSchema = z.array(AssignedTeacherSchema);
 
+export const ImportPreviewRowSchema = z.object({
+  row_index: z.number().int(),
+  day_of_week: z.number().int().nullable().optional(),
+  start_time: z.string().nullable().optional(),
+  end_time: z.string().nullable().optional(),
+  subject_id: z.string().nullable().optional(),
+  teacher_id: z.string().nullable().optional(),
+  room: z.string().nullable().optional(),
+  note: z.string().nullable().optional(),
+  raw_data: z.record(z.string().nullable().optional()).optional(),
+  period_label: z.string().nullable().optional(),
+  requires_period_time: z.boolean().optional(),
+  warnings: z.array(z.string()).optional(),
+});
+
+export const ImportPreviewResponseSchema = z.object({
+  filename: z.string().optional(),
+  total_rows: z.number(),
+  valid_rows: z.number(),
+  error_rows: z.number(),
+  requires_period_times: z.boolean().optional(),
+  period_labels: z.array(z.string()).optional(),
+  rows: z.array(ImportPreviewRowSchema),
+  available_subjects: z.array(
+    z.object({ id: z.string(), code: z.string().nullable().optional(), name: z.string() })
+  ),
+  available_teachers: z.array(
+    z.object({ id: z.string(), full_name: z.string(), email: z.string().nullable().optional() })
+  ),
+});
+
 /**
  * Validates data from an API response against a Zod schema.
  * On schema mismatch:

@@ -14,6 +14,31 @@ A secure, multi-tenant academic platform built for universities and educational 
 
 ---
 
+## 📋 Project Status
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1-3 | Tenancy, RLS, auth, RBAC, academic structure, branding | Done |
+| 4 | Timetables, import wizard, schedule lookup, Next lecture card | **Backend done; wrap-up open** (see exit criteria below) |
+| 5+ | Document ingestion, vector store, chat (RAG) | Not started |
+
+Phase 4 exit criteria (checked against `docs/implementation_plan.md`):
+
+| Criterion | Result | Evidence |
+|-----------|--------|----------|
+| Teacher publishes for an assigned class; students in it see it; other classes do not | FAIL | UI e2e `teacher drafts and publishes...` fails: teacher calls to `GET /classes/{id}/subjects` and `/timetables` return 500 on the dev backend. API tests: `test_teacher_scoping_assigned_vs_unassigned`, `test_conflict_detection_requires_explicit_confirm`. No dedicated "student in another class" test found |
+| Drafts invisible to students | PASS | `test_schedule.py::test_draft_never_visible_to_students` |
+| Conflicts surfaced before publish | PASS | `test_timetable_endpoints.py::test_conflict_detection_requires_explicit_confirm`, `test_schedule.py::test_conflict_detection_scenarios` |
+| Permission and isolation tests cover timetable endpoints | PASS | `test_isolation.py::test_timetables_and_entries_isolation`, `test_timetable_route_role_matrix`, `test_authorization_matrix_for_import_endpoints` |
+| Schedule lookup scenarios with a fixed clock | PASS | `test_schedule.py` (in-progress, later today, tomorrow, next week, weekend, none left, none published, several classes, teacher, admin, timezone) |
+| Student never gets another class, a draft or another tenant | PASS | `test_cross_tenant_isolation`, `test_draft_never_visible_to_students` |
+| Lookup makes zero LLM or network calls | PASS | `test_lookup_service_makes_no_network_or_llm_call` |
+| Import produces drafts with per-row errors; hostile files rejected; never auto-published | PASS (backend) | `test_timetable_import.py` (renamed executable, macro workbook, zip bomb, formulas), `test_upload_hardening.py::test_oversized_content_length_rejected_413`, `test_save_imported_draft_revalidation_and_confirmation`; e2e `import wizard` tests |
+
+Backend tests were not re-run for this table; the evidence column names the tests that cover each item.
+
+---
+
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
@@ -235,24 +260,31 @@ npm run build         # Vite production build
 ```
 
 ### 4. Running Playwright End-to-End Smoke Tests
-Smoke tests run in headless mode against the local development stack with seeded demo data:
-1. Ensure the backend and frontend dev servers are running with seeded demo data:
-   ```bash
-   # Terminal 1: backend (http://localhost:8000)
-   cd backend && uvicorn app.main:app --reload --port 8000
+The e2e suite drives a real browser (Chromium, headless) against the local dev stack and the seeded demo data. It creates and publishes timetable entries, so it only runs against a local stack: the config refuses any non-local base URL or `NODE_ENV=production`.
 
-   # Terminal 2: frontend (http://localhost:5173)
-   cd frontend && npm run dev
+1. Start infrastructure, migrate and seed, then start the backend yourself (port 8000):
+   ```bash
+   docker compose up -d
+   cd backend && alembic upgrade head && python -m app.scripts.seed
+   uvicorn app.main:app --port 8000
    ```
-2. Execute the headless Playwright smoke tests:
+2. Install the browser once. This is a manual step, nothing is downloaded automatically:
+   ```bash
+   cd frontend && npx playwright install chromium
+   ```
+3. Run the suite. Playwright starts the frontend dev server (port 5173) itself, or reuses one that is already running:
    ```bash
    cd frontend
-   npm run test:e2e
+   npm run e2e
    ```
-The smoke suite verifies:
-- Admin, teacher, and student authentication on tenant `acme`.
-- Successful navigation across all sidebar pages with zero console errors or uncaught page exceptions.
-- Faculty timetable publishing and real-time student schedule synchronization.
-- Role-based route protection (students navigating to `/admin` receive the 403 Forbidden state).
-- White-label brand isolation showing distinct branding tokens on second tenant host (`default` vs `acme`).
+The suite (`frontend/e2e/smoke.spec.ts`) covers:
+- Admin, teacher and student on `acme` opening every sidebar page with no uncaught page error and no console error.
+- A student typing `/admin` sees the 403 page.
+- Teacher creates a draft entry and publishes it; the student sees it and the Next lecture card.
+- Import wizard with a small valid CSV, and a hostile file rejected with a friendly message.
+- Backend unreachable (requests blocked): friendly error, not a blank screen.
+
+Each run adds a small `E2E-...` lecture to Class 10-A and a draft to Class 10-B. Re-seed the database to reset.
+
+**CI:** e2e is not part of CI. It needs Postgres, Redis, migrations, seed data, the backend and a browser download, which does not fit the roughly 3 minute budget. It stays a manual script.
 

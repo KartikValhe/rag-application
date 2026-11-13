@@ -6,8 +6,11 @@ import {
   TimetableItemSchema,
   TimetableEntryItemSchema,
   AssignedTeacherListSchema,
+  ImportPreviewResponseSchema,
 } from "../schemas/timetableSchemas";
+import { IMPORT_TIMEOUT_MS, buildSaveRequest, type SaveEntryPayload } from "../utils/importWizard";
 import type {
+  ImportPreviewResponse,
   TimetableEntryItem,
   TimetableItem,
   ConflictItem,
@@ -20,7 +23,22 @@ import type {
   AssignedTeacher,
 } from "../types";
 
+// Blob error bodies arrive as a Blob; parse the JSON so the shared error helper can read the code.
+async function unwrapBlobError(err: unknown): Promise<unknown> {
+  const e = err as { response?: { data?: unknown } };
+  const data = e?.response?.data;
+  if (typeof Blob !== "undefined" && data instanceof Blob && e.response) {
+    try {
+      e.response.data = JSON.parse(await data.text());
+    } catch {
+      e.response.data = undefined;
+    }
+  }
+  return err;
+}
+
 export type {
+  ImportPreviewResponse,
   TimetableEntryItem,
   TimetableItem,
   ConflictItem,
@@ -140,6 +158,44 @@ export const timetableApi = {
       : `/classes/${classId}/assigned-teachers`;
     const res = await apiClient.get<unknown>(url);
     return validateResponse(AssignedTeacherListSchema, res.data, "assigned teachers");
+  },
+
+  // Template download as a blob so the auth header is sent (a plain link would not).
+  downloadTemplate: async (classId: string, format: "csv" | "xlsx"): Promise<Blob> => {
+    try {
+      const res = await apiClient.get<Blob>(`/classes/${classId}/timetables/template.${format}`, {
+        responseType: "blob",
+        timeout: IMPORT_TIMEOUT_MS,
+      });
+      return res.data;
+    } catch (err) {
+      throw await unwrapBlobError(err);
+    }
+  },
+
+  // Dry-run parse. Nothing is stored server side.
+  previewImport: async (classId: string, file: File): Promise<ImportPreviewResponse> => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await apiClient.post<unknown>(
+      `/classes/${classId}/timetables/import-preview`,
+      form,
+      { timeout: IMPORT_TIMEOUT_MS }
+    );
+    return validateResponse(ImportPreviewResponseSchema, res.data, "import preview");
+  },
+
+  saveImportedDraft: async (
+    classId: string,
+    entries: SaveEntryPayload[],
+    replaceExisting: boolean
+  ): Promise<TimetableItem> => {
+    const res = await apiClient.post<unknown>(
+      `/classes/${classId}/timetables/save-imported-draft`,
+      buildSaveRequest(entries, replaceExisting),
+      { timeout: IMPORT_TIMEOUT_MS }
+    );
+    return validateResponse(TimetableItemSchema, res.data, "imported draft");
   },
 
   // Timezone endpoints

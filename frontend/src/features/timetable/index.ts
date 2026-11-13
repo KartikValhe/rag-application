@@ -5,6 +5,8 @@ export * from "./components/WeeklyTimetableGrid";
 export * from "./components/NextLectureCard";
 export * from "./components/EntryFormModal";
 export * from "./components/ConflictWarningDialog";
+export * from "./components/ImportWizardModal";
+export * from "./utils/importWizard";
 export * from "./components/TimezoneSettingsCard";
 export * from "./pages/TimetableEditorPage";
 export * from "./pages/ScheduleViewPage";

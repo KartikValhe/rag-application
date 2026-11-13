@@ -103,6 +103,31 @@ export interface MyTimetableResponse {
 
 
 
+export interface ImportPreviewResponse {
+  filename?: string;
+  total_rows: number;
+  valid_rows: number;
+  error_rows: number;
+  requires_period_times?: boolean;
+  period_labels?: string[];
+  rows: Array<{
+    row_index: number;
+    day_of_week?: number | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    subject_id?: string | null;
+    teacher_id?: string | null;
+    room?: string | null;
+    note?: string | null;
+    raw_data?: Record<string, string | null | undefined>;
+    period_label?: string | null;
+    requires_period_time?: boolean;
+    warnings?: string[];
+  }>;
+  available_subjects: Array<{ id: string; code?: string | null; name: string }>;
+  available_teachers: Array<{ id: string; full_name: string; email?: string | null }>;
+}
+
 export interface AssignedTeacher {
   id: string;
   full_name?: string | null;

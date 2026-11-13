@@ -355,7 +355,7 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
 - **Request Model**: `SaveImportedDraftRequest`
   ```json
   {
-    "replace_existing": false,
+    "replace_confirmed": false,
     "entries": [
       {
         "day_of_week": 0,
@@ -370,7 +370,7 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
   ```
 - **Response Model**: `TimetableResponse` (HTTP 200)
 - **Error Codes**:
-  - `409 Conflict`: `draft_already_exists` when an existing draft exists and `replace_existing` is `false`.
+  - `409 Conflict`: `draft_already_exists` when an existing draft exists and `replace_confirmed` is `false`.
   - `422 Unprocessable Content`: Row-level academic re-validation failure or entries > 200.
 
 ---

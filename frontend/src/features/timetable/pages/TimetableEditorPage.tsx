@@ -11,6 +11,7 @@ import {
 import { WeeklyTimetableGrid } from "../components/WeeklyTimetableGrid";
 import { EntryFormModal } from "../components/EntryFormModal";
 import { ConflictWarningDialog } from "../components/ConflictWarningDialog";
+import { ImportWizardModal } from "../components/ImportWizardModal";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -29,6 +30,7 @@ import {
   AlertCircle,
   Eye,
   Edit3,
+  Upload,
 } from "lucide-react";
 
 export const TimetableEditorPage: React.FC = () => {
@@ -53,6 +55,8 @@ export const TimetableEditorPage: React.FC = () => {
   const [deletingEntry, setDeletingEntry] = useState<TimetableEntryItem | null>(null);
   const [isEntrySaving, setIsEntrySaving] = useState<boolean>(false);
   const [isEntryDeleting, setIsEntryDeleting] = useState<boolean>(false);
+
+  const [isImportOpen, setIsImportOpen] = useState<boolean>(false);
 
   // Publish & Conflict warning states
   const [isConflictModalOpen, setIsConflictModalOpen] = useState<boolean>(false);
@@ -378,15 +382,28 @@ export const TimetableEditorPage: React.FC = () => {
             </div>
 
             {viewMode === "draft" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleOpenAddEntry()}
-                className="min-h-[44px]"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" />
-                Add Lecture
-              </Button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Can permission="timetable:manage">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsImportOpen(true)}
+                    className="min-h-[44px]"
+                  >
+                    <Upload className="w-3.5 h-3.5 mr-1" />
+                    Import
+                  </Button>
+                </Can>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleOpenAddEntry()}
+                  className="min-h-[44px]"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" />
+                  Add Lecture
+                </Button>
+              </div>
             )}
           </div>
         )}
@@ -429,6 +446,21 @@ export const TimetableEditorPage: React.FC = () => {
           initialData={editingEntry}
           onSave={handleSaveEntry}
           isSaving={isEntrySaving}
+        />
+      )}
+
+      {selectedClassId && (
+        <ImportWizardModal
+          isOpen={isImportOpen}
+          classId={selectedClassId}
+          className={selectedClass?.name ?? ""}
+          onClose={() => setIsImportOpen(false)}
+          onSaved={(draft) => {
+            setIsImportOpen(false);
+            setViewMode("draft");
+            setTimetable(draft);
+            toast.success("Draft saved from import. Nothing is published yet.");
+          }}
         />
       )}
 

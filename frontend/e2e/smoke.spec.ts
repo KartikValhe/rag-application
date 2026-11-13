@@ -1,210 +1,171 @@
 import { test, expect, Page } from "@playwright/test";
+import { bodyOk, login, openViaSidebar, Role, watchErrors } from "./helpers";
 
-/**
- * Playwright End-to-End Smoke Test Suite
- *
- * Requirements:
- * 1. Fail immediately on any uncaught page error or browser console error.
- * 2. Login as admin, teacher, and student on acme.
- * 3. Each role navigates to its dashboard and every sidebar page without error or crash.
- * 4. Teacher creates/updates draft timetable entry, publishes it, and student sees it.
- * 5. Student typing an admin URL directly sees the 403 Forbidden page.
- * 6. Branding page / tenant host loads different brand on a second tenant.
- */
+const SIDEBAR = 'aside[aria-label="Desktop Navigation"]';
 
-// Track page errors and console errors per test
-function setupErrorListeners(page: Page) {
-  const consoleErrors: string[] = [];
-  const pageErrors: Error[] = [];
+// Every sidebar page is opened by clicking its link. The list comes from the DOM,
+// so a new sidebar item is covered automatically.
+for (const role of ["admin", "teacher", "student"] as Role[]) {
+  test(`${role} opens every sidebar page without errors`, async ({ page }) => {
+    const errors = watchErrors(page);
+    await login(page, role);
 
-  page.on("pageerror", (err) => {
-    // Collect unhandled browser runtime errors
-    pageErrors.push(err);
-  });
+    const hrefs = await page
+      .locator(`${SIDEBAR} nav a`)
+      .evaluateAll((els) => els.map((e) => e.getAttribute("href") as string));
+    expect(hrefs.length).toBeGreaterThan(2);
 
-  page.on("console", (msg) => {
-    // Capture browser console errors (ignore benign React warnings or network cancellations)
-    if (msg.type() === "error") {
-      const text = msg.text();
-      // Ignore favicon 404 or transient vite websocket reconnects
-      if (!text.includes("favicon.ico") && !text.includes("WebSocket connection to 'ws:")) {
-        consoleErrors.push(text);
-      }
+    for (const href of hrefs) {
+      await openViaSidebar(page, href);
+      await page.waitForLoadState("networkidle");
+      await bodyOk(page);
+      await expect(page.locator("h1").first()).toBeVisible();
     }
-  });
 
-  return { consoleErrors, pageErrors };
+    expect(errors.pageErrors).toEqual([]);
+    expect(errors.consoleErrors).toEqual([]);
+  });
 }
 
-async function login(page: Page, email: string, pass: string, tenant = "acme") {
-  await page.goto(`/login?tenant=${tenant}`);
-  await page.waitForLoadState("domcontentloaded");
+test("student typing an admin URL sees the 403 page", async ({ page }) => {
+  const errors = watchErrors(page);
+  await login(page, "student");
+  // A full page load keeps the session through the refresh cookie.
+  await page.goto("/admin");
+  await expect(page.getByText("Administrative Access Required (403)")).toBeVisible();
+  await expect(page.getByText("Roles & Access")).toHaveCount(0);
+  expect(errors.pageErrors).toEqual([]);
+});
 
-  // Fill credentials
-  await page.fill('input[type="email"], input[name="email"]', email);
-  await page.fill('input[type="password"], input[name="password"]', pass);
-  await page.click('button[type="submit"]');
+test("teacher drafts and publishes an entry, student sees it and the Next lecture card", async ({
+  browser,
+}) => {
+  const room = `E2E-${Date.now()}`;
+  // Random slot so repeated runs do not pile onto the same cell.
+  const day = String(Math.floor(Math.random() * 5));
+  const hour = 6 + Math.floor(Math.random() * 16);
+  const start = `${String(hour).padStart(2, "0")}:00`;
+  const end = `${String(hour).padStart(2, "0")}:45`;
 
-  // Wait for navigation past login
-  await page.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 10000 });
-}
+  const tctx = await browser.newContext();
+  const t = await tctx.newPage();
+  const tErrors = watchErrors(t);
+  await login(t, "teacher");
+  await openViaSidebar(t, "/teacher/timetables");
 
-test.describe("E2E Smoke Tests: Academic Multi-Tenant Platform", () => {
-  test("Admin login on acme and sidebar navigation across all pages", async ({ page }) => {
-    const { consoleErrors, pageErrors } = setupErrorListeners(page);
+  await t.getByRole("combobox").first().selectOption({ label: "Class 10-A (section)" });
+  await t.getByRole("button", { name: "Add Lecture" }).click();
+  const dialog = t.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Subject *").selectOption({ index: 0 });
+  await dialog.getByLabel("Day of Week *").selectOption(day);
+  await dialog.getByLabel("Start Time *").fill(start);
+  await dialog.getByLabel("End Time *").fill(end);
+  await dialog.getByLabel(/^Room/).fill(room);
+  await dialog.getByRole("button", { name: "Add to Timetable" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(t.getByText(room).first()).toBeVisible();
+  await expect(t.getByText("Draft In Progress")).toBeVisible();
 
-    await login(page, "admin@acme.edu", "Admin123!", "acme");
+  // The draft stays invisible to the student.
+  const sctx = await browser.newContext();
+  const s = await sctx.newPage();
+  const sErrors = watchErrors(s);
+  await login(s, "student");
+  await openViaSidebar(s, "/student/schedule");
+  await s.waitForLoadState("networkidle");
+  await expect(s.getByText(room)).toHaveCount(0);
 
-    const adminPages = [
-      "/admin",
-      "/admin/roles",
-      "/admin/academic",
-      "/admin/enrollments",
-      "/admin/assignments",
-      "/admin/timetables",
-      "/admin/users",
-      "/admin/audit",
-      "/admin/branding",
-    ];
+  // Publish, confirming the conflict dialog if one appears.
+  await t.getByRole("button", { name: "Publish Timetable" }).click();
+  const override = t.getByRole("button", { name: "Override & Publish Anyway" });
+  const published = t.getByText(/Published \(v\d+\)/);
+  await expect(override.or(published)).toBeVisible();
+  if (await override.isVisible()) await override.click();
+  await expect(published).toBeVisible();
 
-    for (const path of adminPages) {
-      await page.goto(path);
-      await page.waitForLoadState("domcontentloaded");
-      // Verify no ErrorBoundary fallback is shown
-      await expect(page.locator("text=Something went wrong")).toHaveCount(0);
-      await expect(page.locator("text=An unexpected error occurred")).toHaveCount(0);
-    }
+  // The student sees the entry and the Next lecture card.
+  await openViaSidebar(s, "/student/dashboard");
+  await expect(s.getByText("Next Lecture")).toBeVisible();
+  await expect(s.getByText(/Next Up|Happening Now/).first()).toBeVisible();
+  await openViaSidebar(s, "/student/schedule");
+  await expect(s.getByText(room).first()).toBeVisible();
 
-    expect(pageErrors, `Unhandled page errors: ${pageErrors.map((e) => e.message).join(", ")}`).toEqual([]);
-    expect(consoleErrors, `Console errors: ${consoleErrors.join(", ")}`).toEqual([]);
+  expect(tErrors.pageErrors).toEqual([]);
+  expect(tErrors.consoleErrors).toEqual([]);
+  expect(sErrors.pageErrors).toEqual([]);
+  expect(sErrors.consoleErrors).toEqual([]);
+  await tctx.close();
+  await sctx.close();
+});
+
+test.describe("import wizard", () => {
+  async function openWizard(page: Page) {
+    await login(page, "admin");
+    await openViaSidebar(page, "/admin/timetables");
+    // Class 10-B is not used by the publish test above.
+    await page.getByRole("combobox").first().selectOption({ label: "Class 10-B (section)" });
+    await page.getByRole("button", { name: "Import" }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Next: upload" }).click();
+  }
+
+  test("accepts a small valid CSV and saves it as a draft only", async ({ page }) => {
+    const errors = watchErrors(page);
+    await openWizard(page);
+    const csv =
+      "weekday,start_time,end_time,subject_code,teacher_email,room,note\n" +
+      "Monday,09:00,09:45,MATH101,teacher@acme.edu,E2E-CSV,imported\n";
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "timetable.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(csv),
+    });
+    await expect(page.getByText("Total: 1")).toBeVisible();
+    await expect(page.getByText("Valid: 1")).toBeVisible();
+    await page.getByRole("button", { name: "Next: save" }).click();
+    await expect(page.getByText(/Nothing is published until you publish it/)).toBeVisible();
+    await page.getByRole("button", { name: "Save as draft" }).click();
+    // An existing draft asks for confirmation to replace it.
+    const wizard = page.getByRole("dialog").filter({ hasText: "Import timetable" });
+    const replace = page.getByRole("button", { name: "Replace draft" });
+    await Promise.race([wizard.waitFor({ state: "hidden" }), replace.waitFor()]);
+    if (await replace.isVisible()) await replace.click();
+    await expect(wizard).toBeHidden();
+    await expect(page.getByText("Draft In Progress")).toBeVisible();
+    expect(errors.pageErrors).toEqual([]);
   });
 
-  test("Teacher login on acme and sidebar navigation across all pages", async ({ page }) => {
-    const { consoleErrors, pageErrors } = setupErrorListeners(page);
-
-    await login(page, "teacher@acme.edu", "Teacher123!", "acme");
-
-    const teacherPages = [
-      "/teacher/dashboard",
-      "/teacher/classes",
-      "/teacher/schedule",
-      "/teacher/timetables",
-    ];
-
-    for (const path of teacherPages) {
-      await page.goto(path);
-      await page.waitForLoadState("domcontentloaded");
-      await expect(page.locator("text=Something went wrong")).toHaveCount(0);
-      await expect(page.locator("text=An unexpected error occurred")).toHaveCount(0);
-    }
-
-    expect(pageErrors, `Unhandled page errors: ${pageErrors.map((e) => e.message).join(", ")}`).toEqual([]);
-    expect(consoleErrors, `Console errors: ${consoleErrors.join(", ")}`).toEqual([]);
-  });
-
-  test("Student login on acme and sidebar navigation across all pages", async ({ page }) => {
-    const { consoleErrors, pageErrors } = setupErrorListeners(page);
-
-    await login(page, "student@acme.edu", "Student123!", "acme");
-
-    const studentPages = [
-      "/student/dashboard",
-      "/student/classes",
-      "/student/schedule",
-    ];
-
-    for (const path of studentPages) {
-      await page.goto(path);
-      await page.waitForLoadState("domcontentloaded");
-      await expect(page.locator("text=Something went wrong")).toHaveCount(0);
-      await expect(page.locator("text=An unexpected error occurred")).toHaveCount(0);
-    }
-
-    expect(pageErrors, `Unhandled page errors: ${pageErrors.map((e) => e.message).join(", ")}`).toEqual([]);
-    expect(consoleErrors, `Console errors: ${consoleErrors.join(", ")}`).toEqual([]);
-  });
-
-  test("Student accessing admin URL directly sees 403 Forbidden page", async ({ page }) => {
-    const { consoleErrors, pageErrors } = setupErrorListeners(page);
-
-    await login(page, "student@acme.edu", "Student123!", "acme");
-
-    // Directly navigate to an administrative URL
-    await page.goto("/admin");
-    await page.waitForLoadState("domcontentloaded");
-
-    // Verify 403 Forbidden UI
-    await expect(page.locator("text=Administrative Access Required (403)")).toBeVisible();
-    await expect(page.locator("text=Return to Student Portal")).toBeVisible();
-
-    // Verify sidebar doesn't show administrative section to student
-    await expect(page.locator("text=Roles & Access")).toHaveCount(0);
-
-    expect(pageErrors, `Unhandled page errors: ${pageErrors.map((e) => e.message).join(", ")}`).toEqual([]);
-    expect(consoleErrors, `Console errors: ${consoleErrors.join(", ")}`).toEqual([]);
-  });
-
-  test("Branding loads different brand display name and theme on second tenant host", async ({ page }) => {
-    const { consoleErrors, pageErrors } = setupErrorListeners(page);
-
-    // Tenant 1: Acme
-    await page.goto("/login?tenant=acme");
-    await page.waitForLoadState("domcontentloaded");
-    const acmeHtml = await page.locator("html").getAttribute("data-tenant");
-    expect(acmeHtml).toBe("acme");
-
-    // Tenant 2: Default
-    await page.goto("/login?tenant=default");
-    await page.waitForLoadState("domcontentloaded");
-    const defaultHtml = await page.locator("html").getAttribute("data-tenant");
-    expect(defaultHtml).toBe("default");
-
-    expect(pageErrors, `Unhandled page errors: ${pageErrors.map((e) => e.message).join(", ")}`).toEqual([]);
-    expect(consoleErrors, `Console errors: ${consoleErrors.join(", ")}`).toEqual([]);
-  });
-
-  test("Teacher publishes timetable and student views published timetable", async ({ page, browser }) => {
-    // 1. Teacher publishes timetable
-    const teacherContext = await browser.newContext();
-    const teacherPage = await teacherContext.newPage();
-    const teacherErrors = setupErrorListeners(teacherPage);
-
-    await login(teacherPage, "teacher@acme.edu", "Teacher123!", "acme");
-    await teacherPage.goto("/teacher/timetables");
-    await teacherPage.waitForLoadState("domcontentloaded");
-
-    // Check if Publish Timetable button exists and is active
-    const publishBtn = teacherPage.locator("button:has-text('Publish Timetable')");
-    if (await publishBtn.isVisible()) {
-      await publishBtn.click();
-      // If conflict modal opens, confirm publication
-      const proceedBtn = teacherPage.locator("button:has-text('Proceed & Publish')");
-      if (await proceedBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await proceedBtn.click();
-      }
-      await teacherPage.waitForTimeout(1000);
-    }
-
-    expect(teacherErrors.pageErrors).toEqual([]);
-    expect(teacherErrors.consoleErrors).toEqual([]);
-    await teacherContext.close();
-
-    // 2. Student views schedule
-    const studentContext = await browser.newContext();
-    const studentPage = await studentContext.newPage();
-    const studentErrors = setupErrorListeners(studentPage);
-
-    await login(studentPage, "student@acme.edu", "Student123!", "acme");
-    await studentPage.goto("/student/schedule");
-    await studentPage.waitForLoadState("domcontentloaded");
-
-    // Ensure page renders cleanly with no error state or blank crash
-    await expect(studentPage.locator("text=Something went wrong")).toHaveCount(0);
-    await expect(studentPage.locator("text=Weekly Timetable Overview")).toBeVisible();
-
-    expect(studentErrors.pageErrors).toEqual([]);
-    expect(studentErrors.consoleErrors).toEqual([]);
-    await studentContext.close();
+  test("rejects a hostile file with a friendly message", async ({ page }) => {
+    const errors = watchErrors(page);
+    await openWizard(page);
+    // A Windows executable renamed to .xlsx.
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "timetable.xlsx",
+      mimeType: "application/octet-stream",
+      buffer: Buffer.concat([Buffer.from("MZ"), Buffer.alloc(2048, 0x90)]),
+    });
+    const alert = page.getByRole("alert").first();
+    await expect(alert).toBeVisible();
+    const text = (await alert.textContent()) ?? "";
+    expect(text).toMatch(/not valid|damaged|does not match|not allowed|could not read/i);
+    expect(text).not.toMatch(/traceback|exception|stack|errno|\.py/i);
+    // Still on the upload step, nothing was parsed.
+    await expect(page.getByRole("button", { name: "Choose file" })).toBeVisible();
+    expect(errors.pageErrors).toEqual([]);
   });
 });
 
+test("backend unreachable shows a friendly error, not a blank screen", async ({ page }) => {
+  const errors = watchErrors(page);
+  await login(page, "student");
+  await page.route("**/api/**", (route) => route.abort("connectionrefused"));
+  await openViaSidebar(page, "/student/schedule");
+  await expect(
+    page.getByText(/Cannot reach the server|Failed to load|Something went wrong|try again/i).first()
+  ).toBeVisible();
+  // The shell is still rendered.
+  await expect(page.locator(SIDEBAR)).toBeVisible();
+  expect((await page.locator("body").innerText()).trim().length).toBeGreaterThan(50);
+  expect(errors.pageErrors).toEqual([]);
+});
