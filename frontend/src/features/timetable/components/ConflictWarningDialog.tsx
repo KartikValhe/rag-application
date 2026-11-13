@@ -1,9 +1,15 @@
 import React from "react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
-import { AlertTriangle, AlertCircle, User, DoorOpen, School } from "lucide-react";
+import { AlertTriangle, User, DoorOpen, School } from "lucide-react";
 import { ConflictItem } from "../api/timetableApi";
 import { formatConflictDetails } from "../utils/timetableHelpers";
+
+const CONFLICT_ICONS: Record<ConflictItem["conflict_type"], typeof User> = {
+  teacher_overlap: User,
+  room_overlap: DoorOpen,
+  class_overlap: School,
+};
 
 export interface ConflictWarningDialogProps {
   isOpen: boolean;
@@ -65,15 +71,8 @@ export const ConflictWarningDialog: React.FC<ConflictWarningDialogProps> = ({
 
         <div className="space-y-3 max-h-[50vh] overflow-y-auto pr-1">
           {conflicts.map((conflict, idx) => {
-            const { title, description } = formatConflictDetails(conflict);
-            const Icon =
-              conflict.conflict_type === "teacher_overlap"
-                ? User
-                : conflict.conflict_type === "room_overlap"
-                ? DoorOpen
-                : conflict.conflict_type === "class_overlap"
-                ? School
-                : AlertCircle;
+            const { title, description, lecture } = formatConflictDetails(conflict);
+            const Icon = CONFLICT_ICONS[conflict.conflict_type];
 
             return (
               <div
@@ -89,6 +88,9 @@ export const ConflictWarningDialog: React.FC<ConflictWarningDialogProps> = ({
                   </div>
                   <p className="text-xs text-text-muted mt-1 leading-relaxed break-words">
                     {description}
+                  </p>
+                  <p className="text-xs text-text-muted mt-1 break-words">
+                    <span className="font-medium text-text">Your lecture:</span> {lecture}
                   </p>
                 </div>
               </div>

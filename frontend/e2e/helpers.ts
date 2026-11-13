@@ -1,4 +1,4 @@
-import { expect, Page } from "@playwright/test";
+import { APIRequestContext, expect, Page } from "@playwright/test";
 
 export const ACCOUNTS = {
   admin: { email: "admin@acme.edu", password: "Admin123!" },
@@ -32,6 +32,25 @@ export async function login(page: Page, role: Role, tenant = "acme") {
   await page.locator('button[type="submit"]').click();
   await page.waitForURL((url) => !url.pathname.startsWith("/login"));
   await expect(page.locator('aside[aria-label="Desktop Navigation"]')).toBeVisible();
+}
+
+export interface ApiAuth {
+  userId: string;
+  headers: Record<string, string>;
+}
+
+/** Logs in through the API (for test setup) and returns auth headers. */
+export async function apiLogin(request: APIRequestContext, role: Role, tenant = "acme"): Promise<ApiAuth> {
+  const res = await request.post("/api/v1/auth/login", {
+    headers: { "X-Tenant-Slug": tenant },
+    data: { ...ACCOUNTS[role], tenant_slug: tenant },
+  });
+  expect(res.ok(), `login ${role} -> ${res.status()}`).toBeTruthy();
+  const body = await res.json();
+  return {
+    userId: body.user_id,
+    headers: { Authorization: `Bearer ${body.access_token}`, "X-Tenant-Slug": tenant },
+  };
 }
 
 /** Opens a page through the sidebar link, so the in-memory session is kept. */

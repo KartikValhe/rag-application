@@ -11,6 +11,7 @@ import {
 import { WeeklyTimetableGrid } from "../components/WeeklyTimetableGrid";
 import { EntryFormModal } from "../components/EntryFormModal";
 import { ConflictWarningDialog } from "../components/ConflictWarningDialog";
+import { conflictsFromPublishError, nextPublishStep } from "../utils/timetableHelpers";
 import { ImportWizardModal } from "../components/ImportWizardModal";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
@@ -205,10 +206,9 @@ export const TimetableEditorPage: React.FC = () => {
     setIsPublishing(true);
     try {
       const checkRes = await timetableApi.checkConflicts(selectedClassId);
-      if (checkRes.has_conflicts && checkRes.conflicts.length > 0) {
+      if (nextPublishStep(checkRes) === "confirm") {
         setDetectedConflicts(checkRes.conflicts);
         setIsConflictModalOpen(true);
-        setIsPublishing(false);
         return;
       }
       // No conflicts -> publish directly
@@ -217,9 +217,10 @@ export const TimetableEditorPage: React.FC = () => {
       setViewMode("published");
       await loadTimetable();
     } catch (err: unknown) {
-      const respErr = err as { response?: { status?: number; data?: { detail?: { code?: string; message?: string; conflicts?: ConflictItem[] } } } };
-      if (respErr.response?.status === 409 && respErr.response?.data?.detail?.conflicts) {
-        setDetectedConflicts(respErr.response.data.detail.conflicts);
+      // A conflict created between the check and the publish comes back as a 409.
+      const conflicts = conflictsFromPublishError(err);
+      if (conflicts) {
+        setDetectedConflicts(conflicts);
         setIsConflictModalOpen(true);
       } else {
         toast.error(getFriendlyError(err, "Failed to publish timetable."));

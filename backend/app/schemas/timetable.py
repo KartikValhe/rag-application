@@ -110,21 +110,34 @@ class TimetableResponse(BaseModel):
 
 
 class TimetableConflict(BaseModel):
+    """
+    One clash between a draft lecture and another lecture.
+    Every key is always present (no defaults). Mirrored by ConflictItemSchema in the frontend.
+    "other_*" describes the lecture it clashes with: a lecture of another class's published
+    timetable, or another lecture of the same draft for class_overlap.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     conflict_type: ConflictType
-    day_of_week: int
+    day_of_week: int = Field(..., ge=0, le=6)
     day_name: str
-    start_time: str
-    end_time: str
+    start_time: str  # draft lecture, HH:MM
+    end_time: str  # draft lecture, HH:MM
+    subject_name: str  # draft lecture subject
+    teacher_name: str | None  # draft lecture teacher, null when none is set
+    room: str | None  # draft lecture room, null when none is set
+    other_class_name: str
+    other_subject_name: str
+    other_start_time: str  # HH:MM
+    other_end_time: str  # HH:MM
     description: str
-    class_name: str | None = None
-    subject_name: str | None = None
-    teacher_name: str | None = None
-    room: str | None = None
 
 
 class ConflictCheckResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     has_conflicts: bool
-    conflicts: list[TimetableConflict] = Field(default_factory=list)
+    conflicts: list[TimetableConflict]
 
 
 class PublishTimetableRequest(BaseModel):

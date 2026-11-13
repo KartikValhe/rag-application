@@ -129,46 +129,59 @@ test("groupEntriesByDay: groups entries by weekday index and sorts chronological
 
 test("formatConflictDetails: formats teacher, room, and class overlap conflicts clearly", () => {
   // 1. Teacher overlap
+  const base = {
+    subject_name: "Physics",
+    teacher_name: "Prof. Einstein",
+    room: "Lab 301",
+    other_subject_name: "Mathematics",
+    description: "",
+  };
   const teacherConflict: ConflictItem = {
+    ...base,
     conflict_type: "teacher_overlap",
     day_of_week: 0,
+    day_name: "Monday",
     start_time: "09:00",
     end_time: "10:00",
-    details: {
-      teacher_name: "Prof. Einstein",
-      class_name: "Class 10-B",
-    },
+    other_class_name: "Class 10-B",
+    other_start_time: "09:00",
+    other_end_time: "10:00",
   };
   const teacherFmt = formatConflictDetails(teacherConflict);
   assert.equal(teacherFmt.title, "Teacher Double-Booked");
-  assert.match(teacherFmt.description, /Prof\. Einstein is already scheduled to teach in Class 10-B/);
+  assert.match(teacherFmt.description, /Prof\. Einstein is already teaching Mathematics in Class 10-B/);
   assert.match(teacherFmt.description, /Monday during 9:00 AM – 10:00 AM/);
 
   // 2. Room overlap
   const roomConflict: ConflictItem = {
+    ...base,
     conflict_type: "room_overlap",
     day_of_week: 2,
+    day_name: "Wednesday",
     start_time: "11:00",
     end_time: "12:00",
-    details: {
-      room: "Lab 301",
-      class_name: "Class 12-A",
-    },
+    other_class_name: "Class 12-A",
+    other_start_time: "11:00",
+    other_end_time: "12:00",
   };
   const roomFmt = formatConflictDetails(roomConflict);
-  assert.equal(roomFmt.title, "Room Overlap");
+  assert.equal(roomFmt.title, "Room Double-Booked");
   assert.match(roomFmt.description, /Lab 301 is already booked by Class 12-A/);
   assert.match(roomFmt.description, /Wednesday during 11:00 AM – 12:00 PM/);
 
   // 3. Class overlap
   const classConflict: ConflictItem = {
+    ...base,
     conflict_type: "class_overlap",
     day_of_week: 4,
+    day_name: "Friday",
     start_time: "14:00",
     end_time: "15:00",
-    details: {},
+    other_class_name: "Class 10-A",
+    other_start_time: "14:00",
+    other_end_time: "15:00",
   };
   const classFmt = formatConflictDetails(classConflict);
-  assert.equal(classFmt.title, "Class Schedule Overlap");
+  assert.equal(classFmt.title, "Overlapping Lectures In This Class");
   assert.match(classFmt.description, /Friday during 2:00 PM – 3:00 PM/);
 });

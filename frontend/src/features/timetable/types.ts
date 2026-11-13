@@ -1,3 +1,6 @@
+import type { z } from "zod";
+import type { ConflictItemSchema, ConflictCheckResponseSchema } from "./schemas/timetableSchemas.ts";
+
 export interface TimetableEntryItem {
   id: string;
   timetable_id: string;
@@ -31,28 +34,9 @@ export interface TimetableItem {
   updated_at: string;
 }
 
-export interface ConflictItem {
-  conflict_type: "teacher_overlap" | "room_overlap" | "class_overlap";
-  day_of_week: number;
-  start_time: string;
-  end_time: string;
-  existing_entry_id?: string | null;
-  details: {
-    teacher_id?: string;
-    teacher_name?: string;
-    room?: string;
-    class_id?: string;
-    class_name?: string;
-    subject_id?: string;
-    subject_name?: string;
-    [key: string]: unknown;
-  };
-}
-
-export interface ConflictCheckResponse {
-  has_conflicts: boolean;
-  conflicts: ConflictItem[];
-}
+// Conflict types come from the Zod schema, which mirrors the backend TimetableConflict model.
+export type ConflictItem = z.infer<typeof ConflictItemSchema>;
+export type ConflictCheckResponse = z.infer<typeof ConflictCheckResponseSchema>;
 
 export interface NextLectureItem {
   entry_id?: string | null;

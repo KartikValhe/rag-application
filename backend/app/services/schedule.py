@@ -15,7 +15,7 @@ Unknown/unauthorized class queries return a generic 404 (prevent ID probing).
 
 import uuid
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
@@ -146,95 +146,80 @@ async def detect_timetable_conflicts(
 ) -> list[TimetableConflict]:
     """
     Conflict detection across the entire tenant:
-      1. Class overlap: Two overlapping entries in the same class.
+      1. Class overlap: Two overlapping entries in the same draft.
       2. Teacher overlap: Same teacher scheduled in multiple places at the same time.
       3. Room overlap: Same room booked for multiple sessions at the same time.
-    Compares candidate entries among themselves and against all other published tenant entries.
+    Compares candidate entries among themselves and against the PUBLISHED timetables of
+    OTHER classes. The class's own published timetable is ignored: the draft replaces it.
     """
     conflicts: list[TimetableConflict] = []
 
     # Load context dictionaries for names
     classes_res = await db.execute(select(Class.id, Class.name).where(Class.tenant_id == tenant_id))
-    class_name_map = dict(classes_res.all())
+    class_name_map: dict[uuid.UUID, str] = dict(classes_res.all())
 
     subjects_res = await db.execute(select(Subject.id, Subject.name).where(Subject.tenant_id == tenant_id))
-    subject_name_map = dict(subjects_res.all())
+    subject_name_map: dict[uuid.UUID, str] = dict(subjects_res.all())
 
     teachers_res = await db.execute(select(User.id, User.full_name).where(User.tenant_id == tenant_id))
-    teacher_name_map = dict(teachers_res.all())
+    teacher_name_map: dict[uuid.UUID, str] = dict(teachers_res.all())
 
-    # 1. Intra-candidate checks
-    n = len(candidate_entries)
-    for i in range(n):
-        e1 = candidate_entries[i]
-        dow1 = int(e1["day_of_week"])
-        s1: time = e1["start_time"] if isinstance(e1["start_time"], time) else time.fromisoformat(str(e1["start_time"]))
-        e1_end: time = e1["end_time"] if isinstance(e1["end_time"], time) else time.fromisoformat(str(e1["end_time"]))
-        t1 = uuid.UUID(str(e1["teacher_id"])) if e1.get("teacher_id") else None
-        r1 = str(e1.get("room") or "").strip()
+    own_class_name = class_name_map.get(target_class_id, "This class")
+    lectures = [_to_lecture(c) for c in candidate_entries]
 
-        for j in range(i + 1, n):
-            e2 = candidate_entries[j]
-            dow2 = int(e2["day_of_week"])
-            if dow1 != dow2:
+    def make(
+        kind: ConflictType,
+        lec: _Lecture,
+        other: _Lecture,
+        other_class_name: str,
+        description: str,
+    ) -> TimetableConflict:
+        return TimetableConflict(
+            conflict_type=kind,
+            day_of_week=lec.day_of_week,
+            day_name=DAY_NAMES.get(lec.day_of_week, ""),
+            start_time=_hhmm(lec.start),
+            end_time=_hhmm(lec.end),
+            subject_name=_subject_name(subject_name_map, lec.subject_id),
+            teacher_name=teacher_name_map.get(lec.teacher_id) if lec.teacher_id else None,
+            room=lec.room,
+            other_class_name=other_class_name,
+            other_subject_name=_subject_name(subject_name_map, other.subject_id),
+            other_start_time=_hhmm(other.start),
+            other_end_time=_hhmm(other.end),
+            description=description,
+        )
+
+    # 1. Overlaps inside the draft itself
+    for i, a in enumerate(lectures):
+        for b in lectures[i + 1:]:
+            if a.day_of_week != b.day_of_week or not _times_overlap(a.start, a.end, b.start, b.end):
                 continue
-
-            s2: time = e2["start_time"] if isinstance(e2["start_time"], time) else time.fromisoformat(str(e2["start_time"]))
-            e2_end: time = e2["end_time"] if isinstance(e2["end_time"], time) else time.fromisoformat(str(e2["end_time"]))
-
-            if _times_overlap(s1, e1_end, s2, e2_end):
-                s1_id = uuid.UUID(str(e1["subject_id"])) if e1.get("subject_id") else None
-                s2_id = uuid.UUID(str(e2["subject_id"])) if e2.get("subject_id") else None
-                sub1_name = subject_name_map.get(s1_id, "Subject") if s1_id else "Subject"
-                sub2_name = subject_name_map.get(s2_id, "Subject") if s2_id else "Subject"
-                c_name = class_name_map.get(target_class_id, "This Class")
-
-                # Class overlap
+            day = DAY_NAMES.get(a.day_of_week, "")
+            when = f"{day} {_hhmm(a.start)}-{_hhmm(a.end)} and {_hhmm(b.start)}-{_hhmm(b.end)}"
+            conflicts.append(
+                make(
+                    ConflictType.CLASS_OVERLAP, a, b, own_class_name,
+                    f"Class '{own_class_name}' has overlapping lectures on {when}.",
+                )
+            )
+            if a.teacher_id and a.teacher_id == b.teacher_id:
+                t_name = teacher_name_map.get(a.teacher_id, "Teacher")
                 conflicts.append(
-                    TimetableConflict(
-                        conflict_type=ConflictType.CLASS_OVERLAP,
-                        day_of_week=dow1,
-                        day_name=DAY_NAMES.get(dow1, ""),
-                        start_time=s1.isoformat(),
-                        end_time=e1_end.isoformat(),
-                        class_name=c_name,
-                        subject_name=f"{sub1_name} and {sub2_name}",
-                        description=f"Class '{c_name}' has overlapping sessions ({sub1_name} and {sub2_name}) on {DAY_NAMES.get(dow1)}.",
+                    make(
+                        ConflictType.TEACHER_OVERLAP, a, b, own_class_name,
+                        f"Teacher '{t_name}' is double-booked in '{own_class_name}' on {when}.",
+                    )
+                )
+            if a.room and b.room and a.room.lower() == b.room.lower():
+                conflicts.append(
+                    make(
+                        ConflictType.ROOM_OVERLAP, a, b, own_class_name,
+                        f"Room '{a.room}' is double-booked in '{own_class_name}' on {when}.",
                     )
                 )
 
-                # Teacher overlap
-                t2 = uuid.UUID(str(e2["teacher_id"])) if e2.get("teacher_id") else None
-                if t1 and t2 and t1 == t2:
-                    t_name = teacher_name_map.get(t1, "Teacher")
-                    conflicts.append(
-                        TimetableConflict(
-                            conflict_type=ConflictType.TEACHER_OVERLAP,
-                            day_of_week=dow1,
-                            day_name=DAY_NAMES.get(dow1, ""),
-                            start_time=s1.isoformat(),
-                            end_time=e1_end.isoformat(),
-                            teacher_name=t_name,
-                            description=f"Teacher '{t_name}' is double-booked on {DAY_NAMES.get(dow1)} at {s1.strftime('%H:%M')}.",
-                        )
-                    )
-
-                # Room overlap
-                r2 = str(e2.get("room") or "").strip()
-                if r1 and r2 and r1.lower() == r2.lower():
-                    conflicts.append(
-                        TimetableConflict(
-                            conflict_type=ConflictType.ROOM_OVERLAP,
-                            day_of_week=dow1,
-                            day_name=DAY_NAMES.get(dow1, ""),
-                            start_time=s1.isoformat(),
-                            end_time=e1_end.isoformat(),
-                            room=r1,
-                            description=f"Room '{r1}' is double-booked on {DAY_NAMES.get(dow1)} at {s1.strftime('%H:%M')}.",
-                        )
-                    )
-
-    # 2. Inter-timetable checks against other published timetables in the tenant
+    # 2. Inter-timetable checks against other classes' published timetables
     pub_query = (
         select(TimetableEntry, Class.name.label("class_name"))
         .join(Timetable, (Timetable.tenant_id == TimetableEntry.tenant_id) & (Timetable.id == TimetableEntry.timetable_id))
@@ -251,48 +236,77 @@ async def detect_timetable_conflicts(
     pub_res = await db.execute(pub_query)
     other_published_entries = pub_res.all()
 
-    for cand in candidate_entries:
-        dow = int(cand["day_of_week"])
-        s_cand: time = cand["start_time"] if isinstance(cand["start_time"], time) else time.fromisoformat(str(cand["start_time"]))
-        e_cand: time = cand["end_time"] if isinstance(cand["end_time"], time) else time.fromisoformat(str(cand["end_time"]))
-        t_cand = uuid.UUID(str(cand["teacher_id"])) if cand.get("teacher_id") else None
-        r_cand = str(cand.get("room") or "").strip()
-
+    for lec in lectures:
         for pub_entry, other_class_name in other_published_entries:
-            if pub_entry.day_of_week != dow:
+            other = _Lecture(
+                day_of_week=pub_entry.day_of_week,
+                start=pub_entry.start_time,
+                end=pub_entry.end_time,
+                subject_id=pub_entry.subject_id,
+                teacher_id=pub_entry.teacher_id,
+                room=(pub_entry.room or "").strip() or None,
+            )
+            if other.day_of_week != lec.day_of_week or not _times_overlap(
+                lec.start, lec.end, other.start, other.end
+            ):
                 continue
+            day = DAY_NAMES.get(lec.day_of_week, "")
+            other_when = f"{day} {_hhmm(other.start)}-{_hhmm(other.end)}"
 
-            if _times_overlap(s_cand, e_cand, pub_entry.start_time, pub_entry.end_time):
-                # Teacher conflict with another class
-                if t_cand and pub_entry.teacher_id and t_cand == pub_entry.teacher_id:
-                    t_name = teacher_name_map.get(t_cand, "Teacher")
-                    conflicts.append(
-                        TimetableConflict(
-                            conflict_type=ConflictType.TEACHER_OVERLAP,
-                            day_of_week=dow,
-                            day_name=DAY_NAMES.get(dow, ""),
-                            start_time=s_cand.isoformat(),
-                            end_time=e_cand.isoformat(),
-                            teacher_name=t_name,
-                            description=f"Teacher '{t_name}' is already scheduled in class '{other_class_name}' on {DAY_NAMES.get(dow)} between {pub_entry.start_time.strftime('%H:%M')} - {pub_entry.end_time.strftime('%H:%M')}.",
-                        )
+            if lec.teacher_id and lec.teacher_id == other.teacher_id:
+                t_name = teacher_name_map.get(lec.teacher_id, "Teacher")
+                conflicts.append(
+                    make(
+                        ConflictType.TEACHER_OVERLAP, lec, other, other_class_name,
+                        f"Teacher '{t_name}' is already scheduled in '{other_class_name}' on {other_when}.",
                     )
-
-                # Room conflict with another class
-                if r_cand and pub_entry.room and r_cand.lower() == pub_entry.room.strip().lower():
-                    conflicts.append(
-                        TimetableConflict(
-                            conflict_type=ConflictType.ROOM_OVERLAP,
-                            day_of_week=dow,
-                            day_name=DAY_NAMES.get(dow, ""),
-                            start_time=s_cand.isoformat(),
-                            end_time=e_cand.isoformat(),
-                            room=r_cand,
-                            description=f"Room '{r_cand}' is already booked for class '{other_class_name}' on {DAY_NAMES.get(dow)} between {pub_entry.start_time.strftime('%H:%M')} - {pub_entry.end_time.strftime('%H:%M')}.",
-                        )
+                )
+            if lec.room and other.room and lec.room.lower() == other.room.lower():
+                conflicts.append(
+                    make(
+                        ConflictType.ROOM_OVERLAP, lec, other, other_class_name,
+                        f"Room '{lec.room}' is already booked by '{other_class_name}' on {other_when}.",
                     )
+                )
 
     return conflicts
+
+
+class _Lecture(NamedTuple):
+    """A lecture normalised for conflict checks."""
+    day_of_week: int
+    start: time
+    end: time
+    subject_id: uuid.UUID | None
+    teacher_id: uuid.UUID | None
+    room: str | None
+
+
+def _as_time(v: Any) -> time:
+    return v if isinstance(v, time) else time.fromisoformat(str(v))
+
+
+def _as_uuid(v: Any) -> uuid.UUID | None:
+    return uuid.UUID(str(v)) if v else None
+
+
+def _to_lecture(raw: dict[str, Any]) -> _Lecture:
+    return _Lecture(
+        day_of_week=int(raw["day_of_week"]),
+        start=_as_time(raw["start_time"]),
+        end=_as_time(raw["end_time"]),
+        subject_id=_as_uuid(raw.get("subject_id")),
+        teacher_id=_as_uuid(raw.get("teacher_id")),
+        room=str(raw.get("room") or "").strip() or None,
+    )
+
+
+def _hhmm(t: time) -> str:
+    return t.strftime("%H:%M")
+
+
+def _subject_name(names: dict[uuid.UUID, str], subject_id: uuid.UUID | None) -> str:
+    return names.get(subject_id, "Unknown subject") if subject_id else "Unknown subject"
 
 
 async def _load_published_schedule_entries(

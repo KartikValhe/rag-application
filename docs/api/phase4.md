@@ -230,21 +230,40 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
     "has_conflicts": true,
     "conflicts": [
       {
-        "conflict_type": "room_overlap",
-        "day_of_week": 0,
-        "day_name": "Monday",
-        "start_time": "09:00:00",
-        "end_time": "10:00:00",
-        "description": "Room 'Room 204' is double-booked on Monday at 09:00.",
-        "class_name": null,
-        "subject_name": null,
-        "teacher_name": null,
-        "room": "Room 204"
+        "conflict_type": "teacher_overlap",
+        "day_of_week": 2,
+        "day_name": "Wednesday",
+        "start_time": "11:00",
+        "end_time": "12:00",
+        "subject_name": "Mathematics",
+        "teacher_name": "Ravi Teacher",
+        "room": "Room 101",
+        "other_class_name": "Class 10-B",
+        "other_subject_name": "Mathematics",
+        "other_start_time": "11:30",
+        "other_end_time": "12:30",
+        "description": "Teacher 'Ravi Teacher' is already scheduled in 'Class 10-B' on Wednesday 11:30-12:30."
       }
     ]
   }
   ```
-- **`TimetableConflict` fields**: `conflict_type` is one of `class_overlap`, `teacher_overlap`, `room_overlap`. `day_of_week`, `day_name`, `start_time`, `end_time` (`HH:MM:SS`) and `description` are always set. `class_name`, `subject_name`, `teacher_name`, `room` are optional and filled depending on the type (`class_name` + `subject_name` for class overlaps, `teacher_name` for teacher overlaps, `room` for room overlaps). There is no `conflicting_class_id` field.
+- **`TimetableConflict` fields** (Pydantic `extra="forbid"`, mirrored by `ConflictItemSchema` in `frontend/src/features/timetable/schemas/timetableSchemas.ts`, which is `.strict()`). **Every key is always present**; only `teacher_name` and `room` may be `null`.
+  | Field | Type | Meaning |
+  |---|---|---|
+  | `conflict_type` | `"class_overlap" \| "teacher_overlap" \| "room_overlap"` | kind of clash |
+  | `day_of_week` / `day_name` | `int` 0-6 / `str` | weekday (0 = Monday) |
+  | `start_time` / `end_time` | `str` `HH:MM` | the draft lecture |
+  | `subject_name` | `str` | the draft lecture's subject |
+  | `teacher_name` | `str \| null` | the draft lecture's teacher (`null` if none) |
+  | `room` | `str \| null` | the draft lecture's room (`null` if none) |
+  | `other_class_name` | `str` | class of the clashing lecture (this class for `class_overlap`) |
+  | `other_subject_name` | `str` | subject of the clashing lecture |
+  | `other_start_time` / `other_end_time` | `str` `HH:MM` | the clashing lecture |
+  | `description` | `str` | human-readable summary |
+
+  There is no `details` object and no `conflicting_class_id` field.
+- **What counts as a conflict**: overlaps inside the draft itself (`class_overlap`, plus `teacher_overlap` / `room_overlap` when they also share a teacher or room), and teacher or room double-bookings against the **published** timetables of **other** classes. The class's own published timetable is ignored because the draft replaces it. Back-to-back lectures (end = start) do not overlap.
+- **Frontend flow**: the response is validated with `ConflictCheckResponseSchema`. An empty `conflicts` list publishes directly with `confirm_conflicts: false`; otherwise the conflict dialog opens and "Override & Publish Anyway" sends `confirm_conflicts: true`.
 
 ### 4.9 Publish Timetable
 

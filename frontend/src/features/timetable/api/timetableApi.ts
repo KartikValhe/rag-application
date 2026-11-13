@@ -7,6 +7,7 @@ import {
   TimetableEntryItemSchema,
   AssignedTeacherListSchema,
   ImportPreviewResponseSchema,
+  ConflictCheckResponseSchema,
 } from "../schemas/timetableSchemas";
 import { IMPORT_TIMEOUT_MS, buildSaveRequest, type SaveEntryPayload } from "../utils/importWizard";
 import type {
@@ -112,10 +113,8 @@ export const timetableApi = {
 
   // Run dry conflict check across the tenant
   checkConflicts: async (classId: string): Promise<ConflictCheckResponse> => {
-    const res = await apiClient.post<ConflictCheckResponse>(
-      `/classes/${classId}/timetables/check-conflicts`
-    );
-    return res.data;
+    const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/check-conflicts`);
+    return validateResponse(ConflictCheckResponseSchema, res.data, "conflict check");
   },
 
   // Publish timetable (confirm_conflicts defaults to false)

@@ -67,6 +67,40 @@ export const NextLectureResponseSchema = z.object({
   tenant_timezone: z.string(),
 });
 
+// Mirrors backend TimetableConflict (app/schemas/timetable.py). Every key is required;
+// strict() rejects unknown keys so contract drift fails loudly instead of crashing the UI.
+export const ConflictItemSchema = z
+  .object({
+    conflict_type: z.enum(["teacher_overlap", "room_overlap", "class_overlap"]),
+    day_of_week: z.number().int().min(0).max(6),
+    day_name: z.string(),
+    start_time: z.string(),
+    end_time: z.string(),
+    subject_name: z.string(),
+    teacher_name: z.string().nullable(),
+    room: z.string().nullable(),
+    other_class_name: z.string(),
+    other_subject_name: z.string(),
+    other_start_time: z.string(),
+    other_end_time: z.string(),
+    description: z.string(),
+  })
+  .strict();
+
+export const ConflictCheckResponseSchema = z
+  .object({
+    has_conflicts: z.boolean(),
+    conflicts: z.array(ConflictItemSchema),
+  })
+  .strict();
+
+// 409 body from POST /timetables/publish without confirm_conflicts.
+export const PublishConflictErrorSchema = z.object({
+  code: z.literal("timetable_conflicts_detected"),
+  message: z.string(),
+  conflicts: z.array(ConflictItemSchema),
+});
+
 // Email is only sent to tenant admins; for everyone else it is null or missing.
 export const AssignedTeacherSchema = z.object({
   id: z.string(),

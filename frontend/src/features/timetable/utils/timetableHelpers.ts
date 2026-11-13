@@ -1,4 +1,5 @@
-import type { TimetableEntryItem, ConflictItem } from "../types.ts";
+import type { TimetableEntryItem, ConflictItem, ConflictCheckResponse } from "../types.ts";
+import { PublishConflictErrorSchema } from "../schemas/timetableSchemas.ts";
 
 export const WEEKDAYS = [
   { index: 0, label: "Monday", short: "Mon" },
@@ -121,44 +122,60 @@ export function groupEntriesByDay(
 }
 
 /**
- * Formats a single conflict item into a human-readable title and description.
+ * Formats one conflict for the warning dialog.
+ * `description` explains the clash; `lecture` describes the draft lecture involved.
+ * Uses only fields of the backend TimetableConflict model (see ConflictItemSchema).
  */
 export function formatConflictDetails(conflict: ConflictItem): {
   title: string;
   description: string;
+  lecture: string;
 } {
-  const dayName = DAY_NAMES[conflict.day_of_week] || `Day ${conflict.day_of_week}`;
-  const range = formatTimeRange(conflict.start_time, conflict.end_time);
+  const day = conflict.day_name;
+  const otherRange = formatTimeRange(conflict.other_start_time, conflict.other_end_time);
+  const lecture = [
+    `${conflict.subject_name}, ${day} ${formatTimeRange(conflict.start_time, conflict.end_time)}`,
+    conflict.teacher_name === null ? "No teacher" : conflict.teacher_name,
+    conflict.room === null ? "No room" : conflict.room,
+  ].join(" · ");
 
   switch (conflict.conflict_type) {
     case "teacher_overlap": {
-      const teacher = conflict.details.teacher_name || "Assigned teacher";
-      const otherClass = conflict.details.class_name || "another class";
+      const teacher = conflict.teacher_name === null ? "The teacher" : conflict.teacher_name;
       return {
         title: "Teacher Double-Booked",
-        description: `${teacher} is already scheduled to teach in ${otherClass} on ${dayName} during ${range}.`,
+        description: `${teacher} is already teaching ${conflict.other_subject_name} in ${conflict.other_class_name} on ${day} during ${otherRange}.`,
+        lecture,
       };
     }
     case "room_overlap": {
-      const room = conflict.details.room || "Specified room";
-      const otherClass = conflict.details.class_name || "another class";
+      const room = conflict.room === null ? "The room" : conflict.room;
       return {
-        title: "Room Overlap",
-        description: `${room} is already booked by ${otherClass} on ${dayName} during ${range}.`,
+        title: "Room Double-Booked",
+        description: `${room} is already booked by ${conflict.other_class_name} (${conflict.other_subject_name}) on ${day} during ${otherRange}.`,
+        lecture,
       };
     }
-    case "class_overlap": {
+    case "class_overlap":
       return {
-        title: "Class Schedule Overlap",
-        description: `This class already has another lecture scheduled on ${dayName} during ${range}.`,
-      };
-    }
-    default:
-      return {
-        title: "Schedule Conflict",
-        description: `Conflict detected on ${dayName} during ${range}.`,
+        title: "Overlapping Lectures In This Class",
+        description: `This draft also has ${conflict.other_subject_name} on ${day} during ${otherRange}.`,
+        lecture,
       };
   }
+}
+
+/** After a conflict check: publish straight away when the list is empty, otherwise ask first. */
+export function nextPublishStep(check: ConflictCheckResponse): "publish" | "confirm" {
+  return check.conflicts.length === 0 ? "publish" : "confirm";
+}
+
+/** Conflicts from a 409 publish response, validated; null for any other error or a bad body. */
+export function conflictsFromPublishError(err: unknown): ConflictItem[] | null {
+  const res = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response;
+  if (!res || res.status !== 409) return null;
+  const parsed = PublishConflictErrorSchema.safeParse(res.data?.detail);
+  return parsed.success ? parsed.data.conflicts : null;
 }
 
 /** Display name for a teacher. Uses the name only and never falls back to an email. */

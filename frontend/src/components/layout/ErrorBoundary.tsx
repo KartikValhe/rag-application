@@ -1,6 +1,7 @@
 import { Component, ErrorInfo, ReactNode } from "react";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { getErrorFallback } from "./errorFallback";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -42,12 +43,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         typeof import.meta !== "undefined" &&
         typeof import.meta.env !== "undefined" &&
         Boolean(import.meta.env?.DEV);
-      const friendlyMessage =
-        "An unexpected error occurred while loading this section. Please reload the page to continue.";
-      const displayMessage =
-        isDev && this.state.error?.message
-          ? this.state.error.message
-          : friendlyMessage;
+      const fallback = getErrorFallback(this.state.error, isDev);
 
       return (
         <div className="min-h-[50vh] flex items-center justify-center p-6 bg-background">
@@ -60,22 +56,29 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
                 {this.props.fallbackTitle || "Something went wrong"}
               </h3>
               <p className="text-xs text-text-muted mt-1 break-words">
-                {displayMessage}
+                {fallback.message}
               </p>
+              {fallback.errorDetails !== null && (
+                <p className="text-xs text-danger mt-2 break-words font-mono">
+                  {fallback.errorDetails}
+                </p>
+              )}
             </div>
             <div className="flex items-center justify-center gap-3 pt-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  this.handleReset();
-                  window.location.href = "/";
-                }}
-                leftIcon={<Home className="w-4 h-4" />}
-                className="min-h-[44px] sm:min-h-[36px]"
-              >
-                Go to Dashboard
-              </Button>
+              {fallback.actions.includes("dashboard") && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    this.handleReset();
+                    window.location.href = "/";
+                  }}
+                  leftIcon={<Home className="w-4 h-4" />}
+                  className="min-h-[44px] sm:min-h-[36px]"
+                >
+                  Go to Dashboard
+                </Button>
+              )}
               <Button
                 variant="primary"
                 size="sm"

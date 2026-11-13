@@ -1,5 +1,5 @@
 import { test, expect, Page } from "@playwright/test";
-import { bodyOk, login, openViaSidebar, Role, watchErrors } from "./helpers";
+import { ApiAuth, apiLogin, bodyOk, login, openViaSidebar, Role, watchErrors } from "./helpers";
 
 const SIDEBAR = 'aside[aria-label="Desktop Navigation"]';
 
@@ -97,6 +97,103 @@ test("teacher drafts and publishes an entry, student sees it and the Next lectur
   expect(sErrors.consoleErrors).toEqual([]);
   await tctx.close();
   await sctx.close();
+});
+
+test("teacher publish: no conflicts publishes directly; a double-booking shows the dialog and confirm publishes", async ({
+  page,
+  request,
+}) => {
+  // Fresh classes and subject so the result does not depend on earlier runs.
+  const tag = Date.now();
+  const classA = `E2E-A-${tag}`;
+  const classB = `E2E-B-${tag}`;
+  const subject = `E2E-Subject-${tag}`;
+  const admin = await apiLogin(request, "admin");
+  const teacher = await apiLogin(request, "teacher");
+
+  const post = async (auth: ApiAuth, url: string, data: unknown) => {
+    const res = await request.post(`/api/v1${url}`, { headers: auth.headers, data });
+    expect(res.ok(), `${url} -> ${res.status()}`).toBeTruthy();
+    return res.json();
+  };
+  const sub = await post(admin, "/subjects", { name: subject });
+  const a = await post(admin, "/classes", { name: classA, kind: "section" });
+  const b = await post(admin, "/classes", { name: classB, kind: "section" });
+  for (const c of [a, b]) {
+    await post(admin, `/classes/${c.id}/subjects/${sub.id}`, {});
+    await post(admin, `/classes/${c.id}/subjects/${sub.id}/teachers`, { user_id: teacher.userId });
+  }
+
+  const errors = watchErrors(page);
+  const checks: { conflicts: unknown[] }[] = [];
+  const publishBodies: { confirm_conflicts: boolean }[] = [];
+  page.on("response", async (res) => {
+    if (res.url().includes(`/classes/${a.id}/timetables/check-conflicts`)) checks.push(await res.json());
+  });
+  page.on("request", (req) => {
+    if (req.method() === "POST" && req.url().includes(`/classes/${a.id}/timetables/publish`)) {
+      publishBodies.push(req.postDataJSON());
+    }
+  });
+
+  await login(page, "teacher");
+  await openViaSidebar(page, "/teacher/timetables");
+  await page.getByRole("combobox").first().selectOption({ label: `${classA} (section)` });
+
+  const addLecture = async (day: string, start: string, end: string, room: string) => {
+    await page.getByRole("button", { name: "Add Lecture" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Subject *").selectOption({ label: subject });
+    await dialog.getByLabel("Assigned Teacher").selectOption({ index: 1 });
+    await dialog.getByLabel("Day of Week *").selectOption(day);
+    await dialog.getByLabel("Start Time *").fill(start);
+    await dialog.getByLabel("End Time *").fill(end);
+    await dialog.getByLabel(/^Room/).fill(room);
+    await dialog.getByRole("button", { name: "Add to Timetable" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(room).first()).toBeVisible();
+  };
+
+  // 1. No conflicts: publishes straight away, no dialog.
+  await addLecture("0", "09:00", "10:00", `R-A-${tag}`);
+  await page.getByRole("button", { name: "Publish Timetable" }).click();
+  await expect(page.getByText(/Published \(v\d+\)/)).toBeVisible();
+  await expect(page.getByText("Schedule Conflicts Detected")).toHaveCount(0);
+  expect(checks.at(-1)?.conflicts).toEqual([]);
+  expect(publishBodies).toEqual([{ confirm_conflicts: false }]);
+
+  // 2. Same teacher published in class B on Wednesday 11:30-12:30.
+  await post(teacher, `/classes/${b.id}/timetables/draft/entries`, {
+    day_of_week: 2,
+    start_time: "11:30",
+    end_time: "12:30",
+    subject_id: sub.id,
+    teacher_id: teacher.userId,
+    room: `R-B-${tag}`,
+  });
+  await post(teacher, `/classes/${b.id}/timetables/publish`, { confirm_conflicts: false });
+
+  // Class A draft gets Wednesday 11:00-12:00 with the same teacher.
+  await page.getByRole("button", { name: "Draft Editor" }).click();
+  await addLecture("2", "11:00", "12:00", `R-A2-${tag}`);
+  await page.getByRole("button", { name: "Publish Timetable" }).click();
+
+  const conflictDialog = page.getByRole("dialog").filter({ hasText: "Schedule Conflicts Detected" });
+  await expect(conflictDialog).toBeVisible();
+  await expect(conflictDialog).toContainText("1 schedule conflict was");
+  await expect(conflictDialog).toContainText("Teacher Double-Booked");
+  await expect(conflictDialog).toContainText(`already teaching ${subject} in ${classB} on Wednesday during 11:30 AM – 12:30 PM`);
+  await expect(conflictDialog).toContainText(`${subject}, Wednesday 11:00 AM – 12:00 PM`);
+  expect(checks.at(-1)?.conflicts).toHaveLength(1);
+  expect(publishBodies).toHaveLength(1); // nothing sent until confirmed
+
+  await conflictDialog.getByRole("button", { name: "Override & Publish Anyway" }).click();
+  await expect(conflictDialog).toBeHidden();
+  await expect(page.getByText(/Published \(v\d+\)/)).toBeVisible();
+  expect(publishBodies.at(-1)).toEqual({ confirm_conflicts: true });
+  await bodyOk(page);
+  expect(errors.pageErrors).toEqual([]);
+  expect(errors.consoleErrors).toEqual([]);
 });
 
 test.describe("import wizard", () => {

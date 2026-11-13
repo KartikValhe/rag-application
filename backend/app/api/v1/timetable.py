@@ -1017,7 +1017,7 @@ async def publish_timetable(
             detail={
                 "code": "timetable_conflicts_detected",
                 "message": "Schedule conflicts detected. Pass confirm_conflicts=true to override.",
-                "conflicts": [c.model_dump() for c in conflicts],
+                "conflicts": [c.model_dump(mode="json") for c in conflicts],
             },
         )
 
