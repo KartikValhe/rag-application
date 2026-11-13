@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { AppShell, PageHeader } from "@/components/layout";
 import {
@@ -51,6 +51,7 @@ export const TimetableEditorPage: React.FC = () => {
   const [timetableError, setTimetableError] = useState<string | null>(null);
   // Version of the class's published timetable, or null. Decides whether "no draft" can offer a clone.
   const [publishedVersion, setPublishedVersion] = useState<number | null>(null);
+  const loadSeq = useRef(0); // only the newest load may write state
   const [isCloning, setIsCloning] = useState<boolean>(false);
 
   // Modal dialog states
@@ -118,12 +119,15 @@ export const TimetableEditorPage: React.FC = () => {
   // 2. Fetch draft or published timetable for selected class
   const loadTimetable = useCallback(async () => {
     if (!selectedClassId) return;
+    const requestId = ++loadSeq.current;
+    const isStale = () => requestId !== loadSeq.current;
     setIsLoadingTimetable(true);
     setTimetableError(null);
 
     try {
       if (viewMode === "published") {
         const res = await timetableApi.getClassTimetable(selectedClassId);
+        if (isStale()) return;
         setTimetable(res);
         if (!res) {
           setTimetableError("No published timetable exists for this class yet. Switch to Draft to edit and publish.");
@@ -131,10 +135,12 @@ export const TimetableEditorPage: React.FC = () => {
       } else {
         // "No draft" is a normal state (for example right after a publish), not an error.
         const res = await timetableApi.getDraftTimetable(selectedClassId);
+        if (isStale()) return;
         setTimetable(res.draft);
         setPublishedVersion(res.published_version);
       }
     } catch (err: unknown) {
+      if (isStale()) return;
       setTimetable(null);
       if (viewMode === "published" && parseApiError(err).status === 404) {
         setTimetableError("No published timetable exists for this class yet. Switch to Draft to edit and publish.");
@@ -142,7 +148,7 @@ export const TimetableEditorPage: React.FC = () => {
         setTimetableError(getFriendlyError(err, "Failed to load timetable for this class."));
       }
     } finally {
-      setIsLoadingTimetable(false);
+      if (!isStale()) setIsLoadingTimetable(false);
     }
   }, [selectedClassId, viewMode]);
 
@@ -238,8 +244,7 @@ export const TimetableEditorPage: React.FC = () => {
       // No conflicts -> publish directly
       await timetableApi.publishTimetable(selectedClassId, false);
       toast.success("Timetable published successfully! Enrolled students can now view it.");
-      setViewMode("published");
-      await loadTimetable();
+      setViewMode("published"); // the effect reloads for the new mode
     } catch (err: unknown) {
       // A conflict created between the check and the publish comes back as a 409.
       const conflicts = conflictsFromPublishError(err);
@@ -261,8 +266,7 @@ export const TimetableEditorPage: React.FC = () => {
       await timetableApi.publishTimetable(selectedClassId, true);
       toast.success("Timetable published with conflicts overridden.");
       setIsConflictModalOpen(false);
-      setViewMode("published");
-      await loadTimetable();
+      setViewMode("published"); // the effect reloads for the new mode
     } catch (err: unknown) {
       toast.error(getFriendlyError(err, "Failed to publish timetable."));
     } finally {
@@ -277,8 +281,7 @@ export const TimetableEditorPage: React.FC = () => {
     try {
       await timetableApi.unpublishTimetable(selectedClassId);
       toast.info("Timetable reverted to draft.");
-      setViewMode("draft");
-      await loadTimetable();
+      setViewMode("draft"); // the effect reloads for the new mode
     } catch (err: unknown) {
       toast.error(getFriendlyError(err, "Failed to unpublish timetable."));
     } finally {
