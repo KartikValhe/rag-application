@@ -27,11 +27,18 @@ export interface TimetableItem {
   class_name?: string | null;
   academic_year?: string | null;
   term?: string | null;
-  status: "draft" | "published";
+  status: "draft" | "published" | "archived";
   version: number;
   entries: TimetableEntryItem[];
   created_at: string;
   updated_at: string;
+}
+
+// Result of loading the editor draft: either a draft or the "no draft" empty state.
+export interface DraftState {
+  state: "draft" | "no_draft";
+  draft: TimetableItem | null;
+  published_version: number | null;
 }
 
 // Conflict types come from the Zod schema, which mirrors the backend TimetableConflict model.

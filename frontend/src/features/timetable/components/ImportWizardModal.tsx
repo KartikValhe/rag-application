@@ -354,7 +354,7 @@ const WizardBody: React.FC<Omit<ImportWizardModalProps, "isOpen">> = ({
       if (!replace && parseApiError(err).status === 409) {
         let oldCount: number | null = null;
         try {
-          oldCount = (await timetableApi.getDraftTimetable(classId)).entries.length;
+          oldCount = (await timetableApi.getDraftTimetable(classId)).draft?.entries.length ?? null;
         } catch {
           oldCount = null;
         }

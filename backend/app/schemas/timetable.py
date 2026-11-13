@@ -7,6 +7,7 @@ Pydantic schemas for Timetables, Entries, Conflict Detection, and Schedule Looku
 import uuid
 from datetime import datetime, time
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -93,6 +94,10 @@ class TimetableUpdate(BaseModel):
     entries: list[TimetableEntryCreate] | None = Field(default=None, max_length=200)
 
 
+# draft -> published -> archived. Archived timetables are read-only history.
+TimetableStatus = Literal["draft", "published", "archived"]
+
+
 class TimetableResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -102,11 +107,24 @@ class TimetableResponse(BaseModel):
     class_name: str | None = None
     academic_year: str | None = None
     term: str | None = None
-    status: str  # draft | published
+    status: TimetableStatus
     version: int
     entries: list[TimetableEntryResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class DraftStateResponse(BaseModel):
+    """
+    GET /classes/{id}/timetables/draft. A missing draft is a normal state, not an error:
+    state="no_draft" and draft=null. published_version tells the editor whether it can
+    offer "start editing from the published timetable" (clone).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["draft", "no_draft"]
+    draft: TimetableResponse | None
+    published_version: int | None
 
 
 class TimetableConflict(BaseModel):

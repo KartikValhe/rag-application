@@ -57,6 +57,8 @@ describe("getFriendlyError", () => {
     [422, "invalid_timezone"],
     [403, "permission_denied"],
     [404, "not_found"],
+    [409, "timetable_draft_exists"],
+    [404, "not_published"],
   ];
 
   for (const [status, code] of codes) {
@@ -67,6 +69,11 @@ describe("getFriendlyError", () => {
       assert.ok(!msg.includes(code));
     });
   }
+
+  it("tells the user how to resolve a 409 timetable_draft_exists", () => {
+    const msg = getFriendlyError(http(409, "timetable_draft_exists"));
+    assert.match(msg, /publish or delete the draft/i);
+  });
 
   it("gives distinct messages for distinct 422 codes", () => {
     assert.notEqual(

@@ -8,9 +8,11 @@ import {
   AssignedTeacherListSchema,
   ImportPreviewResponseSchema,
   ConflictCheckResponseSchema,
+  DraftStateSchema,
 } from "../schemas/timetableSchemas";
 import { IMPORT_TIMEOUT_MS, buildSaveRequest, type SaveEntryPayload } from "../utils/importWizard";
 import type {
+  DraftState,
   ImportPreviewResponse,
   TimetableEntryItem,
   TimetableItem,
@@ -39,6 +41,7 @@ async function unwrapBlobError(err: unknown): Promise<unknown> {
 }
 
 export type {
+  DraftState,
   ImportPreviewResponse,
   TimetableEntryItem,
   TimetableItem,
@@ -53,26 +56,26 @@ export type {
 };
 
 export const timetableApi = {
-  // Published or active timetable for a class
+  // The published timetable for a class, or null. Drafts and archived history are never returned.
   getClassTimetable: async (classId: string): Promise<TimetableItem | null> => {
     const res = await apiClient.get<unknown>(`/classes/${classId}/timetables`);
-    if (Array.isArray(res.data)) {
-      const items = res.data.map((item) =>
-        validateResponse(TimetableItemSchema, item, "class timetable")
-      );
-      const published = items.find((t) => t.status === "published");
-      return published || items[0] || null;
-    }
-    if (res.data) {
-      return validateResponse(TimetableItemSchema, res.data, "class timetable");
-    }
-    return null;
+    if (!Array.isArray(res.data)) return null;
+    const items = res.data.map((item) =>
+      validateResponse(TimetableItemSchema, item, "class timetable")
+    );
+    return items.find((t) => t.status === "published") ?? null;
   },
 
-  // Get or auto-create draft timetable for editing
-  getDraftTimetable: async (classId: string): Promise<TimetableItem> => {
+  // Current draft, or the "no draft" empty state. Reading never creates a draft.
+  getDraftTimetable: async (classId: string): Promise<DraftState> => {
     const res = await apiClient.get<unknown>(`/classes/${classId}/timetables/draft`);
-    return validateResponse(TimetableItemSchema, res.data, "draft timetable");
+    return validateResponse(DraftStateSchema, res.data, "draft timetable");
+  },
+
+  // Start editing again: copies the published timetable into a new draft.
+  cloneDraft: async (classId: string): Promise<TimetableItem> => {
+    const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/draft/clone`);
+    return validateResponse(TimetableItemSchema, res.data, "cloned draft timetable");
   },
 
   // Explicitly create new draft
@@ -128,7 +131,7 @@ export const timetableApi = {
     return validateResponse(TimetableItemSchema, res.data, "published timetable");
   },
 
-  // Revert published timetable to draft
+  // Revert published timetable to draft. 409 timetable_draft_exists when a draft already exists.
   unpublishTimetable: async (classId: string): Promise<TimetableItem> => {
     const res = await apiClient.post<unknown>(`/classes/${classId}/timetables/unpublish`);
     return validateResponse(TimetableItemSchema, res.data, "draft timetable");

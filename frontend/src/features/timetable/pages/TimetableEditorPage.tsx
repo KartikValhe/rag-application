@@ -49,6 +49,9 @@ export const TimetableEditorPage: React.FC = () => {
   const [viewMode, setViewMode] = useState<"draft" | "published">("draft");
   const [isLoadingTimetable, setIsLoadingTimetable] = useState<boolean>(false);
   const [timetableError, setTimetableError] = useState<string | null>(null);
+  // Version of the class's published timetable, or null. Decides whether "no draft" can offer a clone.
+  const [publishedVersion, setPublishedVersion] = useState<number | null>(null);
+  const [isCloning, setIsCloning] = useState<boolean>(false);
 
   // Modal dialog states
   const [isEntryModalOpen, setIsEntryModalOpen] = useState<boolean>(false);
@@ -122,13 +125,18 @@ export const TimetableEditorPage: React.FC = () => {
       if (viewMode === "published") {
         const res = await timetableApi.getClassTimetable(selectedClassId);
         setTimetable(res);
+        if (!res) {
+          setTimetableError("No published timetable exists for this class yet. Switch to Draft to edit and publish.");
+        }
       } else {
+        // "No draft" is a normal state (for example right after a publish), not an error.
         const res = await timetableApi.getDraftTimetable(selectedClassId);
-        setTimetable(res);
+        setTimetable(res.draft);
+        setPublishedVersion(res.published_version);
       }
     } catch (err: unknown) {
+      setTimetable(null);
       if (viewMode === "published" && parseApiError(err).status === 404) {
-        setTimetable(null);
         setTimetableError("No published timetable exists for this class yet. Switch to Draft to edit and publish.");
       } else {
         setTimetableError(getFriendlyError(err, "Failed to load timetable for this class."));
@@ -141,6 +149,22 @@ export const TimetableEditorPage: React.FC = () => {
   useEffect(() => {
     loadTimetable();
   }, [loadTimetable]);
+
+  // Start editing again: copy the published timetable into a new draft.
+  const handleStartEditing = async () => {
+    if (!selectedClassId) return;
+    setIsCloning(true);
+    try {
+      const draft = await timetableApi.cloneDraft(selectedClassId);
+      setTimetable(draft);
+      toast.success("Draft created from the published timetable.");
+    } catch (err: unknown) {
+      toast.error(getFriendlyError(err, "Failed to start editing."));
+      await loadTimetable();
+    } finally {
+      setIsCloning(false);
+    }
+  };
 
   // 3. Entry CRUD Handlers
   const handleOpenAddEntry = (defaultDay?: number) => {
@@ -395,15 +419,17 @@ export const TimetableEditorPage: React.FC = () => {
                     Import
                   </Button>
                 </Can>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleOpenAddEntry()}
-                  className="min-h-[44px]"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1" />
-                  Add Lecture
-                </Button>
+                {(timetable || publishedVersion === null) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleOpenAddEntry()}
+                    className="min-h-[44px]"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" />
+                    Add Lecture
+                  </Button>
+                )}
               </div>
             )}
           </div>
@@ -425,6 +451,38 @@ export const TimetableEditorPage: React.FC = () => {
             >
               Switch to Draft Editor
             </Button>
+          )}
+        </div>
+      ) : viewMode === "draft" && !timetable && !isLoadingTimetable ? (
+        <div className="p-6 rounded-lg border border-border bg-surface text-center space-y-3">
+          <Edit3 className="w-8 h-8 text-primary mx-auto opacity-70" />
+          {publishedVersion !== null ? (
+            <>
+              <h4 className="text-base font-semibold text-text">
+                No draft. Start editing from the published timetable
+              </h4>
+              <p className="text-xs text-text-muted max-w-md mx-auto">
+                The published timetable (v{publishedVersion}) stays visible to students until you publish a new draft.
+              </p>
+              <Can permission="timetable:manage">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleStartEditing}
+                  isLoading={isCloning}
+                  className="min-h-[44px]"
+                >
+                  Start editing
+                </Button>
+              </Can>
+            </>
+          ) : (
+            <>
+              <h4 className="text-base font-semibold text-text">No draft yet</h4>
+              <p className="text-xs text-text-muted max-w-md mx-auto">
+                Add a lecture or import a file to start a draft for this class.
+              </p>
+            </>
           )}
         </div>
       ) : (

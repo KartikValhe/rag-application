@@ -1,6 +1,6 @@
-"""
+﻿"""
 tests/test_isolation.py
-─────────────────────────
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Phase 1 exit criterion: tenant isolation test suite.
 
 For every tenant-scoped table in TENANT_TABLES, this suite verifies:
@@ -43,7 +43,7 @@ from app.db.models.user import User
 
 pytestmark = pytest.mark.asyncio
 
-# ── Table registry ────────────────────────────────────────────────────────────
+# â”€â”€ Table registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Each entry: (ORM model class, dict of extra columns needed for a valid INSERT).
 # The test harness fills in tenant_id, id automatically.
 TENANT_TABLES = [
@@ -110,7 +110,7 @@ def _build_row(model: type, tenant_id: uuid.UUID, extra: dict) -> dict:
     return resolved
 
 
-# ── 1. SELECT isolation ───────────────────────────────────────────────────────
+# â”€â”€ 1. SELECT isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_select_returns_only_own_tenant_rows(
@@ -139,7 +139,7 @@ async def test_select_returns_only_own_tenant_rows(
         )
 
 
-# ── 2. UPDATE isolation ───────────────────────────────────────────────────────
+# â”€â”€ 2. UPDATE isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_update_cannot_affect_other_tenant_rows(
@@ -157,7 +157,7 @@ async def test_update_cannot_affect_other_tenant_rows(
     result = await raw_db.execute(insert(model).values(**row_b).returning(model))
     inserted = result.scalar_one()
 
-    # Attempt UPDATE from tenant A's session — should match 0 rows due to RLS,
+    # Attempt UPDATE from tenant A's session â€” should match 0 rows due to RLS,
     # or fail with permission denied if the table is append-only (like audit_log).
     pk_col = list(model.__table__.primary_key.columns)[0]
     try:
@@ -174,7 +174,7 @@ async def test_update_cannot_affect_other_tenant_rows(
         assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
 
 
-# ── 3. DELETE isolation ───────────────────────────────────────────────────────
+# â”€â”€ 3. DELETE isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_delete_cannot_affect_other_tenant_rows(
@@ -207,7 +207,7 @@ async def test_delete_cannot_affect_other_tenant_rows(
         assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
 
 
-# ── 4. INSERT WITH CHECK ──────────────────────────────────────────────────────
+# â”€â”€ 4. INSERT WITH CHECK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_insert_wrong_tenant_id_rejected_by_rls(
@@ -236,7 +236,7 @@ async def test_insert_wrong_tenant_id_rejected_by_rls(
     )
 
 
-# ── 5. Fail-closed: query without tenant_id returns nothing ───────────────────
+# â”€â”€ 5. Fail-closed: query without tenant_id returns nothing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_query_without_tenant_id_returns_no_rows(
@@ -247,7 +247,7 @@ async def test_query_without_tenant_id_returns_no_rows(
 ) -> None:
     """
     A session that never calls set_config('app.tenant_id', ...) must see zero
-    rows — the system fails closed, not open.
+    rows â€” the system fails closed, not open.
 
     We use a fresh session connected as app_tenant (which has NOBYPASSRLS).
     We deliberately do NOT set the tenant_id config.
@@ -259,7 +259,7 @@ async def test_query_without_tenant_id_returns_no_rows(
     from app.db.engine import SessionLocal
 
     async with SessionLocal() as session, session.begin():
-        # No set_config call here — tenant context is absent.
+        # No set_config call here â€” tenant context is absent.
         result = await session.execute(select(model))
         rows = result.scalars().all()
 
@@ -269,7 +269,7 @@ async def test_query_without_tenant_id_returns_no_rows(
     )
 
 
-# ── 6. Composite Junction Tables Isolation ────────────────────────────────────
+# â”€â”€ 6. Composite Junction Tables Isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def test_academic_and_rbac_junctions_isolation(
     raw_db: AsyncSession,
@@ -470,5 +470,37 @@ async def test_timetables_and_entries_isolation(
             )
         )
         await tenant_a_session.flush()
+
+
+async def test_archived_timetables_isolation(
+    raw_db: AsyncSession,
+    tenant_a: Tenant,
+    tenant_b: Tenant,
+    tenant_a_session: AsyncSession,
+) -> None:
+    """Archived history follows the same RLS rules: invisible and immutable across tenants."""
+    class_b = Class(tenant_id=tenant_b.id, name=f"class-arch-b-{uuid.uuid4().hex[:6]}")
+    raw_db.add(class_b)
+    await raw_db.flush()
+    archived_b = Timetable(tenant_id=tenant_b.id, class_id=class_b.id, status="archived", version=1)
+    published_b = Timetable(tenant_id=tenant_b.id, class_id=class_b.id, status="published", version=2)
+    raw_db.add_all([archived_b, published_b])
+    await raw_db.commit()
+
+    res = await tenant_a_session.execute(select(Timetable).where(Timetable.status == "archived"))
+    assert all(t.tenant_id == tenant_a.id for t in res.scalars().all())
+
+    # Tenant A cannot touch tenant B's archived or published rows: RLS hides them, 0 rows change.
+    upd = await tenant_a_session.execute(
+        update(Timetable).where(Timetable.tenant_id == tenant_b.id).values(status="draft")
+    )
+    assert upd.rowcount == 0
+    dele = await tenant_a_session.execute(delete(Timetable).where(Timetable.tenant_id == tenant_b.id))
+    assert dele.rowcount == 0
+
+    rows = (
+        await raw_db.execute(select(Timetable.status).where(Timetable.tenant_id == tenant_b.id, Timetable.class_id == class_b.id))
+    ).scalars().all()
+    assert sorted(rows) == ["archived", "published"]
 
 

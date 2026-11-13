@@ -7,9 +7,11 @@ Phase 4 Timetable Endpoints:
       GET /me/timetable
   - Class timetable management (Admin / Scoped Teacher):
       GET    /classes/{class_id}/timetables
-      GET    /classes/{class_id}/timetables/draft
+      GET    /classes/{class_id}/timetables/draft        (state="no_draft" when there is none)
       POST   /classes/{class_id}/timetables/draft
       PUT    /classes/{class_id}/timetables/draft
+      DELETE /classes/{class_id}/timetables/draft
+      POST   /classes/{class_id}/timetables/draft/clone  (copy the published timetable)
       POST   /classes/{class_id}/timetables/draft/entries
       PUT    /classes/{class_id}/timetables/draft/entries/{entry_id}
       DELETE /classes/{class_id}/timetables/draft/entries/{entry_id}
@@ -22,7 +24,7 @@ Strict RBAC and class/subject scoping enforced via require("timetable:publish", 
 
 import datetime
 import uuid
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import (
     APIRouter,
@@ -54,6 +56,7 @@ from app.schemas.timetable import (
     AvailableSubjectItem,
     AvailableTeacherItem,
     ConflictCheckResponse,
+    DraftStateResponse,
     ImportPreviewResponse,
     MyTimetableResponse,
     NextLectureResponse,
@@ -65,6 +68,7 @@ from app.schemas.timetable import (
     TimetableEntryResponse,
     TimetableEntryUpdate,
     TimetableResponse,
+    TimetableStatus,
     TimetableUpdate,
 )
 from app.services.audit import record_audit_event
@@ -78,6 +82,14 @@ from app.services.timetable_importer import (
     generate_csv_template,
     generate_xlsx_template,
     match_and_validate_records,
+)
+from app.services.timetable_lifecycle import (
+    DRAFT_EXISTS_DETAIL,
+    clone_published_to_draft,
+    flush_or_draft_conflict,
+    get_class_timetable,
+    next_draft_version,
+    publish_draft,
 )
 from app.services.timetable_parser_runner import (
     check_and_record_rate_limit,
@@ -194,7 +206,7 @@ async def _serialize_timetable(db: TenantDB, timetable: Timetable) -> TimetableR
         class_name=class_name,
         academic_year=timetable.academic_year,
         term=timetable.term,
-        status=timetable.status,
+        status=cast(TimetableStatus, timetable.status),
         version=timetable.version,
         entries=entry_responses,
         created_at=timetable.created_at,
@@ -401,7 +413,7 @@ async def list_class_timetables(
     db: TenantDB,
     current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
 ) -> list[TimetableResponse]:
-    """List all timetables (published and draft) for a class."""
+    """List all timetables for a class: draft, published and read-only archived history."""
     query = (
         select(Timetable)
         .where(Timetable.tenant_id == current_user.tenant_id, Timetable.class_id == class_id)
@@ -414,87 +426,83 @@ async def list_class_timetables(
 
 @router.get(
     "/classes/{class_id}/timetables/draft",
-    response_model=TimetableResponse,
+    response_model=DraftStateResponse,
     dependencies=[Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
 )
-async def get_or_create_draft_timetable(
+async def get_draft_timetable(
     class_id: uuid.UUID,
+    db: TenantDB,
+    current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+) -> DraftStateResponse:
+    """
+    Return the class's draft timetable, or state="no_draft" when there is none.
+    This never creates anything: after a publish there is no draft until someone clones the
+    published timetable (POST .../draft/clone) or adds/imports lectures.
+    """
+    tenant_id = current_user.tenant_id
+    draft = await get_class_timetable(db, tenant_id, class_id, "draft")
+    published = await get_class_timetable(db, tenant_id, class_id, "published")
+    published_version = published.version if published else None
+    if draft is None:
+        return DraftStateResponse(state="no_draft", draft=None, published_version=published_version)
+    return DraftStateResponse(
+        state="draft", draft=await _serialize_timetable(db, draft), published_version=published_version
+    )
+
+
+@router.post(
+    "/classes/{class_id}/timetables/draft/clone",
+    response_model=TimetableResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+)
+async def clone_published_timetable(
+    class_id: uuid.UUID,
+    request: Request,
     db: TenantDB,
     current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
 ) -> TimetableResponse:
     """
-    Get the active draft timetable for this class.
-    If no draft exists but a published timetable exists, creates a new draft copy of it.
-    If neither exists, initializes a fresh blank draft timetable.
+    Start editing again: create a draft that copies the published timetable.
+    409 timetable_draft_exists when a draft already exists, 404 not_published when there is
+    nothing to copy.
     """
-    # 1. Look for existing draft
-    draft_query = select(Timetable).where(
-        Timetable.tenant_id == current_user.tenant_id,
-        Timetable.class_id == class_id,
-        Timetable.status == "draft",
+    draft = await clone_published_to_draft(
+        db, current_user.tenant_id, class_id, actor_id=current_user.id, request=request
     )
-    draft_res = await db.execute(draft_query)
-    draft = draft_res.scalar_one_or_none()
-    if draft:
-        return await _serialize_timetable(db, draft)
+    return await _serialize_timetable(db, draft)
 
-    # 2. Look for published timetable to clone
-    pub_query = select(Timetable).where(
-        Timetable.tenant_id == current_user.tenant_id,
-        Timetable.class_id == class_id,
-        Timetable.status == "published",
-    )
-    pub_res = await db.execute(pub_query)
-    published = pub_res.scalar_one_or_none()
 
-    if published:
-        # Clone published into a new draft with version + 1
-        new_draft = Timetable(
-            tenant_id=current_user.tenant_id,
-            class_id=class_id,
-            academic_year=published.academic_year,
-            term=published.term,
-            status="draft",
-            version=published.version + 1,
+@router.delete(
+    "/classes/{class_id}/timetables/draft",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+)
+async def delete_draft_timetable(
+    class_id: uuid.UUID,
+    request: Request,
+    db: TenantDB,
+    current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+) -> None:
+    """Discard the class's draft timetable. Published and archived timetables are untouched."""
+    draft = await get_class_timetable(db, current_user.tenant_id, class_id, "draft")
+    if draft is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "no_draft", "message": "No draft timetable found for this class."},
         )
-        db.add(new_draft)
-        await db.flush()
-
-        # Copy entries
-        old_entries_res = await db.execute(
-            select(TimetableEntry).where(
-                TimetableEntry.tenant_id == current_user.tenant_id,
-                TimetableEntry.timetable_id == published.id,
-            )
-        )
-        for old_e in old_entries_res.scalars().all():
-            new_e = TimetableEntry(
-                tenant_id=current_user.tenant_id,
-                timetable_id=new_draft.id,
-                class_id=class_id,
-                subject_id=old_e.subject_id,
-                teacher_id=old_e.teacher_id,
-                day_of_week=old_e.day_of_week,
-                start_time=old_e.start_time,
-                end_time=old_e.end_time,
-                room=old_e.room,
-                note=old_e.note,
-            )
-            db.add(new_e)
-
-        await db.flush()
-        return await _serialize_timetable(db, new_draft)
-
-    # 3. Create fresh blank draft
-    blank_draft = Timetable(
+    await record_audit_event(
         tenant_id=current_user.tenant_id,
-        class_id=class_id,
-        status="draft",
-        version=1,
+        action="timetable:delete_draft",
+        target_type="timetable",
+        target_id=str(draft.id),
+        details={"class_id": str(class_id), "version": draft.version},
+        actor_id=current_user.id,
+        request=request,
+        db=db,
     )
-    db.add(blank_draft)
+    await db.delete(draft)
     await db.flush()
-    return await _serialize_timetable(db, blank_draft)
 
 
 @router.post(
@@ -552,10 +560,10 @@ async def create_draft_timetable(
             academic_year=payload.academic_year,
             term=payload.term,
             status="draft",
-            version=1,
+            version=await next_draft_version(db, current_user.tenant_id, class_id),
         )
         db.add(draft)
-        await db.flush()
+        await flush_or_draft_conflict(db)
 
     for item in payload.entries:
         entry = TimetableEntry(
@@ -706,9 +714,24 @@ async def add_draft_entry(
     )
     draft = res.scalar_one_or_none()
     if not draft:
-        draft = Timetable(tenant_id=current_user.tenant_id, class_id=class_id, status="draft", version=1)
+        # With a published timetable, editing must start from a copy of it; a blank draft
+        # would silently drop every published lecture on the next publish.
+        if await get_class_timetable(db, current_user.tenant_id, class_id, "published") is not None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "no_draft",
+                    "message": "No draft timetable. Start editing from the published timetable first.",
+                },
+            )
+        draft = Timetable(
+            tenant_id=current_user.tenant_id,
+            class_id=class_id,
+            status="draft",
+            version=await next_draft_version(db, current_user.tenant_id, class_id),
+        )
         db.add(draft)
-        await db.flush()
+        await flush_or_draft_conflict(db)
 
     # 3. Check 200 entries cap
     count_res = await db.execute(
@@ -1021,25 +1044,11 @@ async def publish_timetable(
             },
         )
 
-    # 2. Archive previous published timetable for this class
-    prev_res = await db.execute(
-        select(Timetable).where(
-            Timetable.tenant_id == current_user.tenant_id,
-            Timetable.class_id == class_id,
-            Timetable.status == "published",
-            Timetable.id != draft.id,
-        )
-    )
-    prev_published = prev_res.scalars().all()
-    for prev in prev_published:
-        prev.status = "draft"
+    # 2. Archive the previous published timetable, publish the draft with the next version,
+    #    and prune old history. No draft remains afterwards.
+    archived = await publish_draft(db, draft, actor_id=current_user.id, request=request)
 
-    # 3. Mark current draft as published
-    draft.status = "published"
-    draft.version = (draft.version or 1)
-    await db.flush()
-
-    # 4. Write audit log entry
+    # 3. Write audit log entry
     await record_audit_event(
         tenant_id=current_user.tenant_id,
         action="timetable:publish",
@@ -1048,6 +1057,7 @@ async def publish_timetable(
         details={
             "class_id": str(class_id),
             "version": draft.version,
+            "archived_timetable_id": str(archived.id) if archived else None,
             "entries_count": len(entries),
             "conflicts_count": len(conflicts),
             "conflicts_confirmed": bool(conflicts and payload.confirm_conflicts),
@@ -1072,24 +1082,21 @@ async def unpublish_timetable(
     current_user: Annotated[User, Depends(require("timetable:publish", scope=Scope(ScopeType.CLASS)))],
 ) -> TimetableResponse:
     """
-    Unpublish the published timetable for this class (reverts to draft).
+    Unpublish the published timetable for this class (it becomes the draft).
+    Only allowed when the class has no draft: otherwise 409 timetable_draft_exists, and the
+    user must delete or publish the draft first. Archived timetables are never restored.
     """
-    pub_res = await db.execute(
-        select(Timetable).where(
-            Timetable.tenant_id == current_user.tenant_id,
-            Timetable.class_id == class_id,
-            Timetable.status == "published",
-        )
-    )
-    published = pub_res.scalar_one_or_none()
+    published = await get_class_timetable(db, current_user.tenant_id, class_id, "published")
     if not published:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_published", "message": "No published timetable found for this class."},
         )
+    if await get_class_timetable(db, current_user.tenant_id, class_id, "draft") is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=DRAFT_EXISTS_DETAIL)
 
     published.status = "draft"
-    await db.flush()
+    await flush_or_draft_conflict(db)
 
     await record_audit_event(
         tenant_id=current_user.tenant_id,
@@ -1406,16 +1413,17 @@ async def save_imported_draft(
             },
         )
 
-    # 5. Ensure draft exists
+    # 5. Ensure draft exists (an import replaces every entry, so a fresh draft is fine even
+    #    when the class has a published timetable)
     if not draft:
         draft = Timetable(
             tenant_id=current_user.tenant_id,
             class_id=class_id,
             status="draft",
-            version=1,
+            version=await next_draft_version(db, current_user.tenant_id, class_id),
         )
         db.add(draft)
-        await db.flush()
+        await flush_or_draft_conflict(db)
 
     # 6. Delete old draft entries and insert new entries
     await db.execute(

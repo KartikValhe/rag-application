@@ -150,12 +150,46 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
 - **Response Model**: `list[TimetableResponse]` (HTTP 200)
 
-### 4.2 Get or Initialize Draft Timetable
+### 4.0 Status model
+
+A timetable has `status` `draft | published | archived`. Per class there is at most one `draft` and at most one `published` (partial unique indexes, migration 0007). `archived` rows are read-only history.
+
+```
+draft --publish--> published --(next publish)--> archived
+  ^                    |
+  +---- unpublish -----+   (only when the class has no draft)
+```
+
+- **Publish**: the draft becomes `published` with the next version number, the previously published timetable becomes `archived`, and **no draft remains** until someone starts editing again.
+- **Retention**: the newest 5 archived timetables per class are kept; older ones (and their entries) are deleted in the same transaction as the publish (audited as `timetable:prune_archived`).
+- **Visibility**: students, teachers' `/me` views, `next-lecture` and the schedule service use only the `published` timetable. Archived and draft timetables are never shown to them.
+- **Archived is never restored through the API**, never returned as a draft, and its entries cannot be edited.
+
+### 4.2 Get Draft Timetable
 
 - **Route**: `GET /api/v1/classes/{class_id}/timetables/draft`
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
-- **Behavior**: Returns existing draft, or clones published version into new draft version, or initializes blank draft.
-- **Response Model**: `TimetableResponse` (HTTP 200)
+- **Behavior**: read-only, never creates anything. A missing draft is a normal state, not an error.
+- **Response Model**: `DraftStateResponse` (HTTP 200)
+  ```json
+  { "state": "draft", "draft": { "...TimetableResponse..." }, "published_version": 3 }
+  { "state": "no_draft", "draft": null, "published_version": 3 }
+  ```
+  `published_version` is `null` when the class has no published timetable.
+
+### 4.2a Start Editing: Clone Published into Draft
+
+- **Route**: `POST /api/v1/classes/{class_id}/timetables/draft/clone`
+- **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)` (a teacher outside the class gets the generic 404)
+- **Response Model**: `TimetableResponse` (HTTP 201, `status="draft"`, same entries as the published timetable, `version` = published + 1)
+- **Audited**: `timetable:clone`
+- **Error Codes**: `404` `not_published` (nothing to copy), `409` `timetable_draft_exists`.
+
+### 4.2b Delete Draft
+
+- **Route**: `DELETE /api/v1/classes/{class_id}/timetables/draft` (HTTP 204)
+- **Permission**: `timetable:manage` scoped to the class
+- **Audited**: `timetable:delete_draft`. Published and archived timetables are untouched. `404` `no_draft` if none.
 
 ### 4.3 Create or Overwrite Draft Metadata & Entries
 
@@ -276,7 +310,7 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
   }
   ```
 - **Response Model**: `TimetableResponse` (HTTP 200, `status="published"`)
-- **Audited**: `timetable:publish`
+- **Audited**: `timetable:publish`, plus `timetable:archive` for the replaced timetable and `timetable:prune_archived` when history is trimmed.
 - **Error Codes**:
   - `404 Not Found`: `no_draft`
   - `409 Conflict`: `{"detail": {"code": "timetable_conflicts_detected", "message": "...", "conflicts": [TimetableConflict, ...]}}` (same item shape as 4.8) if conflicts exist and `confirm_conflicts` is not `true`.
@@ -285,9 +319,16 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
 
 - **Route**: `POST /api/v1/classes/{class_id}/timetables/unpublish`
 - **Permission**: `timetable:publish` scoped to `Scope(ScopeType.CLASS)`
+- **Behavior**: the published timetable becomes the draft, **only if the class has no draft**. Archived timetables are never restored.
 - **Response Model**: `TimetableResponse` (HTTP 200, `status="draft"`)
 - **Audited**: `timetable:unpublish`
-- **Error Codes**: `404 Not Found` (`no_published_timetable`).
+- **Error Codes**:
+  - `404 Not Found`: `not_published`
+  - `409 Conflict`: `timetable_draft_exists`. The user must delete or publish the draft first. The frontend maps this code to a fixed friendly message.
+
+### 4.11 Adding lectures after a publish
+
+`POST .../draft/entries` returns `404 no_draft` when the class has a published timetable but no draft; call the clone endpoint (4.2a) first so a blank draft cannot silently replace the published lectures. `POST .../draft` (replace) and `save-imported-draft` still create a draft when none exists.
 
 ---
 

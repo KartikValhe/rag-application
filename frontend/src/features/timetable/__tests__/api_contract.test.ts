@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DraftStateSchema,
+  TimetableItemSchema,
   MyTimetableResponseSchema,
   NextLectureResponseSchema,
   validateResponse,
@@ -85,6 +87,56 @@ describe("Timetable API Schema Contract & Zod Validation", () => {
     assert.equal(validated.current_lecture, null);
     assert.equal(validated.next_lecture?.subject_name, "Physics");
     assert.equal(validated.next_lecture?.entry_id, "44444444-4444-4444-4444-444444444444");
+  });
+
+  describe("draft state contract", () => {
+    const tt = (status: string) => ({
+      id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      tenant_id: "00000000-0000-0000-0000-000000000001",
+      class_id: "3fa85f64-5717-4562-b3fc-2c963f66afa7",
+      status,
+      version: 2,
+      entries: [],
+      created_at: "2026-11-11T09:00:00Z",
+      updated_at: "2026-11-11T09:30:00Z",
+    });
+
+    it("parses the 'no draft' empty state", () => {
+      const v = validateResponse(
+        DraftStateSchema,
+        { state: "no_draft", draft: null, published_version: 3 },
+        "draft"
+      );
+      assert.equal(v.state, "no_draft");
+      assert.equal(v.draft, null);
+      assert.equal(v.published_version, 3);
+    });
+
+    it("parses a draft state and accepts a null published version", () => {
+      const v = validateResponse(
+        DraftStateSchema,
+        { state: "draft", draft: tt("draft"), published_version: null },
+        "draft"
+      );
+      assert.equal(v.draft?.status, "draft");
+    });
+
+    it("rejects contradictory or old-shape payloads", () => {
+      assert.throws(() =>
+        validateResponse(DraftStateSchema, { state: "no_draft", draft: tt("draft"), published_version: 1 }, "draft")
+      );
+      assert.throws(() =>
+        validateResponse(DraftStateSchema, { state: "draft", draft: null, published_version: 1 }, "draft")
+      );
+      // The old endpoint returned the bare timetable.
+      assert.throws(() => validateResponse(DraftStateSchema, tt("draft"), "draft"));
+    });
+
+    it("knows the archived status", () => {
+      const v = validateResponse(TimetableItemSchema, tt("archived"), "timetable");
+      assert.equal(v.status, "archived");
+      assert.throws(() => validateResponse(TimetableItemSchema, tt("retired"), "timetable"));
+    });
   });
 
   it("throws friendly error message on schema mismatch", () => {

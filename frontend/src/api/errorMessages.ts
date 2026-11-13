@@ -50,6 +50,9 @@ const CODE_MESSAGES: Record<string, string> = {
   no_draft: "There is no draft timetable for this class yet.",
   no_published_timetable: "This class has no published timetable.",
   draft_already_exists: "A draft already exists for this class.",
+  timetable_draft_exists:
+    "This class already has a draft. Publish or delete the draft first, then try again.",
+  not_published: "This class has no published timetable.",
   timetable_conflicts_detected: "The timetable has scheduling conflicts.",
   permission_denied: "You do not have permission to do this.",
 };

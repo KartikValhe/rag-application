@@ -173,8 +173,18 @@ test("teacher publish: no conflicts publishes directly; a double-booking shows t
   });
   await post(teacher, `/classes/${b.id}/timetables/publish`, { confirm_conflicts: false });
 
-  // Class A draft gets Wednesday 11:00-12:00 with the same teacher.
+  // After a publish no stale draft remains: the editor shows the empty state.
   await page.getByRole("button", { name: "Draft Editor" }).click();
+  await expect(page.getByText("No draft. Start editing from the published timetable")).toBeVisible();
+  await expect(page.getByText("Draft In Progress")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add Lecture" })).toHaveCount(0);
+
+  // Edit again: cloning the published timetable creates the draft with its lecture.
+  await page.getByRole("button", { name: "Start editing" }).click();
+  await expect(page.getByText("Draft In Progress")).toBeVisible();
+  await expect(page.getByText(`R-A-${tag}`).first()).toBeVisible();
+
+  // Class A draft gets Wednesday 11:00-12:00 with the same teacher.
   await addLecture("2", "11:00", "12:00", `R-A2-${tag}`);
   await page.getByRole("button", { name: "Publish Timetable" }).click();
 

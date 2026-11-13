@@ -210,6 +210,11 @@ async def test_teacher_scoping_assigned_vs_unassigned(
     # 1. Teacher acts on assigned Class A -> 200 OK
     resp_draft = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=teacher_hdr)
     assert resp_draft.status_code == 200
+    assert resp_draft.json()["state"] == "no_draft"  # reading never creates a draft
+    resp_create = await client.post(
+        f"/api/v1/classes/{c_a.id}/timetables/draft", headers=teacher_hdr, json={"entries": []}
+    )
+    assert resp_create.status_code == 200
 
     # Scoped teacher picker endpoint returns assigned teachers without requiring assignment:manage
     resp_pick_subj = await client.get(

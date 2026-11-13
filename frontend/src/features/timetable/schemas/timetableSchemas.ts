@@ -27,12 +27,24 @@ export const TimetableItemSchema = z.object({
   class_name: z.string().nullable().optional(),
   academic_year: z.string().nullable().optional(),
   term: z.string().nullable().optional(),
-  status: z.enum(["draft", "published"]),
+  status: z.enum(["draft", "published", "archived"]),
   version: z.number(),
   entries: z.array(TimetableEntryItemSchema),
   created_at: z.string(),
   updated_at: z.string(),
 });
+
+// GET /classes/{id}/timetables/draft. A missing draft is a normal state, not an error.
+export const DraftStateSchema = z
+  .object({
+    state: z.enum(["draft", "no_draft"]),
+    draft: TimetableItemSchema.nullable(),
+    published_version: z.number().int().nullable(),
+  })
+  .strict()
+  .refine((d) => (d.state === "draft") === (d.draft !== null), {
+    message: "state and draft disagree",
+  });
 
 export const MyTimetableResponseSchema = z.object({
   tenant_timezone: z.string(),

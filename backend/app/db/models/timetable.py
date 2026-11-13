@@ -2,7 +2,7 @@
 app/db/models/timetable.py
 ──────────────────────────
 Phase 4 Timetable data models:
-  - Timetable: Class-level schedule container with status (draft -> published) and versioning.
+  - Timetable: Class-level schedule container with status (draft -> published -> archived) and versioning.
   - TimetableEntry: Individual weekly class session (day_of_week, start_time, end_time, subject, teacher, room).
 
 Every table enforces tenant_id composite PK/FK constraints and Row-Level Security (RLS).
@@ -15,11 +15,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
     Time,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -34,13 +36,28 @@ class Timetable(Base):
     __tablename__ = "timetables"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('draft', 'published')",
+            "status IN ('draft', 'published', 'archived')",
             name="timetables_status_check",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "class_id"],
             ["app.classes.tenant_id", "app.classes.id"],
             ondelete="CASCADE",
+        ),
+        # At most one draft and one published timetable per class (migration 0007).
+        Index(
+            "uq_timetables_one_draft_per_class",
+            "tenant_id",
+            "class_id",
+            unique=True,
+            postgresql_where=text("status = 'draft'"),
+        ),
+        Index(
+            "uq_timetables_one_published_per_class",
+            "tenant_id",
+            "class_id",
+            unique=True,
+            postgresql_where=text("status = 'published'"),
         ),
         {"schema": "app"},
     )
@@ -58,7 +75,7 @@ class Timetable(Base):
         String(20),
         default="draft",
         nullable=False,
-    )  # draft | published
+    )  # draft | published | archived (read-only history)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
