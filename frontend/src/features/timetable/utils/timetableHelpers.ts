@@ -183,3 +183,20 @@ export function teacherDisplayName(t: { full_name?: string | null }): string {
   const name = t.full_name?.trim();
   return name ? name : "Unnamed teacher";
 }
+
+/**
+ * What the draft editor may offer. Lectures can only be added or imported when there is a draft,
+ * or when the class has nothing published yet (a first draft is created on demand). With a
+ * published timetable and no draft the user must "Start editing" first; before the current
+ * class/mode has finished loading nothing is offered, so stale state from another class
+ * cannot enable a button that the server would reject with no_draft.
+ */
+export function draftEditorState(input: {
+  loaded: boolean;
+  hasDraft: boolean;
+  publishedVersion: number | null;
+}): "loading" | "editing" | "start_blank" | "start_from_published" {
+  if (!input.loaded) return "loading";
+  if (input.hasDraft) return "editing";
+  return input.publishedVersion === null ? "start_blank" : "start_from_published";
+}

@@ -8,6 +8,7 @@ import {
   isEndTimeAfterStartTime,
   groupEntriesByDay,
   formatConflictDetails,
+  draftEditorState,
   WEEKDAYS,
   DAY_NAMES,
 } from "../utils/timetableHelpers.ts";
@@ -184,4 +185,17 @@ test("formatConflictDetails: formats teacher, room, and class overlap conflicts 
   const classFmt = formatConflictDetails(classConflict);
   assert.equal(classFmt.title, "Overlapping Lectures In This Class");
   assert.match(classFmt.description, /Friday during 2:00 PM – 3:00 PM/);
+});
+
+test("draftEditorState: add/import are only offered when the server will accept them", () => {
+  // Not loaded yet (for example right after switching class): nothing is offered.
+  assert.equal(draftEditorState({ loaded: false, hasDraft: true, publishedVersion: 2 }), "loading");
+  assert.equal(draftEditorState({ loaded: false, hasDraft: false, publishedVersion: null }), "loading");
+  // A draft exists: normal editing.
+  assert.equal(draftEditorState({ loaded: true, hasDraft: true, publishedVersion: 2 }), "editing");
+  assert.equal(draftEditorState({ loaded: true, hasDraft: true, publishedVersion: null }), "editing");
+  // Published but no draft: must clone first.
+  assert.equal(draftEditorState({ loaded: true, hasDraft: false, publishedVersion: 3 }), "start_from_published");
+  // Nothing at all: a first draft can be created by adding or importing.
+  assert.equal(draftEditorState({ loaded: true, hasDraft: false, publishedVersion: null }), "start_blank");
 });

@@ -75,6 +75,12 @@ describe("getFriendlyError", () => {
     assert.match(msg, /publish or delete the draft/i);
   });
 
+  it("tells the user to start editing when adding a lecture fails with 404 no_draft", () => {
+    const msg = getFriendlyError(http(404, "no_draft"));
+    assert.match(msg, /start editing/i);
+    assert.ok(!msg.includes("no_draft"));
+  });
+
   it("gives distinct messages for distinct 422 codes", () => {
     assert.notEqual(
       getFriendlyError(http(422, "scanned_pdf")),

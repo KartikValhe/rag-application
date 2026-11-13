@@ -47,7 +47,8 @@ const CODE_MESSAGES: Record<string, string> = {
   teacher_not_assigned: "That teacher is not assigned to this subject in this class.",
   invalid_time_range: "End time must be later than start time.",
   invalid_timezone: "Please choose a valid timezone.",
-  no_draft: "There is no draft timetable for this class yet.",
+  no_draft:
+    "There is no draft timetable for this class. Close this window and choose Start editing first.",
   no_published_timetable: "This class has no published timetable.",
   draft_already_exists: "A draft already exists for this class.",
   timetable_draft_exists:

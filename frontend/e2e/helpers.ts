@@ -42,14 +42,18 @@ export interface ApiAuth {
 /** Logs in through the API (for test setup) and returns auth headers. */
 export async function apiLogin(request: APIRequestContext, role: Role, tenant = "acme"): Promise<ApiAuth> {
   const res = await request.post("/api/v1/auth/login", {
-    headers: { "X-Tenant-Slug": tenant },
+    headers: { "X-Tenant-Slug": tenant, "X-Requested-With": "XMLHttpRequest" },
     data: { ...ACCOUNTS[role], tenant_slug: tenant },
   });
   expect(res.ok(), `login ${role} -> ${res.status()}`).toBeTruthy();
   const body = await res.json();
   return {
     userId: body.user_id,
-    headers: { Authorization: `Bearer ${body.access_token}`, "X-Tenant-Slug": tenant },
+    headers: {
+      Authorization: `Bearer ${body.access_token}`,
+      "X-Tenant-Slug": tenant,
+      "X-Requested-With": "XMLHttpRequest", // same header the browser client sends
+    },
   };
 }
 

@@ -11,7 +11,7 @@ import {
 import { WeeklyTimetableGrid } from "../components/WeeklyTimetableGrid";
 import { EntryFormModal } from "../components/EntryFormModal";
 import { ConflictWarningDialog } from "../components/ConflictWarningDialog";
-import { conflictsFromPublishError, nextPublishStep } from "../utils/timetableHelpers";
+import { conflictsFromPublishError, draftEditorState, nextPublishStep } from "../utils/timetableHelpers";
 import { ImportWizardModal } from "../components/ImportWizardModal";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
@@ -51,6 +51,9 @@ export const TimetableEditorPage: React.FC = () => {
   const [timetableError, setTimetableError] = useState<string | null>(null);
   // Version of the class's published timetable, or null. Decides whether "no draft" can offer a clone.
   const [publishedVersion, setPublishedVersion] = useState<number | null>(null);
+  // "<classId>:<mode>" of the last finished load. Anything else means the state on screen is stale.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loadedKeyRef = useRef<string | null>(null);
   const loadSeq = useRef(0); // only the newest load may write state
   const [isCloning, setIsCloning] = useState<boolean>(false);
 
@@ -119,10 +122,16 @@ export const TimetableEditorPage: React.FC = () => {
   // 2. Fetch draft or published timetable for selected class
   const loadTimetable = useCallback(async () => {
     if (!selectedClassId) return;
+    const key = `${selectedClassId}:${viewMode}`;
     const requestId = ++loadSeq.current;
     const isStale = () => requestId !== loadSeq.current;
     setIsLoadingTimetable(true);
     setTimetableError(null);
+    if (loadedKeyRef.current !== key) {
+      setTimetable(null);
+      setLoadedKey(null);
+      loadedKeyRef.current = null;
+    }
 
     try {
       if (viewMode === "published") {
@@ -139,6 +148,8 @@ export const TimetableEditorPage: React.FC = () => {
         setTimetable(res.draft);
         setPublishedVersion(res.published_version);
       }
+      loadedKeyRef.current = key;
+      setLoadedKey(key);
     } catch (err: unknown) {
       if (isStale()) return;
       setTimetable(null);
@@ -289,6 +300,11 @@ export const TimetableEditorPage: React.FC = () => {
     }
   };
 
+  const editorState = draftEditorState({
+    loaded: loadedKey === `${selectedClassId}:${viewMode}` && !timetableError,
+    hasDraft: viewMode === "draft" && timetable !== null,
+    publishedVersion,
+  });
   const selectedClass = classes.find((c) => c.id === selectedClassId);
 
   return (
@@ -411,18 +427,20 @@ export const TimetableEditorPage: React.FC = () => {
 
             {viewMode === "draft" && (
               <div className="flex items-center gap-2 flex-wrap">
-                <Can permission="timetable:manage">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setIsImportOpen(true)}
-                    className="min-h-[44px]"
-                  >
-                    <Upload className="w-3.5 h-3.5 mr-1" />
-                    Import
-                  </Button>
-                </Can>
-                {(timetable || publishedVersion === null) && (
+                {(editorState === "editing" || editorState === "start_blank") && (
+                  <Can permission="timetable:manage">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setIsImportOpen(true)}
+                      className="min-h-[44px]"
+                    >
+                      <Upload className="w-3.5 h-3.5 mr-1" />
+                      Import
+                    </Button>
+                  </Can>
+                )}
+                {(editorState === "editing" || editorState === "start_blank") && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -456,10 +474,10 @@ export const TimetableEditorPage: React.FC = () => {
             </Button>
           )}
         </div>
-      ) : viewMode === "draft" && !timetable && !isLoadingTimetable ? (
+      ) : editorState === "start_from_published" || editorState === "start_blank" ? (
         <div className="p-6 rounded-lg border border-border bg-surface text-center space-y-3">
           <Edit3 className="w-8 h-8 text-primary mx-auto opacity-70" />
-          {publishedVersion !== null ? (
+          {editorState === "start_from_published" ? (
             <>
               <h4 className="text-base font-semibold text-text">
                 No draft. Start editing from the published timetable
@@ -492,7 +510,7 @@ export const TimetableEditorPage: React.FC = () => {
         <WeeklyTimetableGrid
           entries={timetable?.entries || []}
           isLoading={isLoadingTimetable}
-          canEdit={viewMode === "draft"}
+          canEdit={editorState === "editing"}
           onAddEntry={handleOpenAddEntry}
           onEditEntry={handleOpenEditEntry}
           onDeleteEntry={(entry) => setDeletingEntry(entry)}

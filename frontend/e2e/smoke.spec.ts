@@ -1,5 +1,6 @@
-import { test, expect, Page } from "@playwright/test";
-import { ApiAuth, apiLogin, bodyOk, login, openViaSidebar, Role, watchErrors } from "./helpers";
+import { Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import { bodyOk, login, openViaSidebar, Role, watchErrors } from "./helpers";
 
 const SIDEBAR = 'aside[aria-label="Desktop Navigation"]';
 
@@ -39,10 +40,11 @@ test("student typing an admin URL sees the 403 page", async ({ page }) => {
 
 test("teacher drafts and publishes an entry, student sees it and the Next lecture card", async ({
   browser,
+  world,
 }) => {
-  const room = `E2E-${Date.now()}`;
-  // Random slot so repeated runs do not pile onto the same cell.
-  const day = String(Math.floor(Math.random() * 5));
+  const room = `E2E-${world.tag}`;
+  // Saturday or Sunday at a random hour: the dev seed only uses Monday to Friday.
+  const day = String(5 + Math.floor(Math.random() * 2));
   const hour = 6 + Math.floor(Math.random() * 16);
   const start = `${String(hour).padStart(2, "0")}:00`;
   const end = `${String(hour).padStart(2, "0")}:45`;
@@ -53,11 +55,12 @@ test("teacher drafts and publishes an entry, student sees it and the Next lectur
   await login(t, "teacher");
   await openViaSidebar(t, "/teacher/timetables");
 
-  await t.getByRole("combobox").first().selectOption({ label: "Class 10-A (section)" });
-  await t.getByRole("button", { name: "Add Lecture" }).click();
+  // A fresh class has nothing published, so the normal add flow creates the first draft.
+  await t.getByRole("combobox").first().selectOption({ label: `${world.classA.name} (section)` });
+  await t.getByRole("button", { name: "Add Lecture", exact: true }).click();
   const dialog = t.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Subject *").selectOption({ index: 0 });
+  await dialog.getByLabel("Subject *").selectOption({ value: world.subject.id });
   await dialog.getByLabel("Day of Week *").selectOption(day);
   await dialog.getByLabel("Start Time *").fill(start);
   await dialog.getByLabel("End Time *").fill(end);
@@ -101,49 +104,29 @@ test("teacher drafts and publishes an entry, student sees it and the Next lectur
 
 test("teacher publish: no conflicts publishes directly; a double-booking shows the dialog and confirm publishes", async ({
   page,
-  request,
+  world,
 }) => {
-  // Fresh classes and subject so the result does not depend on earlier runs.
-  const tag = Date.now();
-  const classA = `E2E-A-${tag}`;
-  const classB = `E2E-B-${tag}`;
-  const subject = `E2E-Subject-${tag}`;
-  const admin = await apiLogin(request, "admin");
-  const teacher = await apiLogin(request, "teacher");
-
-  const post = async (auth: ApiAuth, url: string, data: unknown) => {
-    const res = await request.post(`/api/v1${url}`, { headers: auth.headers, data });
-    expect(res.ok(), `${url} -> ${res.status()}`).toBeTruthy();
-    return res.json();
-  };
-  const sub = await post(admin, "/subjects", { name: subject });
-  const a = await post(admin, "/classes", { name: classA, kind: "section" });
-  const b = await post(admin, "/classes", { name: classB, kind: "section" });
-  for (const c of [a, b]) {
-    await post(admin, `/classes/${c.id}/subjects/${sub.id}`, {});
-    await post(admin, `/classes/${c.id}/subjects/${sub.id}/teachers`, { user_id: teacher.userId });
-  }
-
+  const { tag, subject, classA, classB, teacher, post } = world;
   const errors = watchErrors(page);
   const checks: { conflicts: unknown[] }[] = [];
   const publishBodies: { confirm_conflicts: boolean }[] = [];
   page.on("response", async (res) => {
-    if (res.url().includes(`/classes/${a.id}/timetables/check-conflicts`)) checks.push(await res.json());
+    if (res.url().includes(`/classes/${classA.id}/timetables/check-conflicts`)) checks.push(await res.json());
   });
   page.on("request", (req) => {
-    if (req.method() === "POST" && req.url().includes(`/classes/${a.id}/timetables/publish`)) {
+    if (req.method() === "POST" && req.url().includes(`/classes/${classA.id}/timetables/publish`)) {
       publishBodies.push(req.postDataJSON());
     }
   });
 
   await login(page, "teacher");
   await openViaSidebar(page, "/teacher/timetables");
-  await page.getByRole("combobox").first().selectOption({ label: `${classA} (section)` });
+  await page.getByRole("combobox").first().selectOption({ label: `${classA.name} (section)` });
 
   const addLecture = async (day: string, start: string, end: string, room: string) => {
-    await page.getByRole("button", { name: "Add Lecture" }).click();
+    await page.getByRole("button", { name: "Add Lecture", exact: true }).click();
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabel("Subject *").selectOption({ label: subject });
+    await dialog.getByLabel("Subject *").selectOption({ value: subject.id });
     await dialog.getByLabel("Assigned Teacher").selectOption({ index: 1 });
     await dialog.getByLabel("Day of Week *").selectOption(day);
     await dialog.getByLabel("Start Time *").fill(start);
@@ -154,46 +137,47 @@ test("teacher publish: no conflicts publishes directly; a double-booking shows t
     await expect(page.getByText(room).first()).toBeVisible();
   };
 
-  // 1. No conflicts: publishes straight away, no dialog.
-  await addLecture("0", "09:00", "10:00", `R-A-${tag}`);
+  // 1. No conflicts (Saturday; the seed only uses Monday to Friday): publishes straight away.
+  await addLecture("5", "09:00", "10:00", `R-A-${tag}`);
   await page.getByRole("button", { name: "Publish Timetable" }).click();
   await expect(page.getByText(/Published \(v\d+\)/)).toBeVisible();
   await expect(page.getByText("Schedule Conflicts Detected")).toHaveCount(0);
   expect(checks.at(-1)?.conflicts).toEqual([]);
   expect(publishBodies).toEqual([{ confirm_conflicts: false }]);
 
-  // 2. Same teacher published in class B on Wednesday 11:30-12:30.
-  await post(teacher, `/classes/${b.id}/timetables/draft/entries`, {
-    day_of_week: 2,
+  // 2. Same teacher published in class B on Sunday 11:30-12:30.
+  await post(teacher, `/classes/${classB.id}/timetables/draft/entries`, {
+    day_of_week: 6,
     start_time: "11:30",
     end_time: "12:30",
-    subject_id: sub.id,
+    subject_id: subject.id,
     teacher_id: teacher.userId,
     room: `R-B-${tag}`,
   });
-  await post(teacher, `/classes/${b.id}/timetables/publish`, { confirm_conflicts: false });
+  await post(teacher, `/classes/${classB.id}/timetables/publish`, { confirm_conflicts: false });
 
   // After a publish no stale draft remains: the editor shows the empty state.
   await page.getByRole("button", { name: "Draft Editor" }).click();
   await expect(page.getByText("No draft. Start editing from the published timetable")).toBeVisible();
   await expect(page.getByText("Draft In Progress")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Add Lecture" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add Lecture", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Import" })).toHaveCount(0);
 
   // Edit again: cloning the published timetable creates the draft with its lecture.
   await page.getByRole("button", { name: "Start editing" }).click();
   await expect(page.getByText("Draft In Progress")).toBeVisible();
   await expect(page.getByText(`R-A-${tag}`).first()).toBeVisible();
 
-  // Class A draft gets Wednesday 11:00-12:00 with the same teacher.
-  await addLecture("2", "11:00", "12:00", `R-A2-${tag}`);
+  // The draft gets Sunday 11:00-12:00 with the same teacher.
+  await addLecture("6", "11:00", "12:00", `R-A2-${tag}`);
   await page.getByRole("button", { name: "Publish Timetable" }).click();
 
   const conflictDialog = page.getByRole("dialog").filter({ hasText: "Schedule Conflicts Detected" });
   await expect(conflictDialog).toBeVisible();
   await expect(conflictDialog).toContainText("1 schedule conflict was");
   await expect(conflictDialog).toContainText("Teacher Double-Booked");
-  await expect(conflictDialog).toContainText(`already teaching ${subject} in ${classB} on Wednesday during 11:30 AM – 12:30 PM`);
-  await expect(conflictDialog).toContainText(`${subject}, Wednesday 11:00 AM – 12:00 PM`);
+  await expect(conflictDialog).toContainText(`already teaching ${subject.name} in ${classB.name} on Sunday during 11:30 AM – 12:30 PM`);
+  await expect(conflictDialog).toContainText(`${subject.name}, Sunday 11:00 AM – 12:00 PM`);
   expect(checks.at(-1)?.conflicts).toHaveLength(1);
   expect(publishBodies).toHaveLength(1); // nothing sent until confirmed
 
@@ -207,22 +191,23 @@ test("teacher publish: no conflicts publishes directly; a double-booking shows t
 });
 
 test.describe("import wizard", () => {
-  async function openWizard(page: Page) {
+  async function openWizard(page: Page, className: string) {
     await login(page, "admin");
     await openViaSidebar(page, "/admin/timetables");
-    // Class 10-B is not used by the publish test above.
-    await page.getByRole("combobox").first().selectOption({ label: "Class 10-B (section)" });
+    // A fresh class has nothing published, so Import is offered (it is hidden while a class
+    // has a published timetable and no draft).
+    await page.getByRole("combobox").first().selectOption({ label: `${className} (section)` });
     await page.getByRole("button", { name: "Import" }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     await page.getByRole("button", { name: "Next: upload" }).click();
   }
 
-  test("accepts a small valid CSV and saves it as a draft only", async ({ page }) => {
+  test("accepts a small valid CSV and saves it as a draft only", async ({ page, world }) => {
     const errors = watchErrors(page);
-    await openWizard(page);
+    await openWizard(page, world.classA.name);
     const csv =
       "weekday,start_time,end_time,subject_code,teacher_email,room,note\n" +
-      "Monday,09:00,09:45,MATH101,teacher@acme.edu,E2E-CSV,imported\n";
+      `Monday,09:00,09:45,${world.subject.code},teacher@acme.edu,E2E-CSV,imported\n`;
     await page.locator('input[type="file"]').setInputFiles({
       name: "timetable.csv",
       mimeType: "text/csv",
@@ -243,9 +228,9 @@ test.describe("import wizard", () => {
     expect(errors.pageErrors).toEqual([]);
   });
 
-  test("rejects a hostile file with a friendly message", async ({ page }) => {
+  test("rejects a hostile file with a friendly message", async ({ page, world }) => {
     const errors = watchErrors(page);
-    await openWizard(page);
+    await openWizard(page, world.classA.name);
     // A Windows executable renamed to .xlsx.
     await page.locator('input[type="file"]').setInputFiles({
       name: "timetable.xlsx",
