@@ -66,6 +66,16 @@ def _parse(data: bytes, format_type: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    try:
+        _main()
+    except BaseException as exc:
+        # Only the class name is reported, for the runner's server-side log
+        sys.stderr.write(f"child_error_type={type(exc).__name__}\n")
+        sys.stderr.flush()
+        sys.exit(1)
+
+
+def _main() -> None:
     apply_resource_limits()
     # Library prints must never corrupt the JSON result
     real_stdout = sys.stdout

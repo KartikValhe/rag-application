@@ -47,6 +47,10 @@ def main() -> None:
         _emit({"success": False, "error_code": "parse_failure", "error_msg": "boom"})
     elif mode == "crash":
         raise SystemExit(3)
+    elif mode == "boom":
+        sys.stderr.write("secret path C:\\private\\file.xlsx\nchild_error_type=ZeroDivisionError\n")
+        sys.stderr.flush()
+        raise SystemExit(7)
     elif mode == "echo_len":
         _emit({"success": True, "records": [{"n": len(data)}]})
     elif mode == "rlimit":

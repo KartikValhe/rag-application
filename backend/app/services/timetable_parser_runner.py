@@ -19,6 +19,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -78,6 +79,9 @@ CHILD_ERROR_MESSAGES: dict[str, str] = {
     ),
     "corrupt_pdf": "The PDF document could not be read.",
 }
+# The child may print one marker line with the class name of an uncaught exception to stderr.
+# Only a strict identifier match is ever read from stderr; nothing else is kept or logged.
+_ERROR_TYPE_MARKER = re.compile(rb"child_error_type=([A-Za-z_][A-Za-z0-9_]{0,60})")
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # directory that contains the `app` package
 
 
@@ -218,6 +222,20 @@ def _kill_tree(proc: "subprocess.Popen[bytes]") -> None:
         proc.kill()
 
 
+def _describe_exit(returncode: int | None, stderr_tail: bytes) -> tuple[str, str, str]:
+    """Exit code, signal name and exception class name for server-side logs. No paths or text."""
+    exit_code = "none" if returncode is None else str(returncode)
+    signal_name = "none"
+    if returncode is not None and returncode < 0:
+        try:
+            signal_name = signal.Signals(-returncode).name
+        except ValueError:
+            signal_name = f"SIG{-returncode}"
+    match = _ERROR_TYPE_MARKER.search(stderr_tail)
+    error_type = match.group(1).decode("ascii") if match else "unknown"
+    return exit_code, signal_name, error_type
+
+
 def _run_child_blocking(
     data: bytes, format_type: str, child_module: str, timeout_seconds: float, max_output_bytes: int
 ) -> bytes:
@@ -234,7 +252,7 @@ def _run_child_blocking(
             [sys.executable, "-P", "-m", child_module, format_type],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             cwd=workdir,
             env=_child_env(workdir, child_module),
             close_fds=True,
@@ -269,10 +287,27 @@ def _run_child_blocking(
             except (OSError, ValueError):
                 return
 
+        stderr_tail = bytearray()
+
+        def read_stderr() -> None:
+            # Drain stderr so the child never blocks on it; keep only the last 4 KB
+            assert child.stderr is not None
+            try:
+                while True:
+                    chunk = child.stderr.read(4096)
+                    if not chunk:
+                        return
+                    stderr_tail.extend(chunk)
+                    del stderr_tail[:-4096]
+            except (OSError, ValueError):
+                return
+
         writer = threading.Thread(target=write_input, daemon=True)
         reader = threading.Thread(target=read_output, daemon=True)
+        err_reader = threading.Thread(target=read_stderr, daemon=True)
         writer.start()
         reader.start()
+        err_reader.start()
 
         deadline = time.monotonic() + timeout_seconds
         reader.join(timeout_seconds)
@@ -296,14 +331,24 @@ def _run_child_blocking(
                 status_code=status.HTTP_408_REQUEST_TIMEOUT,
             )
         writer.join(timeout=1.0)
-        return b"".join(chunks)
+        err_reader.join(timeout=1.0)
+        output = b"".join(chunks)
+        if proc.returncode not in (0, None) or not output:
+            exit_code, signal_name, error_type = _describe_exit(proc.returncode, bytes(stderr_tail))
+            logger.warning(
+                "timetable_child_abnormal_exit exit_code=%s signal=%s error_type=%s",
+                exit_code,
+                signal_name,
+                error_type,
+            )
+        return output
     finally:
         if proc is not None:
             if proc.poll() is None:
                 _kill_tree(proc)
             with suppress(Exception):
                 proc.wait(timeout=5)
-            for pipe in (proc.stdin, proc.stdout):
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe is not None:
                     with suppress(Exception):
                         pipe.close()

@@ -158,6 +158,8 @@ When deploying to staging or production environments, observe the following mand
 
 5. **Timetable Import Sandbox & Limits:**
    - Every file parse runs in a fresh subprocess (`python -m app.services.timetable_parse_child`) with a minimal environment (no `DATABASE_URL`, `SECRET_KEY`, `PLATFORM_SECRET_KEY`, `REDIS_*` or other secrets), an empty temporary working directory, input over stdin and a JSON result over stdout (capped at 5 MB). A hard 10 s timeout kills the whole process tree.
+   - **CI install:** CI deliberately uses a non-editable install (`pip install ".[dev]"`) because it matches production.
+   - **Import path:** the child's import path comes from where the child module lives, not from the parent's environment.
    - **Linux:** the child also applies `RLIMIT_AS` (~1 GB) and `RLIMIT_CPU` (15 s).
    - **Windows (development only):** rlimits are not available and are skipped. The other protections (clean environment, temp directory, stdin/stdout, output cap, timeout, tree kill) still apply.
    - **Production:** run the API/worker as a **non-root user** in a **container without outbound network access**. The subprocess sandbox does not restrict network or filesystem access by itself.
