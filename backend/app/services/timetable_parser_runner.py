@@ -15,6 +15,7 @@ Concurrency caps and rate limits use the atomic slot manager in app/core/slots.p
 """
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -158,10 +159,34 @@ async def parse_concurrency_guard(
 
 # ─── Sandboxed child process ──────────────────────────────────────────────────
 
-def _child_env(workdir: str) -> dict[str, str]:
+def _child_python_path(child_module: str) -> str:
+    """
+    Import roots for the child. Normally only the directory that holds the `app` package.
+    The package may be installed into site-packages, so a non-default child module (used by
+    tests) is looked up in the parent and the directory that holds it is added too.
+    """
+    roots = [str(_BACKEND_ROOT)]
+    if child_module != DEFAULT_CHILD_MODULE:
+        top = child_module.split(".")[0]
+        try:
+            spec = importlib.util.find_spec(top)
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None:
+            locations = list(spec.submodule_search_locations or [])
+            if not locations and spec.origin:
+                locations = [spec.origin]
+            for loc in locations:
+                root = str(Path(loc).resolve().parent)
+                if root not in roots:
+                    roots.append(root)
+    return os.pathsep.join(roots)
+
+
+def _child_env(workdir: str, child_module: str = DEFAULT_CHILD_MODULE) -> dict[str, str]:
     """Minimal environment. Nothing is inherited from the parent except what Python itself needs."""
     env = {
-        "PYTHONPATH": str(_BACKEND_ROOT),
+        "PYTHONPATH": _child_python_path(child_module),
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -211,7 +236,7 @@ def _run_child_blocking(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             cwd=workdir,
-            env=_child_env(workdir),
+            env=_child_env(workdir, child_module),
             close_fds=True,
             **popen_kwargs,
         )

@@ -449,3 +449,24 @@ async def test_concurrency_guard_tenant_rejection_keeps_global_slot_free() -> No
         assert exc.value.detail["code"] == "tenant_concurrent_limit_exceeded"
         assert await SlotManager().count(tpr.GLOBAL_CONCURRENCY_KEY) == before + 2
     assert await SlotManager().count(tpr.GLOBAL_CONCURRENCY_KEY) == before
+
+
+def test_child_pythonpath_includes_custom_module_root_when_app_is_installed_elsewhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    CI installs `app` into site-packages, so the runner's package root does not contain the
+    tests directory. The child's PYTHONPATH must still reach a non-default child module,
+    and must stay limited to the package root for the default module.
+    """
+    fake_site_packages = tmp_path / "site-packages"
+    fake_site_packages.mkdir()
+    monkeypatch.setattr(tpr, "_BACKEND_ROOT", fake_site_packages)
+
+    tests_parent = str(Path(__file__).resolve().parent.parent)
+    custom = tpr._child_env(str(tmp_path), CHILD)["PYTHONPATH"].split(os.pathsep)
+    assert str(fake_site_packages) in custom
+    assert tests_parent in custom
+
+    default = tpr._child_env(str(tmp_path), tpr.DEFAULT_CHILD_MODULE)["PYTHONPATH"].split(os.pathsep)
+    assert default == [str(fake_site_packages)]
