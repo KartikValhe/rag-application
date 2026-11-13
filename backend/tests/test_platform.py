@@ -11,29 +11,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_platform_access_token, hash_password
 from app.db.models.tenant import PlatformAdmin, Tenant
 from app.db.models.user import User
 
 pytestmark = pytest.mark.asyncio
-
-
-@pytest.fixture
-async def platform_admin(raw_db: AsyncSession) -> PlatformAdmin:
-    admin = PlatformAdmin(
-        email=f"superadmin-{uuid.uuid4().hex[:6]}@platform.local",
-        full_name="Platform Superadmin",
-        password_hash=hash_password("SuperSecret123!"),
-        is_active=True,
-    )
-    raw_db.add(admin)
-    await raw_db.commit()
-    return admin
-
-
-@pytest.fixture
-def platform_token(platform_admin: PlatformAdmin) -> str:
-    return create_platform_access_token(platform_admin_id=str(platform_admin.id))
 
 
 def _platform_headers(token: str) -> dict[str, str]:
@@ -60,7 +41,7 @@ async def test_platform_login_invalid_password(client: AsyncClient, platform_adm
 
 async def test_create_and_list_tenants(client: AsyncClient, platform_token: str) -> None:
     headers = _platform_headers(platform_token)
-    slug = f"acme-{uuid.uuid4().hex[:6]}"
+    slug = f"acme-{uuid.uuid4().hex}"
 
     # Create tenant
     create_resp = await client.post(
@@ -105,7 +86,7 @@ async def test_create_tenant_first_admin(
     client: AsyncClient, platform_token: str, tenant_a: Tenant, raw_db: AsyncSession
 ) -> None:
     headers = _platform_headers(platform_token)
-    admin_email = f"dean-{uuid.uuid4().hex[:6]}@example.com"
+    admin_email = f"dean-{uuid.uuid4().hex}@example.com"
 
     resp = await client.post(
         f"/api/v1/platform/tenants/{tenant_a.id}/admins",

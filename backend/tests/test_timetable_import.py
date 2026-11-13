@@ -38,6 +38,7 @@ from app.db.models.academic import Class, ClassSubject, Subject, TeacherAssignme
 from app.db.models.audit import AuditLog
 from app.db.models.rbac import Role, UserRole
 from app.db.models.tenant import Tenant
+from app.db.models.timetable import Timetable
 from app.db.models.user import User
 from app.services.timetable_importer import (
     extract_raw_records,
@@ -803,6 +804,12 @@ Tuesday,10:00,11:00,{s2.code},unassigned@acme.edu,Lab 1,Physics Lab
     assert audit is not None
     assert audit.details["total_rows"] == 2
     assert "data" not in audit.details  # No file content in audit!
+
+    # Verify import-preview is strictly read-only and never creates or updates any timetable
+    tt_check = await raw_db.execute(
+        select(Timetable).where(Timetable.tenant_id == tenant_a.id, Timetable.class_id == c.id)
+    )
+    assert tt_check.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio

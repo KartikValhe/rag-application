@@ -36,10 +36,10 @@ os.environ.setdefault("SECRET_KEY", "a" * 64)
 os.environ.setdefault("PLATFORM_SECRET_KEY", "b" * 64)
 os.environ.setdefault("ENVIRONMENT", "development")
 
-from app.core.security import hash_password
+from app.core.security import create_platform_access_token, hash_password
 from app.db.engine import SessionLocal
 from app.db.models.rbac import Role, UserRole
-from app.db.models.tenant import Tenant
+from app.db.models.tenant import PlatformAdmin, Tenant
 from app.db.models.user import User
 from app.main import app
 from app.services.rbac import seed_tenant_system_roles
@@ -67,17 +67,28 @@ async def raw_db() -> AsyncGenerator[AsyncSession, None]:
     A raw (no-RLS) DB session for test setup fixtures.
     Uses the migration/direct connection — bypasses RLS so fixtures can
     insert rows into any tenant.
+    Rolls back on error in test/setup to prevent PendingRollbackError.
     """
     async with _TestSession() as session:
-        yield session
-        await session.commit()
+        try:
+            yield session
+            if session.is_active:
+                await session.commit()
+        except Exception:
+            if session.is_active:
+                await session.rollback()
+            raise
+        finally:
+            if session.is_active:
+                await session.rollback()
+            await session.close()
 
 
 # ── Tenant fixtures ───────────────────────────────────────────────────────────
 
 @pytest_asyncio.fixture
 async def tenant_a(raw_db: AsyncSession) -> Tenant:
-    t = Tenant(slug=f"tenant-a-{uuid.uuid4().hex[:6]}", name="Tenant A", kind="school")
+    t = Tenant(slug=f"tenant-a-{uuid.uuid4().hex}", name="Tenant A", kind="school")
     raw_db.add(t)
     await raw_db.commit()
     await seed_tenant_system_roles(t.id, raw_db)
@@ -87,7 +98,7 @@ async def tenant_a(raw_db: AsyncSession) -> Tenant:
 
 @pytest_asyncio.fixture
 async def tenant_b(raw_db: AsyncSession) -> Tenant:
-    t = Tenant(slug=f"tenant-b-{uuid.uuid4().hex[:6]}", name="Tenant B", kind="college")
+    t = Tenant(slug=f"tenant-b-{uuid.uuid4().hex}", name="Tenant B", kind="college")
     raw_db.add(t)
     await raw_db.commit()
     await seed_tenant_system_roles(t.id, raw_db)
@@ -101,7 +112,7 @@ async def tenant_b(raw_db: AsyncSession) -> Tenant:
 async def user_a(raw_db: AsyncSession, tenant_a: Tenant) -> User:
     u = User(
         tenant_id=tenant_a.id,
-        email=f"user-a-{uuid.uuid4().hex[:6]}@example.com",
+        email=f"user-a-{uuid.uuid4().hex}@example.com",
         full_name="User A",
         password_hash=hash_password("Password123!"),
         status="active",
@@ -116,7 +127,7 @@ async def user_a(raw_db: AsyncSession, tenant_a: Tenant) -> User:
 async def admin_a(raw_db: AsyncSession, tenant_a: Tenant) -> User:
     u = User(
         tenant_id=tenant_a.id,
-        email=f"admin-a-{uuid.uuid4().hex[:6]}@example.com",
+        email=f"admin-a-{uuid.uuid4().hex}@example.com",
         full_name="Admin A",
         password_hash=hash_password("Password123!"),
         status="active",
@@ -138,7 +149,7 @@ async def admin_a(raw_db: AsyncSession, tenant_a: Tenant) -> User:
 async def user_b(raw_db: AsyncSession, tenant_b: Tenant) -> User:
     u = User(
         tenant_id=tenant_b.id,
-        email=f"user-b-{uuid.uuid4().hex[:6]}@example.com",
+        email=f"user-b-{uuid.uuid4().hex}@example.com",
         full_name="User B",
         password_hash=hash_password("Password123!"),
         status="active",
@@ -182,4 +193,24 @@ async def tenant_b_session(tenant_b: Tenant) -> AsyncGenerator[AsyncSession, Non
             {"tid": str(tenant_b.id)},
         )
         yield session
+
+
+@pytest_asyncio.fixture
+async def platform_admin(raw_db: AsyncSession) -> PlatformAdmin:
+    """A seeded platform superadmin."""
+    admin = PlatformAdmin(
+        email=f"superadmin-{uuid.uuid4().hex}@platform.local",
+        full_name="Platform Superadmin",
+        password_hash=hash_password("SuperSecret123!"),
+        is_active=True,
+    )
+    raw_db.add(admin)
+    await raw_db.commit()
+    return admin
+
+
+@pytest.fixture
+def platform_token(platform_admin: PlatformAdmin) -> str:
+    """JWT bearer token for the platform superadmin."""
+    return create_platform_access_token(platform_admin_id=str(platform_admin.id))
 

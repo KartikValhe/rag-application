@@ -42,7 +42,7 @@ def _headers(token: str, slug: str) -> dict[str, str]:
 async def _create_teacher_user(tenant: Tenant, raw_db: AsyncSession) -> tuple[User, str]:
     u = User(
         tenant_id=tenant.id,
-        email=f"teacher-{uuid.uuid4().hex[:6]}@example.com",
+        email=f"teacher-{uuid.uuid4().hex}@example.com",
         full_name="Assigned Teacher",
         is_admin=False,
         status="active",
@@ -64,7 +64,7 @@ async def _create_teacher_user(tenant: Tenant, raw_db: AsyncSession) -> tuple[Us
 async def _create_student_user(tenant: Tenant, raw_db: AsyncSession) -> tuple[User, str]:
     u = User(
         tenant_id=tenant.id,
-        email=f"student-{uuid.uuid4().hex[:6]}@example.com",
+        email=f"student-{uuid.uuid4().hex}@example.com",
         full_name="Enrolled Student",
         is_admin=False,
         status="active",
@@ -87,7 +87,7 @@ async def _create_student_user(tenant: Tenant, raw_db: AsyncSession) -> tuple[Us
 
 async def test_new_tenant_seeds_timetable_permissions(raw_db: AsyncSession) -> None:
     """New tenant created via platform API / system role seeding receives timetable permissions."""
-    t = Tenant(slug=f"new-tenant-{uuid.uuid4().hex[:6]}", name="New Org", kind="school")
+    t = Tenant(slug=f"new-tenant-{uuid.uuid4().hex}", name="New Org", kind="school")
     raw_db.add(t)
     await raw_db.commit()
 
@@ -116,6 +116,56 @@ async def test_new_tenant_seeds_timetable_permissions(raw_db: AsyncSession) -> N
     assert "timetable:view" in perms_by_role["teacher"]
 
     # 3. Student gets ONLY view
+    assert "timetable:view" in perms_by_role["student"]
+    assert "timetable:manage" not in perms_by_role["student"]
+    assert "timetable:publish" not in perms_by_role["student"]
+
+
+async def test_platform_created_tenant_receives_timetable_permissions(
+    client: AsyncClient,
+    platform_token: str,
+    raw_db: AsyncSession,
+) -> None:
+    """Tenants created through the platform API receive timetable permissions upon admin creation."""
+    p_headers = {"Authorization": f"Bearer {platform_token}"}
+    slug = f"plat-org-{uuid.uuid4().hex}"
+
+    # 1. Create tenant via platform API
+    create_resp = await client.post(
+        "/api/v1/platform/tenants",
+        headers=p_headers,
+        json={"slug": slug, "name": "Platform Timetable Org", "kind": "school"},
+    )
+    assert create_resp.status_code == 201
+    t_id = uuid.UUID(create_resp.json()["id"])
+
+    # 2. Create tenant admin via platform API (which triggers seed_tenant_system_roles)
+    admin_resp = await client.post(
+        f"/api/v1/platform/tenants/{t_id}/admins",
+        headers=p_headers,
+        json={"email": f"admin-{uuid.uuid4().hex}@plat.local", "full_name": "Platform Admin"},
+    )
+    assert admin_resp.status_code == 201
+
+    # 3. Query role permissions
+    query = (
+        select(Role.name, RolePermission.permission_id)
+        .join(RolePermission, (RolePermission.tenant_id == Role.tenant_id) & (RolePermission.role_id == Role.id))
+        .where(Role.tenant_id == t_id)
+    )
+    res = await raw_db.execute(query)
+    perms_by_role: dict[str, set[str]] = {}
+    for r_name, p_id in res.all():
+        perms_by_role.setdefault(r_name, set()).add(p_id)
+
+    assert "timetable:manage" in perms_by_role["tenant_admin"]
+    assert "timetable:publish" in perms_by_role["tenant_admin"]
+    assert "timetable:view" in perms_by_role["tenant_admin"]
+
+    assert "timetable:manage" in perms_by_role["teacher"]
+    assert "timetable:publish" in perms_by_role["teacher"]
+    assert "timetable:view" in perms_by_role["teacher"]
+
     assert "timetable:view" in perms_by_role["student"]
     assert "timetable:manage" not in perms_by_role["student"]
     assert "timetable:publish" not in perms_by_role["student"]
@@ -161,6 +211,23 @@ async def test_teacher_scoping_assigned_vs_unassigned(
     resp_draft = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=teacher_hdr)
     assert resp_draft.status_code == 200
 
+    # Scoped teacher picker endpoint returns assigned teachers without requiring assignment:manage
+    resp_pick_subj = await client.get(
+        f"/api/v1/classes/{c_a.id}/subjects/{sub.id}/assigned-teachers",
+        headers=teacher_hdr,
+    )
+    assert resp_pick_subj.status_code == 200
+    teachers_data = resp_pick_subj.json()
+    assert len(teachers_data) == 1
+    assert teachers_data[0]["id"] == str(teacher.id)
+
+    resp_pick_class = await client.get(
+        f"/api/v1/classes/{c_a.id}/assigned-teachers",
+        headers=teacher_hdr,
+    )
+    assert resp_pick_class.status_code == 200
+    assert len(resp_pick_class.json()) == 1
+
     resp_pub = await client.post(
         f"/api/v1/classes/{c_a.id}/timetables/publish",
         headers=teacher_hdr,
@@ -172,6 +239,13 @@ async def test_teacher_scoping_assigned_vs_unassigned(
     resp_unassigned_get = await client.get(f"/api/v1/classes/{c_b.id}/timetables/draft", headers=teacher_hdr)
     assert resp_unassigned_get.status_code == 404
     assert resp_unassigned_get.json()["detail"]["code"] == "not_found"
+
+    resp_unassigned_teachers = await client.get(
+        f"/api/v1/classes/{c_b.id}/subjects/{sub.id}/assigned-teachers",
+        headers=teacher_hdr,
+    )
+    assert resp_unassigned_teachers.status_code == 404
+    assert resp_unassigned_teachers.json()["detail"]["code"] == "not_found"
 
     resp_unassigned_pub = await client.post(
         f"/api/v1/classes/{c_b.id}/timetables/publish",
@@ -211,6 +285,8 @@ async def test_student_denied_on_draft_and_manage_endpoints(
         ("POST", f"/api/v1/classes/{c.id}/timetables/check-conflicts", None),
         ("POST", f"/api/v1/classes/{c.id}/timetables/publish", {"confirm_conflicts": True}),
         ("POST", f"/api/v1/classes/{c.id}/timetables/unpublish", None),
+        ("GET", f"/api/v1/classes/{c.id}/subjects/{dummy_id}/assigned-teachers", None),
+        ("GET", f"/api/v1/classes/{c.id}/assigned-teachers", None),
     ]
 
     for method, path, payload in endpoints:
@@ -225,12 +301,42 @@ async def test_student_denied_on_draft_and_manage_endpoints(
         assert resp.status_code == 403, f"{method} {path} returned {resp.status_code}, expected 403"
         assert resp.json()["detail"]["code"] == "permission_denied"
 
-    # But /me endpoints succeed with 200
+    # Enroll student in class `c`
+    from app.db.models.academic import Enrollment
+    raw_db.add(Enrollment(tenant_id=tenant_a.id, user_id=student.id, class_id=c.id))
+
+    # Add a draft-only timetable with an entry to class `c`
+    draft_tt = Timetable(tenant_id=tenant_a.id, class_id=c.id, status="draft", version=1)
+    raw_db.add(draft_tt)
+    await raw_db.flush()
+
+    sub_demo = Subject(tenant_id=tenant_a.id, name=f"DraftOnlySub-{uuid.uuid4().hex[:6]}")
+    raw_db.add(sub_demo)
+    await raw_db.flush()
+    raw_db.add(
+        TimetableEntry(
+            tenant_id=tenant_a.id,
+            timetable_id=draft_tt.id,
+            class_id=c.id,
+            subject_id=sub_demo.id,
+            day_of_week=0,
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+    )
+    await raw_db.commit()
+
+    # Drafts are strictly INVISIBLE to students on /me endpoints
     res_me_tt = await client.get("/api/v1/me/timetable", headers=student_hdr)
     assert res_me_tt.status_code == 200
+    me_tt_data = res_me_tt.json()
+    assert len(me_tt_data["classes"]) == 0
 
     res_me_nl = await client.get("/api/v1/me/next-lecture", headers=student_hdr)
     assert res_me_nl.status_code == 200
+    me_nl_data = res_me_nl.json()
+    assert me_nl_data["status"] == "no_published_timetable"
+    assert me_nl_data["next_lecture"] is None
 
 
 # ── 4. Cross-Class and Cross-Tenant Entry ID Manipulation ──────────────────────
@@ -281,7 +387,8 @@ async def test_foreign_entry_id_returns_generic_404(
         json=payload,
     )
     # Generic 404
-    assert put_resp.status_code in (404, 422)
+    assert put_resp.status_code == 404
+    assert put_resp.json()["detail"]["code"] == "not_found"
 
     del_resp = await client.delete(
         f"/api/v1/classes/{c_a.id}/timetables/draft/entries/{entry_b.id}",
@@ -353,6 +460,53 @@ async def test_validation_rules_and_pydantic_limits(
         },
     )
     assert r_bad_note.status_code == 422
+
+
+async def test_timetable_entries_cap_200_enforced(
+    client: AsyncClient,
+    tenant_a: Tenant,
+    admin_a: User,
+    raw_db: AsyncSession,
+) -> None:
+    """A timetable draft cannot exceed 200 entries (HTTP 422 entries_cap_exceeded)."""
+    admin_token = create_access_token(tenant_id=str(tenant_a.id), user_id=str(admin_a.id), is_admin=True)
+    admin_hdr = _headers(admin_token, tenant_a.slug)
+
+    c = Class(tenant_id=tenant_a.id, name=f"ClassCap-{uuid.uuid4().hex[:6]}")
+    sub = Subject(tenant_id=tenant_a.id, name=f"SubCap-{uuid.uuid4().hex[:6]}")
+    raw_db.add_all([c, sub])
+    await raw_db.flush()
+    raw_db.add(ClassSubject(tenant_id=tenant_a.id, class_id=c.id, subject_id=sub.id))
+
+    draft = Timetable(tenant_id=tenant_a.id, class_id=c.id, status="draft", version=1)
+    raw_db.add(draft)
+    await raw_db.flush()
+
+    # Pre-populate 200 entries
+    entries = [
+        TimetableEntry(
+            tenant_id=tenant_a.id,
+            timetable_id=draft.id,
+            class_id=c.id,
+            subject_id=sub.id,
+            day_of_week=i % 7,
+            start_time=time(8 + (i % 10), 0),
+            end_time=time(9 + (i % 10), 0),
+            room=f"R{i}",
+        )
+        for i in range(200)
+    ]
+    raw_db.add_all(entries)
+    await raw_db.commit()
+
+    # Attempt to add 201st entry -> 422 entries_cap_exceeded
+    r_overflow = await client.post(
+        f"/api/v1/classes/{c.id}/timetables/draft/entries",
+        headers=admin_hdr,
+        json={"day_of_week": 0, "start_time": "07:00", "end_time": "08:00", "subject_id": str(sub.id)},
+    )
+    assert r_overflow.status_code == 422
+    assert r_overflow.json()["detail"]["code"] == "entries_cap_exceeded"
 
 
 # ── 6. Academic Validation: Subject linked to Class & Teacher Assigned ─────────
@@ -556,7 +710,22 @@ async def test_audit_trail_for_timetable_actions(
     )
     assert r_up.status_code == 200
 
-    # 4. Publish
+    # 4. Add and delete entry to test delete_entry audit
+    r_entry2 = await client.post(
+        f"/api/v1/classes/{c.id}/timetables/draft/entries",
+        headers=admin_hdr,
+        json={"day_of_week": 2, "start_time": "14:00", "end_time": "15:00", "subject_id": str(sub.id)},
+    )
+    assert r_entry2.status_code == 200
+    entry2_id = r_entry2.json()["id"]
+
+    r_del = await client.delete(
+        f"/api/v1/classes/{c.id}/timetables/draft/entries/{entry2_id}",
+        headers=admin_hdr,
+    )
+    assert r_del.status_code == 204
+
+    # 5. Publish
     r_pub = await client.post(
         f"/api/v1/classes/{c.id}/timetables/publish",
         headers=admin_hdr,
@@ -564,7 +733,7 @@ async def test_audit_trail_for_timetable_actions(
     )
     assert r_pub.status_code == 200
 
-    # 5. Unpublish
+    # 6. Unpublish
     r_unpub = await client.post(
         f"/api/v1/classes/{c.id}/timetables/unpublish",
         headers=admin_hdr,
@@ -580,6 +749,7 @@ async def test_audit_trail_for_timetable_actions(
     assert "timetable:create_draft" in actions
     assert "timetable:create_entry" in actions
     assert "timetable:update_entry" in actions
+    assert "timetable:delete_entry" in actions
     assert "timetable:publish" in actions
     assert "timetable:unpublish" in actions
 
@@ -634,3 +804,158 @@ async def test_tenant_timezone_admin_endpoints(
     audit_entry = audit_res.scalar_one_or_none()
     assert audit_entry is not None
     assert audit_entry.details["new_timezone"] == "America/New_York"
+
+    # 4. Non-admin users (teacher, student) are rejected with 403 Forbidden
+    teacher, teacher_token = await _create_teacher_user(tenant_a, raw_db)
+    teacher_hdr = _headers(teacher_token, tenant_a.slug)
+    r_teacher_patch = await client.patch(
+        "/api/v1/admin/settings/timezone",
+        headers=teacher_hdr,
+        json={"timezone": "UTC"},
+    )
+    assert r_teacher_patch.status_code == 403
+    assert r_teacher_patch.json()["detail"]["code"] == "permission_denied"
+
+    student, student_token = await _create_student_user(tenant_a, raw_db)
+    student_hdr = _headers(student_token, tenant_a.slug)
+    r_student_patch = await client.patch(
+        "/api/v1/admin/settings/timezone",
+        headers=student_hdr,
+        json={"timezone": "UTC"},
+    )
+    assert r_student_patch.status_code == 403
+    assert r_student_patch.json()["detail"]["code"] == "permission_denied"
+
+
+# ── 11. Comprehensive Route x Role Matrix ─────────────────────────────────────
+
+async def test_timetable_route_role_matrix(
+    client: AsyncClient,
+    tenant_a: Tenant,
+    admin_a: User,
+    raw_db: AsyncSession,
+) -> None:
+    """
+    Route x Role Authorization Matrix:
+      Routes:
+        1. GET /classes/{class_id}/timetable (timetable:view)
+        2. POST /classes/{class_id}/timetables/entries (timetable:manage)
+        3. POST /classes/{class_id}/timetables/publish (timetable:publish)
+        4. GET /classes/{class_id}/assigned-teachers (timetable:manage)
+        5. GET /me/timetable (authenticated)
+        6. GET /me/next-lecture (authenticated)
+      Roles:
+        - Admin: Full access
+        - Teacher Assigned: Allowed on assigned class, generic 404 on unassigned class
+        - Teacher Unassigned: Generic 404 on manage/publish/assigned-teachers
+        - Student: timetable:view allowed, manage/publish forbidden (403), /me allowed (200)
+        - Unauthenticated: 401 Unauthorized across all endpoints
+    """
+    admin_token = create_access_token(tenant_id=str(tenant_a.id), user_id=str(admin_a.id), is_admin=True)
+    admin_hdr = _headers(admin_token, tenant_a.slug)
+
+    teacher_1, teacher_1_token = await _create_teacher_user(tenant_a, raw_db)
+    teacher_1_hdr = _headers(teacher_1_token, tenant_a.slug)
+
+    teacher_2, teacher_2_token = await _create_teacher_user(tenant_a, raw_db)
+    teacher_2_hdr = _headers(teacher_2_token, tenant_a.slug)
+
+    student, student_token = await _create_student_user(tenant_a, raw_db)
+    student_hdr = _headers(student_token, tenant_a.slug)
+
+    c_a = Class(tenant_id=tenant_a.id, name=f"MatrixClassA-{uuid.uuid4().hex}")
+    c_b = Class(tenant_id=tenant_a.id, name=f"MatrixClassB-{uuid.uuid4().hex}")
+    sub = Subject(tenant_id=tenant_a.id, name=f"MatrixSub-{uuid.uuid4().hex}")
+    raw_db.add_all([c_a, c_b, sub])
+    await raw_db.flush()
+
+    raw_db.add(ClassSubject(tenant_id=tenant_a.id, class_id=c_a.id, subject_id=sub.id))
+    raw_db.add(ClassSubject(tenant_id=tenant_a.id, class_id=c_b.id, subject_id=sub.id))
+    raw_db.add(TeacherAssignment(tenant_id=tenant_a.id, user_id=teacher_1.id, class_id=c_a.id, subject_id=sub.id))
+    await raw_db.commit()
+
+    entry_payload = {
+        "subject_id": str(sub.id),
+        "teacher_id": str(teacher_1.id),
+        "day_of_week": 1,
+        "start_time": "09:00",
+        "end_time": "10:00",
+        "room": "Room 101",
+    }
+    unauth_hdr = {"X-Tenant-Slug": tenant_a.slug}
+
+    # 1. GET /classes/{id}/timetables/draft
+    res = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=admin_hdr)
+    assert res.status_code == 200
+    res = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=teacher_1_hdr)
+    assert res.status_code == 200
+    res = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=teacher_2_hdr)
+    assert res.status_code == 404
+    res = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=student_hdr)
+    assert res.status_code == 403
+    res = await client.get(f"/api/v1/classes/{c_a.id}/timetables/draft", headers=unauth_hdr)
+    assert res.status_code == 401
+
+    # 2. POST /classes/{id}/timetables/draft/entries
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/draft/entries", headers=admin_hdr, json=entry_payload)
+    assert res.status_code == 200
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/draft/entries", headers=teacher_1_hdr, json=entry_payload)
+    assert res.status_code == 200
+    res = await client.post(f"/api/v1/classes/{c_b.id}/timetables/draft/entries", headers=teacher_1_hdr, json=entry_payload)
+    assert res.status_code == 404
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/draft/entries", headers=teacher_2_hdr, json=entry_payload)
+    assert res.status_code == 404
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/draft/entries", headers=student_hdr, json=entry_payload)
+    assert res.status_code == 403
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/draft/entries", headers=unauth_hdr, json=entry_payload)
+    assert res.status_code == 401
+
+    # 3. POST /classes/{id}/timetables/publish
+    res = await client.post(f"/api/v1/classes/{c_b.id}/timetables/publish", headers=teacher_1_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 404
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/publish", headers=teacher_2_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 404
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/publish", headers=student_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 403
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/publish", headers=unauth_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 401
+    # Teacher 1 publishes -> 200
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/publish", headers=teacher_1_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 200
+    # Admin unpublishes -> 200 (reverting to draft)
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/unpublish", headers=admin_hdr)
+    assert res.status_code == 200
+    # Admin publishes -> 200
+    res = await client.post(f"/api/v1/classes/{c_a.id}/timetables/publish", headers=admin_hdr, json={"confirm_conflicts": True})
+    assert res.status_code == 200
+
+    # 4. GET /classes/{id}/assigned-teachers
+    res = await client.get(f"/api/v1/classes/{c_a.id}/assigned-teachers", headers=admin_hdr)
+    assert res.status_code == 200
+    res = await client.get(f"/api/v1/classes/{c_a.id}/assigned-teachers", headers=teacher_1_hdr)
+    assert res.status_code == 200
+    res = await client.get(f"/api/v1/classes/{c_b.id}/assigned-teachers", headers=teacher_1_hdr)
+    assert res.status_code == 404
+    res = await client.get(f"/api/v1/classes/{c_a.id}/assigned-teachers", headers=teacher_2_hdr)
+    assert res.status_code == 404
+    res = await client.get(f"/api/v1/classes/{c_a.id}/assigned-teachers", headers=student_hdr)
+    assert res.status_code == 403
+    res = await client.get(f"/api/v1/classes/{c_a.id}/assigned-teachers", headers=unauth_hdr)
+    assert res.status_code == 401
+
+    # 5. GET /me/timetable
+    for hdr in (admin_hdr, teacher_1_hdr, teacher_2_hdr, student_hdr):
+        res = await client.get("/api/v1/me/timetable", headers=hdr)
+        assert res.status_code == 200
+        assert "classes" in res.json()
+    res = await client.get("/api/v1/me/timetable", headers=unauth_hdr)
+    assert res.status_code == 401
+
+    # 6. GET /me/next-lecture
+    for hdr in (admin_hdr, teacher_1_hdr, teacher_2_hdr, student_hdr):
+        res = await client.get("/api/v1/me/next-lecture", headers=hdr)
+        assert res.status_code == 200
+        assert "next_lecture" in res.json()
+    res = await client.get("/api/v1/me/next-lecture", headers=unauth_hdr)
+    assert res.status_code == 401
+

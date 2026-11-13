@@ -295,6 +295,84 @@ async def get_my_timetable(
     )
 
 
+# ── Scoped Teacher Picker Endpoint (timetable:manage) ─────────────────────────
+
+@router.get(
+    "/classes/{class_id}/subjects/{subject_id}/assigned-teachers",
+    response_model=list[AvailableTeacherItem],
+    dependencies=[Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+)
+async def list_class_subject_assigned_teachers(
+    class_id: uuid.UUID,
+    subject_id: uuid.UUID,
+    db: TenantDB,
+    current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+) -> list[AvailableTeacherItem]:
+    """
+    Scoped endpoint returning only teachers assigned to a given class and subject.
+    Caller needs timetable:manage for this class (not assignment:manage), allowing
+    teachers to populate the teacher picker in the timetable editor.
+    """
+    stmt = (
+        select(User.id, User.full_name, User.email)
+        .join(
+            TeacherAssignment,
+            (TeacherAssignment.tenant_id == User.tenant_id)
+            & (TeacherAssignment.user_id == User.id),
+        )
+        .where(
+            TeacherAssignment.tenant_id == current_user.tenant_id,
+            TeacherAssignment.class_id == class_id,
+            TeacherAssignment.subject_id == subject_id,
+            User.status == "active",
+        )
+        .order_by(User.full_name)
+    )
+    res = await db.execute(stmt)
+    return [
+        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2])
+        for row in res.all()
+    ]
+
+
+@router.get(
+    "/classes/{class_id}/assigned-teachers",
+    response_model=list[AvailableTeacherItem],
+    dependencies=[Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+)
+async def list_class_assigned_teachers(
+    class_id: uuid.UUID,
+    db: TenantDB,
+    current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
+    subject_id: uuid.UUID | None = Query(None, description="Optional subject filter"),
+) -> list[AvailableTeacherItem]:
+    """
+    Scoped endpoint returning active teachers assigned to a given class (optionally filtered by subject).
+    Scoped to timetable:manage on the class.
+    """
+    query = (
+        select(User.id, User.full_name, User.email)
+        .join(
+            TeacherAssignment,
+            (TeacherAssignment.tenant_id == User.tenant_id)
+            & (TeacherAssignment.user_id == User.id),
+        )
+        .where(
+            TeacherAssignment.tenant_id == current_user.tenant_id,
+            TeacherAssignment.class_id == class_id,
+            User.status == "active",
+        )
+    )
+    if subject_id is not None:
+        query = query.where(TeacherAssignment.subject_id == subject_id)
+    query = query.distinct().order_by(User.full_name)
+    res = await db.execute(query)
+    return [
+        AvailableTeacherItem(id=row[0], full_name=row[1], email=row[2])
+        for row in res.all()
+    ]
+
+
 # ── Class Timetable Management (Admin & Assigned Teachers) ─────────────────────
 
 @router.get(
@@ -698,15 +776,6 @@ async def update_draft_entry(
     current_user: Annotated[User, Depends(require("timetable:manage", scope=Scope(ScopeType.CLASS)))],
 ) -> TimetableEntryResponse:
     """Update an existing scheduled entry inside the draft timetable."""
-    # 1. Validate subject linked and teacher assigned
-    await _validate_entry_relations(
-        db=db,
-        tenant_id=current_user.tenant_id,
-        class_id=class_id,
-        subject_id=payload.subject_id,
-        teacher_id=payload.teacher_id,
-    )
-
     res = await db.execute(
         select(TimetableEntry)
         .join(Timetable, (Timetable.tenant_id == TimetableEntry.tenant_id) & (Timetable.id == TimetableEntry.timetable_id))
@@ -720,6 +789,15 @@ async def update_draft_entry(
     entry = res.scalar_one_or_none()
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+
+    # 1. Validate subject linked and teacher assigned
+    await _validate_entry_relations(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        class_id=class_id,
+        subject_id=payload.subject_id,
+        teacher_id=payload.teacher_id,
+    )
 
     entry.day_of_week = payload.day_of_week
     entry.start_time = payload.start_time
