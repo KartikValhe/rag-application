@@ -34,6 +34,7 @@ Deterministic schedule retrieval for authenticated users without LLM overhead. S
     "message": "Next class: Mathematics at 09:00",
     "current_lecture": null,
     "next_lecture": {
+      "entry_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       "class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       "class_name": "Grade 10-A",
       "subject_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -41,20 +42,28 @@ Deterministic schedule retrieval for authenticated users without LLM overhead. S
       "subject_code": "MATH101",
       "teacher_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       "teacher_name": "Dr. Alan Turing",
+      "room": "Room 204",
       "day_of_week": 0,
       "day_name": "Monday",
-      "start_time": "09:00",
-      "end_time": "10:00",
-      "room": "Room 204",
+      "start_time": "09:00:00",
+      "end_time": "10:00:00",
+      "date": "2026-11-16",
+      "is_current": false,
       "note": null
     },
     "tenant_timezone": "America/New_York"
   }
   ```
-- **Statuses**: `in_progress`, `upcoming_today`, `upcoming_future`, `no_more_today`, `no_lectures_scheduled`, `no_published_timetable`, `not_enrolled`.
+- **`ScheduleItem` fields** (`current_lecture` and `next_lecture`):
+  - `date` (`str`, `YYYY-MM-DD`, required): the calendar date of this occurrence in the tenant timezone (today, or a later date for `upcoming_future`).
+  - `is_current` (`bool`, default `false`): `true` only on `current_lecture` (the lecture running right now); `next_lecture` always has `false`.
+  - `start_time` / `end_time` are `HH:MM:SS` strings (Python `time.isoformat()`).
+  - `entry_id`, `subject_code`, `teacher_id`, `teacher_name`, `room`, `note` may be `null`.
+- **Statuses**: `in_progress`, `upcoming_today`, `upcoming_future`, `no_more_today`, `no_lectures_scheduled`, `no_published_timetable`.
 - **Error Codes**:
   - `401 Unauthorized`: Invalid or expired JWT token.
   - `403 Forbidden`: Token lacks `timetable:view`.
+  - `404 Not Found`: Generic `not_found` when `class_id` is given and the caller is not enrolled in / assigned to that class (or it does not exist).
 
 ---
 
@@ -87,9 +96,11 @@ Deterministic schedule retrieval for authenticated users without LLM overhead. S
     "teaching_entries": []
   }
   ```
+- **Visibility**: only published timetables of classes the caller is enrolled in (student), assigned to (teacher) or any class (admin). Drafts and other classes are never returned.
 - **Error Codes**:
   - `401 Unauthorized`: Invalid or expired JWT token.
   - `403 Forbidden`: Token lacks `timetable:view`.
+  - `404 Not Found`: Generic `not_found` when `class_id` is outside the caller's classes.
 
 ---
 
@@ -212,24 +223,28 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
 
 - **Route**: `POST /api/v1/classes/{class_id}/timetables/check-conflicts`
 - **Permission**: `timetable:manage` scoped to `Scope(ScopeType.CLASS)`
+- **Request**: no body. Checks the current draft of `class_id`; with no draft it returns `{"has_conflicts": false, "conflicts": []}`.
 - **Response Model**: `ConflictCheckResponse` (HTTP 200)
   ```json
   {
     "has_conflicts": true,
     "conflicts": [
       {
-        "conflict_type": "room_double_booking",
-        "description": "Room 204 is double-booked on Monday 09:00-10:00 with Class 10-B",
+        "conflict_type": "room_overlap",
         "day_of_week": 0,
-        "start_time": "09:00",
-        "end_time": "10:00",
-        "room": "Room 204",
-        "conflicting_class_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-        "conflicting_class_name": "Grade 10-B"
+        "day_name": "Monday",
+        "start_time": "09:00:00",
+        "end_time": "10:00:00",
+        "description": "Room 'Room 204' is double-booked on Monday at 09:00.",
+        "class_name": null,
+        "subject_name": null,
+        "teacher_name": null,
+        "room": "Room 204"
       }
     ]
   }
   ```
+- **`TimetableConflict` fields**: `conflict_type` is one of `class_overlap`, `teacher_overlap`, `room_overlap`. `day_of_week`, `day_name`, `start_time`, `end_time` (`HH:MM:SS`) and `description` are always set. `class_name`, `subject_name`, `teacher_name`, `room` are optional and filled depending on the type (`class_name` + `subject_name` for class overlaps, `teacher_name` for teacher overlaps, `room` for room overlaps). There is no `conflicting_class_id` field.
 
 ### 4.9 Publish Timetable
 
@@ -245,7 +260,7 @@ Draft creation, entry manipulation, conflict checking, and publish/unpublish wor
 - **Audited**: `timetable:publish`
 - **Error Codes**:
   - `404 Not Found`: `no_draft`
-  - `409 Conflict`: `timetable_conflicts_detected` with `conflicts: list[ConflictDetail]` returned if double bookings exist and `confirm_conflicts` is not `true`.
+  - `409 Conflict`: `{"detail": {"code": "timetable_conflicts_detected", "message": "...", "conflicts": [TimetableConflict, ...]}}` (same item shape as 4.8) if conflicts exist and `confirm_conflicts` is not `true`.
 
 ### 4.10 Unpublish Timetable
 
@@ -292,26 +307,47 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
     "period_labels": [],
     "rows": [
       {
-        "row_number": 2,
+        "row_index": 0,
         "day_of_week": 0,
-        "weekday_raw": "Monday",
+        "day_name": "Monday",
         "start_time": "09:00",
         "end_time": "10:00",
-        "subject_raw": "MATH101",
-        "teacher_raw": "turing@university.local",
+        "subject_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "subject_code": "MATH101",
+        "subject_name": "Mathematics",
+        "teacher_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "teacher_email": null,
+        "teacher_name": "Dr. Alan Turing",
         "room": "Room 204",
         "note": null,
-        "subject_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-        "teacher_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-        "is_valid": true,
-        "error_message": null,
+        "raw_data": {
+          "weekday": "Monday",
+          "time": "09:00-10:00",
+          "subject": "MATH101",
+          "teacher": "turing@university.local",
+          "room": "Room 204",
+          "note": null,
+          "class": null
+        },
+        "period_label": null,
+        "requires_period_time": false,
+        "merged_cell": false,
+        "errors": [],
         "warnings": []
       }
     ],
-    "available_subjects": [],
-    "available_teachers": []
+    "available_subjects": [{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "code": "MATH101", "name": "Mathematics"}],
+    "available_teachers": [{"id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "full_name": "Dr. Alan Turing", "email": null}]
   }
   ```
+- **`ParsedPreviewRow` fields**:
+  - `row_index` (`int`): 0-based position of the record in the parsed output (not the spreadsheet row number).
+  - `errors` (`list[str]`): a row is valid when this is empty; `valid_rows`/`error_rows` count rows without/with errors. There is no `is_valid` or `error_message` field. Each message starts with a code, for example `UNKNOWN_TEACHER: ...`, `TEACHER_NOT_ASSIGNED_TO_SUBJECT: ...`.
+  - `warnings` (`list[str]`): non-blocking notes, for example `PERIOD_NEEDS_TIMES: ...`, `MERGED_CELL: ...`.
+  - `period_label` (`str | null`): the period/slot label found in the source (for example `"P1"`); collected, sorted, into the top-level `period_labels`.
+  - `requires_period_time` (`bool`): `true` when the row has a period label but no start/end time; the top-level `requires_period_times` is `true` if any row needs times.
+  - `raw_data` (`dict[str, str | null]`): the original cell text with keys `weekday`, `time`, `subject`, `teacher`, `room`, `note`, `class`. Values may be `null`.
+  - All matched fields (`day_of_week`, `day_name`, `start_time`, `end_time`, `subject_*`, `teacher_*`) are `null` when they could not be parsed or matched.
 - **Hardening Rules**:
   - Does NOT create or change database records.
   - Does NOT store original uploaded file to disk or log file content.
@@ -368,10 +404,16 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
     ]
   }
   ```
+- **Request fields**: `replace_confirmed` (`bool`, default `false`); `entries` (required, at most 500 items by schema). Each entry has `day_of_week` (0..6), `start_time`/`end_time` (`HH:MM`), `subject_id`, optional `teacher_id`, `room` (max 50 chars), `note` (max 200 chars). Unknown fields are rejected (`extra="forbid"`).
+- **Behavior**: replaces all entries of the class draft (creates the draft if none exists).
 - **Response Model**: `TimetableResponse` (HTTP 200)
 - **Error Codes**:
-  - `409 Conflict`: `draft_already_exists` when an existing draft exists and `replace_confirmed` is `false`.
-  - `422 Unprocessable Content`: Row-level academic re-validation failure or entries > 200.
+  - `409 Conflict`: when the draft already has entries and `replace_confirmed` is `false`:
+    ```json
+    {"detail": {"code": "confirmation_required", "message": "...", "existing_row_count": 12, "new_row_count": 24}}
+    ```
+    Resend the same request with `"replace_confirmed": true` to replace.
+  - `422 Unprocessable Content`: `invalid_time_format`, `invalid_time_order`, `subject_not_linked`, `teacher_not_assigned`, or schema validation errors.
 
 ---
 

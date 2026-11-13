@@ -178,12 +178,16 @@ async def verify_scope(
     # Teacher scope: assigned to class (and subject if CLASS_SUBJECT scope)
     if "teacher" in role_names:
         if scope.scope_type == ScopeType.CLASS:
+            # A teacher has one assignment row per subject, so several rows can
+            # match this class. We only need to know that at least one exists.
             ta_res = await db.execute(
-                select(TeacherAssignment.id).where(
+                select(TeacherAssignment.id)
+                .where(
                     TeacherAssignment.tenant_id == user.tenant_id,
                     TeacherAssignment.user_id == user.id,
                     TeacherAssignment.class_id == class_id,
                 )
+                .limit(1)
             )
             if ta_res.scalar_one_or_none() is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
