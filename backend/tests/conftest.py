@@ -18,27 +18,18 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# Set test env vars before importing app modules.
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+asyncpg://app_tenant:tenant_password@localhost:5433/ragplatform",
-)
-os.environ.setdefault(
-    "PLATFORM_DATABASE_URL",
-    "postgresql+asyncpg://app_platform:platform_password@localhost:5433/ragplatform",
-)
-os.environ.setdefault(
-    "MIGRATION_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5433/ragplatform",
-)
-os.environ.setdefault(
-    "WORKER_DATABASE_URL",
-    "postgresql+asyncpg://app_worker:worker_password@localhost:5433/ragplatform",
-)
+# Set test env vars before importing app modules. The four DB URLs are always rewritten to the
+# dedicated `<name>_test` database, and a hard guard aborts the session for anything non-local.
+from app.core.test_db_guard import TestDatabaseGuardError, apply_test_database_env  # noqa: E402
+
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")  # DB 1 for tests
 os.environ.setdefault("SECRET_KEY", "a" * 64)
 os.environ.setdefault("PLATFORM_SECRET_KEY", "b" * 64)
 os.environ.setdefault("ENVIRONMENT", "development")
+try:
+    apply_test_database_env(os.environ)  # type: ignore[arg-type]
+except TestDatabaseGuardError as _guard_exc:
+    pytest.exit(str(_guard_exc), returncode=2)
 
 from app.core.security import create_platform_access_token, hash_password
 from app.db.engine import SessionLocal
@@ -58,6 +49,44 @@ _test_engine = create_async_engine(
     connect_args={"statement_cache_size": 0},
 )
 _TestSession = async_sessionmaker(_test_engine, expire_on_commit=False, autoflush=False)
+
+
+def _check_migration_head() -> None:
+    """Abort the session unless the test DB is at the Alembic head."""
+    import asyncio
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    cfg.set_main_option("script_location", str(Path(__file__).resolve().parent.parent / "alembic"))
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+
+    async def current() -> str | None:
+        engine = create_async_engine(
+            os.environ["MIGRATION_DATABASE_URL"], connect_args={"statement_cache_size": 0}
+        )
+        try:
+            async with engine.connect() as conn:
+                res = await conn.execute(text("SELECT version_num FROM app.alembic_version"))
+                return res.scalar_one_or_none()
+        finally:
+            await engine.dispose()
+
+    try:
+        found = asyncio.run(current())
+    except Exception:
+        found = None
+    if found != head:
+        pytest.exit(
+            "Test database is not at the migration head: run python -m app.scripts.prepare_test_db",
+            returncode=2,
+        )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    _check_migration_head()
 
 
 @pytest.fixture(scope="session", autouse=True)

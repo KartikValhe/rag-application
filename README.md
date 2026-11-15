@@ -257,6 +257,18 @@ The platform frontend follows a strict mobile-first architecture adhering to WCA
 
 ## 🧪 Running Automated Tests
 
+### Test database
+
+pytest **always** runs against a dedicated `<name>_test` database (`ragplatform_test` locally), never the dev database. `tests/conftest.py` rewrites `DATABASE_URL`, `PLATFORM_DATABASE_URL`, `WORKER_DATABASE_URL` and `MIGRATION_DATABASE_URL` to the `_test` name and aborts the whole session unless every URL is a `_test` database on localhost, 127.0.0.1 or a docker service name and `ENVIRONMENT=development`. Tests never run against dev, staging or Supabase.
+
+```bash
+cd backend
+python -m app.scripts.prepare_test_db            # check roles/pgvector, migrate the test DB to head (idempotent)
+python -m app.scripts.prepare_test_db --reset    # drop and recreate the test DB first
+```
+
+> **Warning:** `--reset` drops the test database. pytest stops with a one-line instruction when the test DB is not at the migration head. The Playwright e2e suite and manual use keep the dev database (`ragplatform`); only pytest uses the test database. CI already uses `ragplatform_test`, which the guard accepts.
+
 Run backend test suite:
 ```bash
 # Run Phase 2 & RBAC security test suite:

@@ -12,6 +12,7 @@ Multi-tenant white-label academic platform (named "RAG" but no RAG/vector code e
 - Every tenant table: `tenant_id`, RLS ENABLE+FORCE, composite FKs, covered by the isolation tests.
 - Default-deny permissions; same generic 404 for "not found" and "not yours".
 - Never read or print `.env` files, secrets or real credentials.
+- Never run tests, prove-it checks or migration experiments against the dev database (`ragplatform`). pytest uses `ragplatform_test` only (guard in `tests/conftest.py`; set up with `python -m app.scripts.prepare_test_db`). Prove-it checks run only in the test DB.
 - Work in small steps: plan first, then code, then tests. Run `pytest -q`, `ruff check .`, `mypy app` before reporting.
 - Every fix gets a regression test. Do not weaken or skip tests.
 - Keep code comments plain English. Keep output short: summaries, not full file dumps.
