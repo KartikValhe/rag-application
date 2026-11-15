@@ -865,6 +865,7 @@ async def test_guard_detects_an_unregistered_tenant_table() -> None:
 _ISOLATION_PREDICATE = (
     "(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
 )
+_TENANT_ID_PREDICATE = "(id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
 _JOB_ACTIVE = "((status)::text = ANY ((ARRAY['queued'::character varying, 'running'::character varying])::text[]))"
 _JOB_ANY_NEXT = (
     "((status)::text = ANY ((ARRAY['queued'::character varying, 'running'::character varying, "
@@ -893,6 +894,21 @@ EXPECTED_POLICIES_BY_TABLE: dict[str, frozenset[PolicyRow]] = {
                 _ISOLATION_PREDICATE, _ISOLATION_PREDICATE,
             ),
             ("platform_read_invitations", "SELECT", "PERMISSIVE", ("app_platform",), "true", None),
+        }
+    ),
+    # app.tenants has no tenant_id column (its own id is the key). One policy set per role:
+    # app_tenant gets a SELECT and an UPDATE policy for its own row (and NO insert or delete
+    # policy), app_platform sees and writes every row, app_worker only reads (column grant: id).
+    # Migration 0010. The column grants are checked in test_tenants_column_privileges_inventory.
+    "tenants": frozenset(
+        {
+            ("tenant_self_select", "SELECT", "PERMISSIVE", ("app_tenant",), _TENANT_ID_PREDICATE, None),
+            (
+                "tenant_self_update", "UPDATE", "PERMISSIVE", ("app_tenant",),
+                _TENANT_ID_PREDICATE, _TENANT_ID_PREDICATE,
+            ),
+            ("platform_all", "ALL", "PERMISSIVE", ("app_platform",), "true", "true"),
+            ("worker_select", "SELECT", "PERMISSIVE", ("app_worker",), "true", None),
         }
     ),
     # The API role sees its own tenant only. The worker gets one policy per command: it reads
@@ -929,19 +945,29 @@ def find_policy_deviations(
     return problems
 
 
+# Tables that need RLS although they have no tenant_id column (their own id is the tenant key).
+# They are checked BY NAME in the catalog guard; their behaviour is tested in test_tenants_rls.py.
+RLS_TABLES_WITHOUT_TENANT_ID = ("tenants",)
+
+
 async def _catalog_tenant_tables(raw_db: AsyncSession) -> list[tuple[str, bool, bool]]:
-    """(table, RLS enabled, RLS forced) for every table in schema app that has a tenant_id column."""
+    """
+    (table, RLS enabled, RLS forced) for every table in schema app that has a tenant_id column,
+    plus the tables named in RLS_TABLES_WITHOUT_TENANT_ID.
+    """
     rows = (
         await raw_db.execute(
             text("""
                 SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p')
-                  AND EXISTS (SELECT 1 FROM pg_attribute a
-                              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
-                                AND a.attnum > 0 AND NOT a.attisdropped)
+                  AND (c.relname = ANY(:named)
+                       OR EXISTS (SELECT 1 FROM pg_attribute a
+                                  WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+                                    AND a.attnum > 0 AND NOT a.attisdropped))
                 ORDER BY c.relname
-            """)
+            """),
+            {"named": list(RLS_TABLES_WITHOUT_TENANT_ID)},
         )
     ).all()
     return [(r[0], r[1], r[2]) for r in rows]
@@ -974,11 +1000,14 @@ async def test_every_tenant_table_has_forced_rls_and_exactly_the_expected_polici
     """
     catalog = await _catalog_tenant_tables(raw_db)
     names = [c[0] for c in catalog]
-    covered = {m.__tablename__ for m, _ in TENANT_TABLES} | set(CUSTOM_COVERAGE)
+    covered = (
+        {m.__tablename__ for m, _ in TENANT_TABLES} | set(CUSTOM_COVERAGE) | set(RLS_TABLES_WITHOUT_TENANT_ID)
+    )
     assert not set(names) - covered, (
         f"tenant tables in the database without isolation coverage: {sorted(set(names) - covered)}"
     )
     assert set(_orm_tenant_table_names()) <= set(names), "a mapped tenant table is missing in the database"
+    assert set(RLS_TABLES_WITHOUT_TENANT_ID) <= set(names), "a table that must have RLS is missing in the database"
 
     no_rls = [c[0] for c in catalog if not (c[1] and c[2])]
     assert not no_rls, f"RLS not enabled and forced on: {no_rls}"
@@ -1015,6 +1044,74 @@ async def test_policy_inventory_check_flags_an_extra_permissive_policy() -> None
         }
     }
     assert find_policy_deviations(wrong_role, ["ingest_jobs"], EXPECTED_POLICIES_BY_TABLE, STANDARD_POLICIES)
+
+
+async def test_tenants_policies_are_exactly_one_set_per_role(raw_db: AsyncSession) -> None:
+    """
+    app.tenants: per role exactly the expected policies. app_tenant has a SELECT and an UPDATE
+    policy only (no INSERT, DELETE or ALL policy), app_platform one ALL policy, app_worker one
+    SELECT policy, and no policy applies to PUBLIC or to any other role.
+    """
+    found = (await _catalog_policies(raw_db)).get("tenants", set())
+    by_role: dict[str, set[str]] = {}
+    for name, cmd, _perm, roles, _qual, _check in found:
+        for role in roles:
+            by_role.setdefault(role, set()).add(f"{name}:{cmd}")
+    assert by_role == {
+        "app_tenant": {"tenant_self_select:SELECT", "tenant_self_update:UPDATE"},
+        "app_platform": {"platform_all:ALL"},
+        "app_worker": {"worker_select:SELECT"},
+    }
+
+
+def _tenants_column_privilege_inventory() -> set[tuple[str, str, str]]:
+    """(role, privilege, column) that migration 0010 leaves on app.tenants (besides the owner)."""
+    columns = {c.name for c in Tenant.__table__.columns}
+    assert {"id", "slug", "status", "timezone", "name", "doc_limits", "db_dsn"} <= columns
+    inventory: set[tuple[str, str, str]] = set()
+    inventory |= {("app_tenant", "SELECT", c) for c in ("id", "slug", "status", "timezone")}
+    inventory |= {("app_tenant", "UPDATE", "timezone")}
+    inventory |= {("app_worker", "SELECT", "id")}
+    inventory |= {("app_platform", "SELECT", c) for c in columns}
+    inventory |= {("app_platform", "INSERT", c) for c in columns - {"id"}}
+    inventory |= {("app_platform", "UPDATE", c) for c in columns - {"id", "slug", "created_at"}}
+    return inventory
+
+
+async def test_tenants_column_privileges_inventory(raw_db: AsyncSession) -> None:
+    """
+    EXACT privileges on app.tenants for every role except the owner: no more and no less. The
+    column view includes what table-level grants expand to, so a regrant of table-wide SELECT to
+    app_tenant (which would expose db_dsn and doc_limits) shows up as extra columns here.
+    """
+    rows = (
+        await raw_db.execute(
+            text("""
+                SELECT grantee, privilege_type, column_name
+                FROM information_schema.column_privileges
+                WHERE table_schema = 'app' AND table_name = 'tenants'
+                  AND grantee <> (SELECT pg_get_userbyid(relowner) FROM pg_class
+                                  WHERE oid = 'app.tenants'::regclass)
+            """)
+        )
+    ).all()
+    actual = {(r[0], r[1], r[2]) for r in rows}
+    expected = _tenants_column_privilege_inventory()
+    assert actual == expected, (
+        f"unexpected: {sorted(actual - expected)}; missing: {sorted(expected - actual)}"
+    )
+
+    # Table-level grants (not column-level): only app_platform keeps a table-wide SELECT.
+    table_level = (
+        await raw_db.execute(
+            text("""
+                SELECT pg_get_userbyid(a.grantee), a.privilege_type
+                FROM pg_class c, LATERAL aclexplode(c.relacl) a
+                WHERE c.oid = 'app.tenants'::regclass AND a.grantee <> c.relowner
+            """)
+        )
+    ).all()
+    assert {(r[0], r[1]) for r in table_level} == {("app_platform", "SELECT")}
 
 
 async def test_application_roles_cannot_bypass_rls(raw_db: AsyncSession) -> None:

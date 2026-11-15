@@ -252,6 +252,7 @@ export const WeeklyTimetableGrid: React.FC<WeeklyTimetableGridProps> = ({
             return (
               <div
                 key={day.index}
+                data-testid={`day-column-${day.index}`}
                 className={`flex flex-col rounded-lg border bg-surface transition-colors ${
                   isToday ? "border-primary/60 shadow-sm" : "border-border"
                 }`}

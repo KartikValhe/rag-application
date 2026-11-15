@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import set_request_context
 from app.core.security import JWTError, decode_access_token, decode_platform_token
 from app.core.tenant_db import get_platform_session, tenant_session_context
-from app.db.engine import SessionLocal
 from app.db.models.tenant import PlatformAdmin, Tenant
 from app.db.models.user import User
 
@@ -86,13 +85,16 @@ async def _resolve_tenant_from_jwt(
             detail={"code": "invalid_token", "message": "Invalid tenant_id."},
         ) from None
 
-    # Validate tenant exists and is active on every authenticated request
+    # Validate tenant exists and is active on every authenticated request.
+    # This runs as app_tenant inside the tenant context of the signed JWT, so the tenants row is
+    # only visible when it is the token's own tenant (RLS on app.tenants). Only the columns
+    # app_tenant may read (slug, status) are selected. A missing or hidden row fails closed.
     host_slug: str | None = getattr(request.state, "tenant_slug", None)
-    async with SessionLocal() as db, db.begin():
+    async with tenant_session_context(tenant_id) as db:
         result = await db.execute(
-            select(Tenant).where(Tenant.id == tenant_uuid)
+            select(Tenant.slug, Tenant.status).where(Tenant.id == tenant_uuid)
         )
-        tenant = result.scalar_one_or_none()
+        tenant = result.one_or_none()
         if tenant is None or tenant.status != "active":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

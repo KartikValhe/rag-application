@@ -67,7 +67,7 @@ test("teacher drafts and publishes an entry, student sees it and the Next lectur
   await dialog.getByLabel(/^Room/).fill(room);
   await dialog.getByRole("button", { name: "Add to Timetable" }).click();
   await expect(dialog).toBeHidden();
-  await expect(t.getByText(room).first()).toBeVisible();
+  await expect(t.getByTestId(`day-column-${day}`).getByText(room)).toBeVisible();
   await expect(t.getByText("Draft In Progress")).toBeVisible();
 
   // The draft stays invisible to the student.
@@ -92,7 +92,7 @@ test("teacher drafts and publishes an entry, student sees it and the Next lectur
   await expect(s.getByText("Next Lecture")).toBeVisible();
   await expect(s.getByText(/Next Up|Happening Now/).first()).toBeVisible();
   await openViaSidebar(s, "/student/schedule");
-  await expect(s.getByText(room).first()).toBeVisible();
+  await expect(s.getByTestId(`day-column-${day}`).getByText(room)).toBeVisible();
 
   expect(tErrors.pageErrors).toEqual([]);
   expect(tErrors.consoleErrors).toEqual([]);
@@ -134,7 +134,8 @@ test("teacher publish: no conflicts publishes directly; a double-booking shows t
     await dialog.getByLabel(/^Room/).fill(room);
     await dialog.getByRole("button", { name: "Add to Timetable" }).click();
     await expect(dialog).toBeHidden();
-    await expect(page.getByText(room).first()).toBeVisible();
+    // Scope to the desktop grid column of that weekday: the mobile day-list is also in the DOM (hidden at this width).
+    await expect(page.getByTestId(`day-column-${day}`).getByText(room)).toBeVisible();
   };
 
   // 1. No conflicts (Saturday; the seed only uses Monday to Friday): publishes straight away.
@@ -166,7 +167,7 @@ test("teacher publish: no conflicts publishes directly; a double-booking shows t
   // Edit again: cloning the published timetable creates the draft with its lecture.
   await page.getByRole("button", { name: "Start editing" }).click();
   await expect(page.getByText("Draft In Progress")).toBeVisible();
-  await expect(page.getByText(`R-A-${tag}`).first()).toBeVisible();
+  await expect(page.getByTestId("day-column-5").getByText(`R-A-${tag}`)).toBeVisible();
 
   // The draft gets Sunday 11:00-12:00 with the same teacher.
   await addLecture("6", "11:00", "12:00", `R-A2-${tag}`);

@@ -2,7 +2,9 @@
 app/api/v1/platform.py
 ──────────────────────
 Superadmin (platform) routes.  All routes here are gated behind a platform JWT
-and use the platform DB session (no tenant_id set, no RLS on tenants table).
+and use the platform DB session (app_platform, no tenant_id set). The tenants table has RLS
+(migration 0010) with a policy that lets app_platform see and write every row; column grants
+stop it from changing a tenant's id or slug or inserting an explicit id.
 
 Routes:
   POST   /platform/auth/login

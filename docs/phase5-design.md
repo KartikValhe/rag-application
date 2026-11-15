@@ -137,7 +137,9 @@ Sources:
 
 The pypdfium2 and tokenizers wheels are `py3-none` / `abi3`, so they cover Python 3.12. Versions are for reference; pin them in 5a-2 and run `pip-audit`.
 
-**c. `app.tenants` RLS.** Migration `0001_initial.py` creates `tenants` marked "platform-level, NO RLS", grants `SELECT, INSERT, UPDATE` to `app_platform` and `SELECT` to `app_tenant`; `0006` adds `GRANT UPDATE (timezone)` to `app_tenant`. No migration enables RLS on it (a grep for `ROW LEVEL` finds nothing for `tenants`). Consequence for `app_worker`: `GRANT SELECT (id) ON app.tenants` returns every tenant id with no row filter, which the sweeper needs anyway, and the column grant keeps `db_dsn` and the other columns hidden from the worker. Side finding: `app_tenant` has table-wide `SELECT` on `tenants`, including `db_dsn` (backlog B14).
+**c. `app.tenants` RLS.** Migration `0001_initial.py` creates `tenants` marked "platform-level, NO RLS", grants `SELECT, INSERT, UPDATE` to `app_platform` and `SELECT` to `app_tenant`; `0006` adds `GRANT UPDATE (timezone)` to `app_tenant`. No migration enables RLS on it (a grep for `ROW LEVEL` finds nothing for `tenants`). Consequence for `app_worker`: `GRANT SELECT (id) ON app.tenants` returns every tenant id with no row filter, which the sweeper needs anyway, and the column grant keeps `db_dsn` and the other columns hidden from the worker. Side finding: `app_tenant` had table-wide `SELECT` on `tenants`, including `db_dsn` (backlog B14).
+
+**Resolved by migration `0010_tenants_rls.py` (2026-11-15).** `tenants` now has `ENABLE` + `FORCE ROW LEVEL SECURITY`, so the "no RLS" statements above and in A3 describe the state before 0010. Policies, one set per role: `app_tenant` gets `tenant_self_select` (`SELECT`) and `tenant_self_update` (`UPDATE`), both `id = app.tenant_id`, and no `INSERT` or `DELETE` policy; `app_platform` gets `platform_all` (`ALL`, `USING true`); `app_worker` gets `worker_select` (`SELECT`, `USING true`). Column grants: `app_tenant` `SELECT (id, slug, status, timezone)` and `UPDATE (timezone)` (no `name`, no table-wide `SELECT`); `app_platform` table-wide `SELECT`, `INSERT` on every column except `id`, `UPDATE` on every column except `id`, `slug` and `created_at`; `app_worker` `SELECT (id)` as before. There is no trigger for `id` and `slug`: column grants only. Reading `db_dsn`, `doc_limits`, `name`, `registration_mode` or `SELECT *` as `app_tenant` fails with `42501`. Public pre-auth lookups (login, refresh, register, forgot password, public branding) and the registration-mode routes stay on the platform pool; the per-request tenant check in `api/deps.py` now runs as `app_tenant` inside the JWT's tenant context and selects only `slug` and `status`. `tests/test_tenants_rls.py` and the inventory tests in `tests/test_isolation.py` cover all of it; the migration needs a superuser or `BYPASSRLS` role (same check as 0009) and has a downgrade that restores the 0009 grants exactly (proven on the test database).
 
 **d. pgvector versions.** Local: 0.8.7 (from the image tag; confirm with `\dx vector` after the recreate). Supabase: still **UNVERIFIED**, because the Supabase docs do not state a version [P2]. Run this in the SQL editor of staging (or any non-production project) and send me the output:
 ```sql
@@ -272,6 +274,8 @@ ingest_jobs (                               -- the queue (see A3)
 tenants.doc_limits jsonb NOT NULL DEFAULT '{}'   -- per-tenant overrides, same pattern as tenants.timezone (0005)
 ```
 
+**Access note (0010).** `app_tenant` has **no** grant on `tenants.doc_limits` today: it can read only `id`, `slug`, `status` and `timezone`. Step 5b adds `GRANT SELECT (doc_limits) ON app.tenants TO app_tenant` in its own migration, together with the first code that reads it, and extends the tenants column-privilege inventory test in the same change. Until then the limits are read through the platform session.
+
 **Per-tenant limits** (`tenants.doc_limits`, read through the tenant's own row, written only by the superadmin endpoint `PATCH /api/v1/platform/tenants/{tenant_id}/limits`, audited, validated against hard platform ceilings). Pilot defaults:
 
 | Key | Default | Env default / ceiling |
@@ -344,7 +348,7 @@ queued -> processing -> ready -> published -> archived
 
   An expired `running` lease is claimable directly, which is how a killed worker's job recovers.
 - **How this interacts with RLS** (two roles, two kinds of session):
-  - `app_worker` (`LOGIN NOSUPERUSER NOBYPASSRLS`) has column-level grants on `app.ingest_jobs` only (`SELECT`; `UPDATE (status, attempts, run_after, lease_expires_at, worker_id, last_error_code, updated_at)`; `DELETE`, narrowed to finished jobs by the RLS policy below) and `SELECT (id)` on `app.tenants` for the sweeper (`tenants` has **no RLS**, verified 2026-11-15, see 0d). It has **no grant at all** on documents, chunks, users or any other tenant table.
+  - `app_worker` (`LOGIN NOSUPERUSER NOBYPASSRLS`) has column-level grants on `app.ingest_jobs` only (`SELECT`; `UPDATE (status, attempts, run_after, lease_expires_at, worker_id, last_error_code, updated_at)`; `DELETE`, narrowed to finished jobs by the RLS policy below) and `SELECT (id)` on `app.tenants` for the sweeper. Since migration 0010 `tenants` has RLS: the worker's `worker_select` policy (`FOR SELECT TO app_worker USING (true)`) makes every row visible to it, and the column grant still limits what it can read to `id` (see 0c). It has **no grant at all** on documents, chunks, users or any other tenant table.
   - `ingest_jobs` has `ENABLE` + `FORCE ROW LEVEL SECURITY` with exactly four policies (0009 replaced the single `FOR ALL` worker policy):
     - `tenant_isolation`, `TO app_tenant` only (so the API inserts and retries jobs only for its own tenant, and the worker cannot gain access by setting `app.tenant_id` itself);
     - `worker_select`, `FOR SELECT TO app_worker USING (true)`: the worker sees job metadata across tenants (ids, status, timestamps) and nothing else;
@@ -406,7 +410,7 @@ queued -> processing -> ready -> published -> archived
   - re-creates a missing job row for any `queued` version older than 2 minutes (defensive);
   - drains `storage_deletions` (delete the object, then the row; retry with backoff);
   - purges tombstones after 30 days and finished jobs after 7 days.
-  - It lists tenants through `SELECT (id)` on `app.tenants` and opens one tenant session per tenant for tenant tables.
+  - It lists tenants through `SELECT (id)` on `app.tenants` (the `worker_select` policy shows it all rows; the column grant hides everything but `id`) and opens one tenant session per tenant for tenant tables.
 
 **User-facing messages.** Every error is `{"detail":{"code","message"}}` with a fixed message per code and no file names, paths or library text, as in Phase 4. The codes are:
 
@@ -713,6 +717,8 @@ class Guardrail(Protocol):
 - **CHECKs:** `chunks.script` (from `CHUNK_SCRIPTS`) and `status = 'published'` implies `published_at IS NOT NULL` (existing rows are fixed first).
 - **Migration safety:** 0009 asserts `rolsuper OR rolbypassrls` first. The 0008 downgrade now revokes the `USAGE` grant on the extension schema (unless that schema is `app`, whose grant comes from `init.sql`) and drops tables without `CASCADE`.
 - **Tests:** the generic UPDATE and DELETE isolation tests now update a non-key column, require 0 affected rows (no error is accepted) and compare tenant B's rows through an owner connection; the policy test discovers tables from the catalog and compares policy names, commands, roles and predicate text exactly. Known deliberate exception: `platform_read_invitations` (0001).
+
+**0010 record (2026-11-15; `tenants` RLS, backlog B14).** Migration `0010_tenants_rls.py`: policies and column grants as described in 0c. Code and test changes: `api/deps.py` runs the per-request tenant check in the JWT's tenant context and selects `slug, status` only (a missing or hidden row is 403 `tenant_inactive`, never a pass); `services/schedule.get_tenant_timezone` raises `TenantRowNotVisibleError` instead of falling back to `Asia/Kolkata`; the admin timezone GET no longer falls back either; `PATCH /admin/settings/registration-mode` now writes an audit entry `tenant:update_registration_mode` (`previous_mode`, `new_mode`) through the tenant session while the update itself stays on the platform pool. New `tests/test_tenants_rls.py`; the catalog guard in `test_isolation.py` also checks `tenants` by name, with an exact per-role policy inventory and an exact column-privilege inventory.
 
 ### C2. Test plan
 

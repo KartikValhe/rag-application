@@ -268,12 +268,33 @@ async def get_registration_mode(
 async def set_registration_mode(
     body: RegistrationModeUpdateRequest,
     admin: AdminUser,
+    request: Request,
+    db: TenantDB,
     platform_db: AsyncSession = Depends(get_platform_session),
 ) -> RegistrationModeResponse:
+    """
+    Change how people can register. The tenants row is still written on the platform pool
+    (app_platform); the audit entry goes through the tenant session, which is the only one
+    allowed to write the tenant's audit log. The audit write comes after the update, so a failed
+    audit write raises and both sessions roll back (the two commits are separate, see backlog).
+    """
+    old_mode = (
+        await platform_db.execute(select(Tenant.registration_mode).where(Tenant.id == admin.tenant_id))
+    ).scalar_one()
     await platform_db.execute(
         update(Tenant)
         .where(Tenant.id == admin.tenant_id)
         .values(registration_mode=body.registration_mode)
+    )
+    await record_audit_event(
+        tenant_id=admin.tenant_id,
+        action="tenant:update_registration_mode",
+        target_type="tenant",
+        target_id=str(admin.tenant_id),
+        details={"previous_mode": old_mode, "new_mode": body.registration_mode},
+        actor_id=admin.id,
+        request=request,
+        db=db,
     )
     return RegistrationModeResponse(registration_mode=body.registration_mode)
 
@@ -284,9 +305,9 @@ async def get_tenant_timezone_setting(
     db: TenantDB,
 ) -> TimezoneResponse:
     """Get the configured timezone for this tenant."""
+    # scalar_one(): the caller's own row must be visible; no silent default timezone.
     result = await db.execute(select(Tenant.timezone).where(Tenant.id == admin.tenant_id))
-    tz = result.scalar_one_or_none() or "Asia/Kolkata"
-    return TimezoneResponse(timezone=tz)
+    return TimezoneResponse(timezone=result.scalar_one())
 
 
 @router.patch("/settings/timezone", response_model=TimezoneResponse)

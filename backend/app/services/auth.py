@@ -129,7 +129,9 @@ async def get_tenant_by_slug(slug: str, db: AsyncSession) -> Tenant:
     """
     Fetch a tenant by slug using the platform session.
     Raises 404 if not found or not active.
-    Note: this uses the platform (no-RLS) session so it can read the tenants table.
+    Note: this must use the platform session (app_platform). Before a user is authenticated there
+    is no tenant context, so the tenants RLS would hide every row from app_tenant. It reads the
+    full row, including registration_mode and name, which app_tenant cannot read.
     """
     result = await db.execute(select(Tenant).where(Tenant.slug == slug))
     tenant = result.scalar_one_or_none()

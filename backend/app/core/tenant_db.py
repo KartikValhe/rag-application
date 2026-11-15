@@ -72,7 +72,13 @@ async def get_platform_session() -> AsyncGenerator[AsyncSession, None]:
     Connects with the app_platform DB role.
     No tenant_id is set; RLS policies on tenant-scoped tables will
     return zero rows because current_setting('app.tenant_id', true) is NULL.
-    Platform routes only touch platform-level tables (tenants, platform_admins).
+    Platform routes only touch platform-level tables (tenants, platform_admins). The tenants table
+    has RLS too, but its platform_all policy shows app_platform every row; column grants stop it
+    from changing id or slug (migration 0010).
+
+    The public pre-auth lookups (login, refresh, register, forgot password, public branding)
+    also use this session to find a tenant by slug or id, because no tenant context exists yet.
+    A narrower SECURITY DEFINER lookup is a backlog item.
     """
     async with PlatformSessionLocal() as session, session.begin():
         yield session

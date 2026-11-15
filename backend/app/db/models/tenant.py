@@ -3,8 +3,19 @@ app/db/models/tenant.py
 ───────────────────────
 Platform-level tables: tenants and platform_admins.
 
-These tables are NOT tenant-scoped (no `tenant_id`, no RLS).
-Only the `app_platform` DB role may read/write them.
+These tables have no `tenant_id` column. Access differs per table:
+
+  platform_admins  no RLS. Only the `app_platform` DB role may read or write it.
+  tenants          RLS enabled and forced (migration 0010), plus column grants:
+      app_tenant    its own row only (id = app.tenant_id). Reads id, slug, status, timezone and
+                    updates timezone. Everything else (name, kind, registration_mode, db_dsn,
+                    doc_limits, created_at) is unreadable and raises "permission denied", and it
+                    can neither insert nor delete tenants.
+      app_platform  every row. Updates name, kind, registration_mode, status, db_dsn, timezone and
+                    doc_limits; never id or slug, and never inserts an explicit id.
+      app_worker    every row, id column only (the sweeper lists tenants).
+  So code running as app_tenant must select only (slug, status, timezone) columns, never the whole
+  Tenant entity; code that needs the other columns uses the platform session.
 """
 
 import uuid
@@ -25,7 +36,7 @@ class Tenant(Base):
     slug      — becomes the subdomain ({slug}.platform.com) and must be
                 URL-safe (lowercase, hyphens only).
     kind      — purely informational; used to customise UI copy.
-    db_dsn    — NULL = shared database (this Postgres instance).
+    db_dsn    — NULL = shared database (this Postgres instance). Never readable by app_tenant.
                 Set to a separate DSN to move a large tenant to its own DB
                 without any application code change (Phase 10 escape hatch).
     """

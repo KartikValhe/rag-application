@@ -5,7 +5,7 @@ Phase 4 Deterministic Schedule Lookup & Conflict Detection Service.
 
 Pure functions over database rows. Zero LLM calls, zero network calls.
 The clock is injectable (via `now: datetime | None = None`) to guarantee deterministic testing.
-Tenant timezone is strictly respected (defaults to 'Asia/Kolkata').
+Tenant timezone is strictly respected (a tenant row that is not visible raises; no silent default).
 Role authorization scope is enforced inside the service before results are assembled:
   - Student: only classes they are currently enrolled in.
   - Teacher: own lectures across all classes + classes they are assigned to.
@@ -61,11 +61,26 @@ def _times_overlap(s1: time, e1: time, s2: time, e2: time) -> bool:
     return s1 < e2 and s2 < e1
 
 
+class TenantRowNotVisibleError(RuntimeError):
+    """The tenants row is not visible to this session (wrong tenant context, or no such tenant)."""
+
+
 async def get_tenant_timezone(db: AsyncSession, tenant_id: uuid.UUID) -> str:
-    """Retrieve the configured timezone string for a tenant."""
+    """
+    Retrieve the configured timezone string for a tenant.
+
+    The tenants table has row level security: a tenant session sees only its own row. If the row
+    is not visible (the session belongs to another tenant, or the tenant does not exist) this
+    raises instead of guessing a timezone, because a silent default would give wrong lecture
+    times without any sign that something is broken.
+    """
     res = await db.execute(select(Tenant.timezone).where(Tenant.id == tenant_id))
     tz_val = res.scalar_one_or_none()
-    return tz_val or "Asia/Kolkata"
+    if tz_val is None:
+        raise TenantRowNotVisibleError(
+            f"tenant {tenant_id} is not visible in this session; cannot resolve its timezone"
+        )
+    return tz_val
 
 
 async def get_user_role_names(db: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID) -> set[str]:
