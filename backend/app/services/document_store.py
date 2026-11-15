@@ -19,10 +19,19 @@ Later the local backend is replaced by Supabase Storage (a private `documents` b
 service key) behind the same `PrivateObjectStore` interface: the key format, the tenant check and
 the "no URL" rule stay, only the I/O inside the class changes. The storage outbox
 (`storage_deletions`) already assumes object deletes are idempotent, as `delete` is here.
+
+Writes are atomic: the bytes go to a temp file in the SAME directory (created with O_CREAT|O_EXCL,
+mode 0600), are fsynced, and only then renamed onto the key with os.replace. A reader therefore sees
+the whole object or no object, and any failure (disk full, interrupt) removes the temp file.
+Directories are created with mode 0700. File modes are a POSIX feature: on Windows (development
+only) os.mkdir and os.open ignore them, so there they are best effort and the real protection is the
+user profile's ACL.
 """
 
 import asyncio
 import contextlib
+import errno
+import os
 import re
 import secrets
 import uuid
@@ -68,6 +77,17 @@ def new_document_key(tenant_id: uuid.UUID) -> str:
     return f"t/{tenant_id}/d/{secrets.token_hex(16)}"
 
 
+_DOCUMENT_KEY_PREFIX_RE = re.compile(r"^t/[0-9a-fA-F-]{36}/d/")
+
+
+def is_document_key(key: str) -> bool:
+    """
+    True when `key` looks like a document-store key (t/{tenant}/d/...), however it is spelled
+    (backslashes, a leading slash). Public stores use it to refuse to build a URL for one.
+    """
+    return _DOCUMENT_KEY_PREFIX_RE.match(key.replace("\\", "/").lstrip("/")) is not None
+
+
 def _check_shape(key: str) -> None:
     if not isinstance(key, str) or _KEY_RE.fullmatch(key) is None:
         raise InvalidStorageKey()
@@ -82,6 +102,10 @@ def _check_tenant_prefix(tenant_id: uuid.UUID, key: str) -> None:
 def validate_key(tenant_id: uuid.UUID, key: str) -> None:
     _check_shape(key)
     _check_tenant_prefix(tenant_id, key)
+
+
+def _open_for_read(path: Path) -> BinaryIO:
+    return open(path, "rb")
 
 
 class LocalPrivateStore:
@@ -103,11 +127,59 @@ class LocalPrivateStore:
         return key
 
     @staticmethod
+    def _ensure_private_dirs(directory: Path) -> None:
+        """Create every missing directory down to `directory` with mode 0700 (mkdir(parents=True) only applies the mode to the last one)."""
+        missing: list[Path] = []
+        current = directory
+        while not current.exists():
+            missing.append(current)
+            current = current.parent
+        for path in reversed(missing):
+            with contextlib.suppress(FileExistsError):  # a concurrent writer created it first
+                os.mkdir(path, 0o700)
+
+    @staticmethod
     def _write_new(target: Path, data: bytes) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # "xb": a key is written once; a collision of two random keys must fail, not overwrite
-        with open(target, "xb") as fh:
-            fh.write(data)
+        """
+        Write `data` to a temp file next to `target`, fsync it, then rename it onto `target`.
+        Never overwrites: an existing object raises FileExistsError (keys are 128 random bits, so a
+        collision between the check and the rename is not a practical concern). On ANY failure,
+        including KeyboardInterrupt, the temp file is removed and `target` does not exist.
+        """
+        LocalPrivateStore._ensure_private_dirs(target.parent)
+        if target.exists():
+            raise FileExistsError(errno.EEXIST, "object already exists")
+        temp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(temp, flags, 0o600)
+        try:
+            try:
+                fh = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+            raise
+        LocalPrivateStore._sync_directory(target.parent)
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        """Make the rename durable. POSIX only; best effort (Windows cannot open a directory like this)."""
+        if os.name != "posix":
+            return
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
 
     async def get(self, tenant_id: uuid.UUID, key: str) -> bytes | None:
         target = self._path(tenant_id, key)
@@ -126,19 +198,23 @@ class LocalPrivateStore:
         self, tenant_id: uuid.UUID, key: str, chunk_size: int = DEFAULT_CHUNK_SIZE
     ) -> AsyncIterator[bytes]:
         """
-        Open the object and return an async iterator over its chunks. A missing object raises
-        ObjectNotFound HERE (before any response header is sent), not while iterating.
-        The file is closed when the iterator finishes or is closed.
+        Return an async iterator over the object's chunks. A missing object raises ObjectNotFound
+        HERE (before any response header is sent), not while iterating. Only the existence is
+        checked here: the file is opened INSIDE the iterator when iteration starts and closed in its
+        `finally`, so an iterator that is dropped before it ever starts holds no file handle.
         """
         target = self._path(tenant_id, key)
-        try:
-            fh = await asyncio.to_thread(open, target, "rb")
-        except (FileNotFoundError, IsADirectoryError):
-            raise ObjectNotFound() from None
-        return self._iterate(fh, chunk_size)
+        if not await asyncio.to_thread(target.is_file):
+            raise ObjectNotFound()
+        return self._iterate(target, chunk_size)
 
     @staticmethod
-    async def _iterate(fh: BinaryIO, chunk_size: int) -> AsyncIterator[bytes]:
+    async def _iterate(target: Path, chunk_size: int) -> AsyncIterator[bytes]:
+        try:
+            fh = await asyncio.to_thread(_open_for_read, target)
+        except (FileNotFoundError, IsADirectoryError):
+            # Deleted between the existence check and the first read
+            raise ObjectNotFound() from None
         try:
             while True:
                 chunk = await asyncio.to_thread(fh.read, chunk_size)

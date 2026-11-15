@@ -313,8 +313,14 @@ def test_pptx_xxe_in_main_part_and_in_other_ppt_parts() -> None:
 
 
 def test_pptx_slide_cap_is_a_parameter() -> None:
+    # Slides are the p:sldId entries of ppt/presentation.xml (review of 5a-3, finding 6)
     def deck(n: int) -> bytes:
-        return good_pptx({f"ppt/slides/slide{i}.xml": EMPTY_XML for i in range(1, n + 1)})
+        ids = "".join(f'<p:sldId id="{256 + i}" r:id="rId{i}"/>' for i in range(n))
+        presentation = (
+            '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            f'xmlns:r="{OD}"><p:sldIdLst>{ids}</p:sldIdLst></p:presentation>'
+        ).encode()
+        return make_zip({CT: CT_XML, "ppt/presentation.xml": presentation})
 
     assert validate_upload(deck(100), "a.pptx", DOC) == "pptx"
     assert reject(deck(101), "a.pptx") == "too_many_slides"

@@ -5,6 +5,7 @@ Each test runs against Redis (test DB 1) and against the development in-memory f
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -16,6 +17,7 @@ from app.core import redis_client
 from app.core.config import settings
 from app.core.slots import (
     DEFAULT_UNAVAILABLE_MESSAGE,
+    SlotBackendUnavailable,
     SlotLease,
     SlotLimit,
     SlotManager,
@@ -159,25 +161,21 @@ async def test_default_unavailable_message_is_generic(redis_down_in_production: 
     m = SlotManager()
     with pytest.raises(HTTPException) as e1:
         await m.acquire([lim(new_key())])
-    with pytest.raises(HTTPException) as e2:
-        await m.renew(SlotLease(token="t", keys=(new_key(),)), 5.0)
     with pytest.raises(HTTPException) as e3:
         await m.count(new_key())
-    for exc in (e1, e2, e3):
+    for exc in (e1, e3):
         assert _message(exc) == DEFAULT_UNAVAILABLE_MESSAGE
         assert "imetable" not in _message(exc)
 
 
-async def test_caller_supplied_message_is_used_by_every_call(redis_down_in_production: None) -> None:
+async def test_caller_supplied_message_is_used_by_the_request_path_calls(redis_down_in_production: None) -> None:
     m = SlotManager()
     msg = "Document uploads are paused. Try again soon."
     with pytest.raises(HTTPException) as e1:
         await m.acquire([lim(new_key())], unavailable_message=msg)
-    with pytest.raises(HTTPException) as e2:
-        await m.renew(SlotLease(token="t", keys=(new_key(),)), 5.0, unavailable_message=msg)
     with pytest.raises(HTTPException) as e3:
         await m.count(new_key(), unavailable_message=msg)
-    assert [_message(e) for e in (e1, e2, e3)] == [msg, msg, msg]
+    assert [_message(e) for e in (e1, e3)] == [msg, msg]
 
 
 async def test_timetable_messages_are_unchanged(redis_down_in_production: None) -> None:
@@ -189,3 +187,95 @@ async def test_timetable_messages_are_unchanged(redis_down_in_production: None) 
         async with tpr.parse_concurrency_guard(uuid.uuid4()):
             pass
     assert _message(e2) == OLD_TIMETABLE_MESSAGE
+
+
+# ─── renew in a worker: a domain exception, never an HTTP error (review of 5a-3, finding 12) ───
+
+async def test_renew_raises_a_domain_exception_when_redis_is_down(redis_down_in_production: None) -> None:
+    m = SlotManager()
+    with pytest.raises(SlotBackendUnavailable) as exc:
+        await m.renew(SlotLease(token="t", keys=(new_key(),)), 5.0)
+    assert not isinstance(exc.value, HTTPException)
+    assert not hasattr(exc.value, "status_code")
+
+
+async def test_renew_with_a_failing_redis_command_raises_the_domain_exception(
+    monkeypatch: pytest.MonkeyPatch, redis_down_in_production: None
+) -> None:
+    class Flaky:
+        async def eval(self, *_: Any, **__: Any) -> Any:
+            raise TimeoutError("slow")
+
+    async def get() -> Any:
+        return Flaky()
+
+    monkeypatch.setattr(redis_client, "get_redis", get)
+    with pytest.raises(SlotBackendUnavailable):
+        await SlotManager().renew(SlotLease(token="t", keys=(new_key(),)), 5.0)
+
+
+async def test_the_request_path_still_gets_http_503(redis_down_in_production: None) -> None:
+    """Only renew became a domain exception: acquire and count keep translating to 503 for requests."""
+    m = SlotManager()
+    with pytest.raises(HTTPException) as e:
+        await m.acquire([lim(new_key())])
+    assert e.value.status_code == 503
+    assert not issubclass(SlotBackendUnavailable, HTTPException)
+
+
+async def test_renew_in_development_still_falls_back_to_memory(mgr: SlotManager) -> None:
+    lease = await mgr.acquire([lim(new_key(), ttl=5.0)])
+    assert await mgr.renew(lease, 5.0) is True
+    await mgr.release(lease)
+
+
+# ─── Maximum total lease lifetime ────────────────────────────────────────────
+
+async def test_a_lease_has_a_start_time() -> None:
+    before = time.monotonic()
+    lease = SlotLease(token="t", keys=("k",))
+    assert before <= lease.started_at <= time.monotonic()
+
+
+async def test_a_heartbeat_cannot_renew_past_the_maximum_lifetime(mgr: SlotManager) -> None:
+    """A hung worker whose heartbeat keeps running: renew must start returning False at the cap."""
+    key = new_key()
+    lease = await mgr.acquire([lim(key, ttl=0.5)])
+    started = time.monotonic()
+    renewals = 0
+    async with asyncio.timeout(8):  # without the cap this loop would never end
+        while await mgr.renew(lease, 0.5, max_total_seconds=1.0):
+            renewals += 1
+            await asyncio.sleep(0.15)
+    elapsed = time.monotonic() - started
+    assert renewals >= 4, renewals
+    assert 0.9 <= elapsed <= 1.6, elapsed
+    # Nothing keeps the slot after the cap: it expires on its own within the last ttl
+    await asyncio.sleep(0.7)
+    assert await mgr.count(key) == 0
+
+
+async def test_the_ttl_is_cut_to_the_time_left_before_the_cap(mgr: SlotManager) -> None:
+    key = new_key()
+    lease = await mgr.acquire([lim(key, ttl=30.0)])
+    assert await mgr.renew(lease, 100.0, max_total_seconds=1.0) is True  # would live 100 s without the cap
+    await asyncio.sleep(1.4)
+    assert await mgr.count(key) == 0, "the lease outlived its maximum lifetime"
+
+
+async def test_renew_without_a_maximum_is_unchanged(mgr: SlotManager) -> None:
+    key = new_key()
+    lease = await mgr.acquire([lim(key, ttl=0.5)])
+    for _ in range(4):
+        assert await mgr.renew(lease, 0.5) is True
+        await asyncio.sleep(0.2)
+    await mgr.release(lease)
+
+
+async def test_a_cap_already_reached_returns_false_and_changes_nothing(mgr: SlotManager) -> None:
+    key = new_key()
+    lease = await mgr.acquire([lim(key, ttl=0.6)])
+    await asyncio.sleep(0.3)
+    assert await mgr.renew(lease, 60.0, max_total_seconds=0.2) is False
+    await asyncio.sleep(0.5)
+    assert await mgr.count(key) == 0  # still expired at its ORIGINAL time, not extended

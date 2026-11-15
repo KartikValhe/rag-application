@@ -17,20 +17,27 @@ Provides:
 - Formula neutralization for export and template generation
 """
 
+import asyncio
 import io
 import logging
 import re
+import unicodedata
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 from urllib.parse import quote
+from xml.sax.handler import ContentHandler, feature_namespaces
 
 import defusedxml.common as defused_common
-import defusedxml.ElementTree as ET
+import defusedxml.sax as defused_sax
 from fastapi import HTTPException, UploadFile, status
 
 logger = logging.getLogger(__name__)
+
+# Called with the (namespace, local name) and the attributes of every element of a streamed XML part
+ElementCallback = Callable[[tuple[str | None, str], Any], None]
 
 MAX_UPLOAD_SIZE = 2 * 1024 * 1024  # 2 MB hard cap for timetable imports
 # Platform ceiling for document uploads. A tenant's own max_file_bytes (default 10 MB, step 5b) can
@@ -62,9 +69,13 @@ OPENXML_MAIN_PARTS = {
     "docx": "word/document.xml",
     "pptx": "ppt/presentation.xml",
 }
-PPTX_SLIDE_RE = re.compile(r"^ppt/slides/slide\d+\.xml$")
+PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+# Deepest element nesting accepted in any package part. Real Office parts nest a few dozen levels;
+# a part that nests deeper is a memory or recursion bomb for whatever reads it later.
+MAX_XML_DEPTH = 256
 
-# PDF best-effort limits (the sandboxed subprocess is the real protection)
+# PDF best-effort limits. This byte scan is only a first filter: it cannot see inside compressed
+# object streams. The real protection arrives with the sandboxed document parser in step 5b.
 MAX_PDF_OBJECTS = 20000
 MAX_PDF_PAGES = 100  # timetable profile
 DOC_MAX_PDF_PAGES = 200  # document profile default; the tenant limit is passed in (step 5b)
@@ -74,10 +85,17 @@ DOC_MAX_PPTX_SLIDES = 100
 PDF_FORBIDDEN_NAMES = ("JavaScript", "JS", "Launch", "EmbeddedFile", "RichMedia", "XFA")
 # A PDF name ends at whitespace or a delimiter, so /JSON must not match /JS
 _PDF_NAME_END = rb"(?![^\s()<>\[\]{}/%])"
+# Every regex here runs over attacker-controlled bytes (up to 50 MB), so each one uses BOUNDED
+# repetition only. An unbounded pattern such as \d+\s+\d+ backtracks quadratically on a long run
+# of digits: 2 MB of digits kept the scan busy for hours. With {m,n} bounds the work per start
+# position is a small constant, so the scan stays linear in the file size. Keep it that way.
 PDF_FORBIDDEN_RE = re.compile(rb"/(?:" + b"|".join(n.encode() for n in PDF_FORBIDDEN_NAMES) + rb")" + _PDF_NAME_END)
 PDF_HEX_ESCAPE_RE = re.compile(rb"#([0-9A-Fa-f]{2})")
-PDF_OBJ_RE = re.compile(rb"\d+\s+\d+\s+obj\b")
-PDF_PAGE_RE = re.compile(rb"/Type\s*/Page" + _PDF_NAME_END)
+# Object number (up to 10 digits), generation (up to 5 digits, max 65535) and a little whitespace.
+# Real writers put one space or newline between the tokens; an object written with more is
+# simply not counted, and the sandboxed parser still enforces its own limits.
+PDF_OBJ_RE = re.compile(rb"[0-9]{1,10}\s{1,10}[0-9]{1,5}\s{1,10}obj\b")
+PDF_PAGE_RE = re.compile(rb"/Type\s{0,32}/Page" + _PDF_NAME_END)
 
 # Control characters to strip from plain text (preserve \t, \n, \r)
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
@@ -337,6 +355,37 @@ def validate_upload(
             ) from err
 
 
+async def validate_upload_async(
+    data: bytes,
+    filename: str,
+    profile: UploadProfile = UploadProfile.TIMETABLE,
+    *,
+    max_file_bytes: int | None = None,
+    max_pdf_pages: int | None = None,
+    max_pptx_slides: int | None = None,
+) -> str:
+    """
+    validate_upload in a worker thread, for every profile. Routes must call this one, never the
+    synchronous function, so that scanning a large file does not stop the event loop from
+    serving other requests.
+
+    Honest limits of this: a Python thread cannot be killed or interrupted. If a validation ever
+    ran for a long time, the thread would keep its CPU core and its slot in the default thread
+    pool busy until it finished, and a regex holds the GIL while it runs. The thread only keeps
+    the loop responsive; the protection against hostile input is that every algorithm in this
+    module is linear in the input size (bounded regexes, capped archive work).
+    """
+    return await asyncio.to_thread(
+        validate_upload,
+        data,
+        filename,
+        profile,
+        max_file_bytes=max_file_bytes,
+        max_pdf_pages=max_pdf_pages,
+        max_pptx_slides=max_pptx_slides,
+    )
+
+
 def sniff_and_validate_file_type(data: bytes, filename: str) -> str:
     """Timetable profile of validate_upload (the name the Phase 4 code and tests use)."""
     return validate_upload(data, filename, UploadProfile.TIMETABLE)
@@ -350,10 +399,44 @@ def _extension_mismatch() -> UploadSecurityError:
     return UploadSecurityError(code="file_type_mismatch", message="The file extension does not match the file content.")
 
 
-def _parse_xml(zf: zipfile.ZipFile, name: str) -> Any:
-    """Parse one package part with defusedxml. Any failure rejects the file (fail closed)."""
+class _PartScanner(ContentHandler):
+    """
+    Streams one XML part through expat. No tree is built, so memory stays small however large or
+    deeply nested the part is. It enforces the nesting cap and hands every element to `on_start`.
+    """
+
+    def __init__(self, on_start: ElementCallback | None) -> None:
+        super().__init__()
+        self._on_start = on_start
+        self._depth = 0
+
+    def startElementNS(self, name: tuple[str | None, str], qname: str | None, attrs: Any) -> None:
+        self._depth += 1
+        if self._depth > MAX_XML_DEPTH:
+            raise UploadSecurityError(
+                code="xml_too_complex", message="The document contains XML that is nested too deeply."
+            )
+        if self._on_start is not None:
+            self._on_start(name, attrs)
+
+    def endElementNS(self, name: tuple[str | None, str], qname: str | None) -> None:
+        self._depth -= 1
+
+
+def _scan_xml(zf: zipfile.ZipFile, info: zipfile.ZipInfo, on_start: ElementCallback | None = None) -> None:
+    """
+    Parse one package part with defusedxml, as a stream. Any failure rejects the file (fail closed).
+    A DOCTYPE, an entity or an external reference is refused by defusedxml; malformed XML, a bad CRC
+    and nesting beyond MAX_XML_DEPTH are refused too.
+    """
+    parser = defused_sax.make_parser()
+    parser.setFeature(feature_namespaces, True)
+    parser.setContentHandler(_PartScanner(on_start))
     try:
-        return ET.fromstring(zf.read(name))
+        with zf.open(info) as member:
+            parser.parse(member)
+    except UploadSecurityError:
+        raise
     except defused_common.DefusedXmlException as err:
         raise UploadSecurityError(
             code="xml_entity_expansion_forbidden",
@@ -380,65 +463,107 @@ def _reject_embedded() -> UploadSecurityError:
     )
 
 
-def _check_members(zf: zipfile.ZipFile, rules: ProfileRules) -> set[str]:
-    """Reject macro parts, embeddings, nested archives and OLE blobs. Returns lower-case part names."""
-    names: set[str] = set()
+def _invalid_entries() -> UploadSecurityError:
+    return UploadSecurityError(code="invalid_openxml_format", message="The archive contains invalid entries.")
+
+
+def _unsafe_member_name(name: str) -> bool:
+    """
+    True for a zip entry name no OpenXML package needs: absolute (/ or \\), any backslash, a '..'
+    segment, a colon (drive letters, alternate data streams), NUL or another control character.
+    The name is the RAW one (ZipInfo.orig_filename): zipfile itself cuts at NUL and, on Windows,
+    turns backslashes into slashes in ZipInfo.filename, which would hide both from this check.
+    """
+    if name.startswith(("/", "\\")) or "\\" in name or ":" in name:
+        return True
+    if ".." in name.split("/"):
+        return True
+    return any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name)
+
+
+def _name_key(name: str) -> str:
+    """Name as the collision check sees it: NFC, then casefold, then NFC again (casefold can denormalise)."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
+
+
+def _reject_collision(members: dict[str, zipfile.ZipInfo], key: str) -> None:
+    """Two entries whose names are the same after NFC + casefold: readers may pick either, so refuse both."""
+    if key in members:
+        raise _invalid_entries()
+
+
+def _check_members(zf: zipfile.ZipFile, rules: ProfileRules) -> dict[str, zipfile.ZipInfo]:
+    """
+    Check every entry of the archive (all of infolist(), never a dict keyed by a lower-cased name,
+    which would leave the second of two case-variant entries unchecked). Rejects unsafe names,
+    names that collide after NFC + casefold, macro parts, embeddings, ActiveX, nested archives and
+    OLE blobs. Returns the entries by their normalised name.
+    """
+    members: dict[str, zipfile.ZipInfo] = {}
     for info in zf.infolist():
-        name = info.filename.replace("\\", "/").lower()
-        if name.startswith("/") or ".." in name.split("/"):
-            raise UploadSecurityError(code="invalid_openxml_format", message="The archive contains invalid entries.")
-        names.add(name)
+        if _unsafe_member_name(info.orig_filename):
+            raise _invalid_entries()
+        key = _name_key(info.orig_filename)
+        _reject_collision(members, key)
+        members[key] = info
         if info.is_dir():
             continue
-        if name.rsplit("/", 1)[-1] == "vbaproject.bin":
+        if key.rsplit("/", 1)[-1] == "vbaproject.bin":
             raise _reject_macro()
-        if "/embeddings/" in "/" + name:
-            raise _reject_embedded()
-        if rules.parse_all_ppt_parts and name.startswith("ppt/activex/"):
+        padded = "/" + key
+        if "/embeddings/" in padded or "/activex/" in padded:
             raise _reject_embedded()
         with zf.open(info) as member:
             head = member.read(8)
         if head.startswith(b"PK\x03\x04") or head.startswith(OLE2_MAGIC):
             raise _reject_embedded()
-    return names
+    return members
+
+
+def _check_relationship(_name: tuple[str | None, str], attrs: Any) -> None:
+    """One element of a .rels part: only plain hyperlinks may be external, and altChunk is refused."""
+    rel_type = (attrs.get((None, "Type")) or "").rstrip("/").lower()
+    if rel_type.endswith("/relationships/afchunk"):
+        # altChunk pulls another (HTML, RTF, MHT, DOCX) file into the document
+        raise _reject_embedded()
+    is_hyperlink = rel_type.endswith("/relationships/hyperlink")
+    # The target of a hyperlink is never fetched
+    if (attrs.get((None, "TargetMode")) or "").lower() == "external" and not is_hyperlink:
+        raise UploadSecurityError(
+            code="external_relationship",
+            message="Documents with links to external resources are not allowed.",
+        )
+
+
+def _check_content_type(_name: tuple[str | None, str], attrs: Any) -> None:
+    content_type = (attrs.get((None, "ContentType")) or "").lower()
+    if "macroenabled" in content_type or "vbaproject" in content_type:
+        raise _reject_macro()
 
 
 def _sniff_openxml_format(data: bytes, filename: str, profile: UploadProfile, max_slides: int | None) -> str:
     """
     Validate a ZIP-based OpenXML container (XLSX, DOCX, PPTX).
     The type comes from the CONTENT; the extension must agree with it.
-    Every XML check fails closed.
+    Every XML check fails closed, and every XML part is streamed (see _scan_xml).
     """
     rules = PROFILE_RULES[profile]
     validate_zip_archive(data, profile)
 
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-            names = _check_members(zf, rules)
+            members = _check_members(zf, rules)
 
-            if "[content_types].xml" not in names:
+            if "[content_types].xml" not in members:
                 raise UploadSecurityError(code="invalid_openxml_format", message="File is not a valid Office document.")
-            real = {i.filename.lower(): i.filename for i in zf.infolist()}
-            ct_root = _parse_xml(zf, real["[content_types].xml"])
-            for el in ct_root.iter():
-                content_type = (el.get("ContentType") or "").lower()
-                if "macroenabled" in content_type or "vbaproject" in content_type:
-                    raise _reject_macro()
+            _scan_xml(zf, members["[content_types].xml"], _check_content_type)
 
             # Relationship parts must parse and must not point outside the package
-            for lower, original in real.items():
-                if lower.endswith(".rels"):
-                    for rel in _parse_xml(zf, original).iter():
-                        # Only plain hyperlinks may be external; the target is never fetched
-                        rel_type = (rel.get("Type") or "").rstrip("/").lower()
-                        is_hyperlink = rel_type.endswith("/relationships/hyperlink")
-                        if (rel.get("TargetMode") or "").lower() == "external" and not is_hyperlink:
-                            raise UploadSecurityError(
-                                code="external_relationship",
-                                message="Documents with links to external resources are not allowed.",
-                            )
+            for key, info in members.items():
+                if key.endswith(".rels"):
+                    _scan_xml(zf, info, _check_relationship)
 
-            detected = [kind for kind, part in OPENXML_MAIN_PARTS.items() if part in names]
+            detected = [kind for kind, part in OPENXML_MAIN_PARTS.items() if part in members]
             if len(detected) != 1:
                 raise UploadSecurityError(
                     code="invalid_openxml_format",
@@ -447,19 +572,30 @@ def _sniff_openxml_format(data: bytes, filename: str, profile: UploadProfile, ma
             kind = detected[0]
             if kind not in rules.formats:
                 raise _unsupported_format()
-            # The main part must parse too (this also blocks entity expansion in it)
-            _parse_xml(zf, real[OPENXML_MAIN_PARTS[kind]])
 
-            if kind == "pptx":
-                if max_slides is not None and sum(1 for n in names if PPTX_SLIDE_RE.match(n)) > max_slides:
-                    raise UploadSecurityError(
-                        code="too_many_slides", message="The presentation has too many slides to process."
-                    )
-                if rules.parse_all_ppt_parts:
-                    # Slides, layouts, masters and notes: every XML part must parse (fail closed)
-                    for lower, original in real.items():
-                        if lower.startswith("ppt/") and lower.endswith(".xml") and lower != OPENXML_MAIN_PARTS["pptx"]:
-                            _parse_xml(zf, original)
+            # The main part must parse too (this also blocks entity expansion in it). For a
+            # presentation the slides are the p:sldId entries of its slide list, whatever the
+            # slide parts are called.
+            slide_ids = 0
+
+            def count_slide_ids(name: tuple[str | None, str], _attrs: Any) -> None:
+                nonlocal slide_ids
+                if name == (PRESENTATION_NS, "sldId"):
+                    slide_ids += 1
+                    if max_slides is not None and slide_ids > max_slides:
+                        raise UploadSecurityError(
+                            code="too_many_slides", message="The presentation has too many slides to process."
+                        )
+
+            main_part = OPENXML_MAIN_PARTS[kind]
+            _scan_xml(zf, members[main_part], count_slide_ids if kind == "pptx" else None)
+
+            # Every other XML part of word/ and xl/ must parse (fail closed). ppt/ parts are parsed
+            # for the document profile only: the timetable importer refuses pptx later anyway.
+            prefixes = ("word/", "xl/") + (("ppt/",) if rules.parse_all_ppt_parts else ())
+            for key, info in members.items():
+                if key.startswith(prefixes) and key.endswith(".xml") and key != main_part and not info.is_dir():
+                    _scan_xml(zf, info)
 
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
             if ext != kind:
@@ -472,6 +608,22 @@ def _sniff_openxml_format(data: bytes, filename: str, profile: UploadProfile, ma
         ) from err
 
 
+# The PDF scan works on 1 MB slices so that decoding #xx escapes never needs more than a slice of
+# memory: a 50 MB file made only of escapes would otherwise need over 1 GB. OVERLAP is how far a
+# slice looks into the next one, so a name that crosses the cut is still seen whole.
+_PDF_SCAN_SLICE = 1024 * 1024
+_PDF_SCAN_OVERLAP = 256  # more than any forbidden name written entirely with #xx escapes
+_HEX_ESCAPE_BYTES = {
+    (a + b).encode(): bytes([int(a + b, 16)]) for a in "0123456789abcdefABCDEF" for b in "0123456789abcdefABCDEF"
+}
+
+
+def _decode_name_escapes(raw: bytes) -> bytes:
+    if b"#" not in raw:
+        return raw
+    return PDF_HEX_ESCAPE_RE.sub(lambda m: _HEX_ESCAPE_BYTES[m.group(1)], raw)
+
+
 def validate_pdf_bytes(
     data: bytes, *, max_pages: int = MAX_PDF_PAGES, pages_code: str = "pdf_too_complex"
 ) -> None:
@@ -481,20 +633,48 @@ def validate_pdf_bytes(
       #xx escapes (/J#61vaScript);
     - allows /OpenAction and /AA (they only name actions and nothing here executes them);
     - caps the object and page counts.
-    It only sees UNCOMPRESSED names: a name inside a compressed object stream is invisible to it.
-    The real protection is the sandboxed, time- and memory-limited parser, which never renders or
-    executes anything.
+    It only sees UNCOMPRESSED names and counts: a name or a /Type /Page inside a compressed object
+    stream is invisible to it, so a PDF can hide both active content and its real page count from
+    this scan. It is a first filter, not a protection. The memory limit of the document parser
+    applies on Linux only, and the sandboxed document parser itself arrives with step 5b, which must
+    re-check the page count after parsing (backlog B33).
+    The scan is linear in the file size and its memory use does not grow with the file.
     """
-    # Decode #xx name escapes first, so /J#61vaScript is seen as /JavaScript
-    plain = PDF_HEX_ESCAPE_RE.sub(lambda m: bytes([int(m.group(1), 16)]), data)
-    if PDF_FORBIDDEN_RE.search(plain):
-        raise UploadSecurityError(
-            code="pdf_active_content",
-            message="PDFs with scripts, launch actions, rich media or embedded files are not allowed.",
-        )
-    if len(PDF_OBJ_RE.findall(plain)) > MAX_PDF_OBJECTS:
+    pages = 0
+    objects = 0
+    pos = 0
+    size = len(data)
+    while pos < size:
+        end = min(pos + _PDF_SCAN_SLICE, size)
+        if end < size:
+            # Never cut inside a #xx escape: that would leave half of it undecoded
+            hash_at = data.rfind(b"#", end - 2, end)
+            if hash_at != -1:
+                end = hash_at
+        # Decode the slice and its look-ahead apart, so the match offsets of the slice stay known
+        main = _decode_name_escapes(data[pos:end])
+        plain = main + _decode_name_escapes(data[end : end + _PDF_SCAN_OVERLAP])
+        if PDF_FORBIDDEN_RE.search(plain):
+            raise UploadSecurityError(
+                code="pdf_active_content",
+                message="PDFs with scripts, launch actions, rich media or embedded files are not allowed.",
+            )
+        # A match belongs to the slice it starts in, so the look-ahead is never counted twice
+        for match in PDF_PAGE_RE.finditer(plain):
+            if match.start() >= len(main):
+                break
+            pages += 1
+        # Objects are counted slice by slice as well: one regex pass over 50 MB would hold the GIL
+        # (and so freeze the event loop) for over a second
+        raw = data[pos : end + _PDF_SCAN_OVERLAP]
+        for match in PDF_OBJ_RE.finditer(raw):
+            if match.start() >= end - pos:
+                break
+            objects += 1
+        pos = end
+    if objects > MAX_PDF_OBJECTS:
         raise UploadSecurityError(code="pdf_too_complex", message="The PDF is too large or complex to process.")
-    if len(PDF_PAGE_RE.findall(plain)) > max_pages:
+    if pages > max_pages:
         if pages_code == "too_many_pages":
             raise UploadSecurityError(code="too_many_pages", message="The PDF has too many pages to process.")
         raise UploadSecurityError(code="pdf_too_complex", message="The PDF is too large or complex to process.")

@@ -13,6 +13,7 @@ from fastapi import HTTPException, status
 from PIL import Image
 
 from app.core.config import settings
+from app.services.document_store import is_document_key
 
 MAX_IMAGE_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
 MAX_LOGO_DIMENSIONS = (1024, 1024)
@@ -85,6 +86,9 @@ class LocalStorage:
 
     def get_url(self, key: str) -> str:
         clean_key = key.replace("\\", "/").lstrip("/")
+        if is_document_key(clean_key):
+            # Original uploads live in the private document store and have no public URL at all
+            raise ValueError("A document-store key has no public URL.")
         return f"/api/v1/public/branding/media/{clean_key}"
 
 

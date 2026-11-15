@@ -66,7 +66,13 @@ app = FastAPI(
 app.add_middleware(TenantResolutionMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
-# Configure CORS with an explicit origin whitelist
+# Body guard: duplicate headers, Content-Length, the pre-body Bearer check on upload routes, the
+# per-IP upload cap and the body limits. It must run before anything reads the body; forms are
+# only parsed inside the routes. Only CORS sits in front of it: CORS never reads the body, and a
+# browser can then read the 401/413 (for example to refresh an expired token).
+app.add_middleware(BodyLimitMiddleware)
+
+# Configure CORS with an explicit origin whitelist (outermost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -83,9 +89,6 @@ app.add_middleware(
     ],
     expose_headers=["X-Request-ID"],
 )
-
-# Outermost: reject oversized uploads before any other layer reads the body.
-app.add_middleware(BodyLimitMiddleware)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 

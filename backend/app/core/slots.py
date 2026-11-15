@@ -17,7 +17,11 @@ unless ENVIRONMENT is "development", where a per-process in-memory fallback is
 used and a loud error is logged. The 503 text is supplied by the caller.
 
 A long-running holder (the document worker, step 5b) keeps its lease alive with renew():
-it extends only a token that is still live, so an expired lease is never resurrected.
+it extends only a token that is still live, so an expired lease is never resurrected. renew() is
+for workers, not requests, so it never raises an HTTP error: it returns False when the lease is
+lost (the caller MUST then stop its job) and raises SlotBackendUnavailable when Redis cannot be
+reached. `max_total_seconds` caps the whole life of a lease, so a hung worker whose heartbeat still
+runs cannot hold its slot forever.
 """
 
 import asyncio
@@ -25,7 +29,7 @@ import logging
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException, status
 
@@ -105,6 +109,8 @@ class SlotLimit:
 class SlotLease:
     token: str
     keys: tuple[str, ...]
+    # When the lease was taken, on the holder's own monotonic clock (for renew's maximum lifetime)
+    started_at: float = field(default_factory=time.monotonic)
 
 
 class SlotRejected(Exception):
@@ -114,6 +120,14 @@ class SlotRejected(Exception):
         super().__init__(f"slot limit {index} reached")
         self.index = index
         self.retry_after_seconds = retry_after_seconds
+
+
+class SlotBackendUnavailable(Exception):
+    """
+    Redis could not be reached while renewing a lease, outside development. A domain error on
+    purpose: a worker is not serving a request, so there is nobody to send a 503 to. The worker
+    decides (retry, or stop the job). Request-path calls (acquire, count) still raise HTTP 503.
+    """
 
 
 DEFAULT_UNAVAILABLE_MESSAGE = "This service is temporarily unavailable. Please try again in a few minutes."
@@ -175,14 +189,24 @@ class SlotManager:
         lease: SlotLease,
         ttl_seconds: float,
         *,
-        unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE,
+        max_total_seconds: float | None = None,
     ) -> bool:
         """
         Extend a LIVE lease to `ttl_seconds` from now, atomically on every key of the lease.
-        Returns False when the lease already expired or was released: an expired token is never
-        brought back, so the caller must stop its work and treat the slot as lost.
-        Fails closed with 503 when Redis is unreachable outside development.
+        Returns False when the lease already expired or was released, or when it has reached
+        `max_total_seconds` since it was taken (the extension is then refused and the lease dies at
+        its current expiry). An expired token is never brought back. The caller must stop its work
+        when this returns False: the slot is no longer its own.
+        With `max_total_seconds` the new ttl is also cut to the time left, so the lease can never
+        outlive the cap.
+        Raises SlotBackendUnavailable (not an HTTP error) when Redis is unreachable outside development.
         """
+        if max_total_seconds is not None:
+            remaining = max_total_seconds - (time.monotonic() - lease.started_at)
+            if remaining <= 0:
+                logger.warning("Slot lease reached its maximum lifetime and is not renewed")
+                return False
+            ttl_seconds = min(ttl_seconds, remaining)
         ttl_ms = max(1, int(ttl_seconds * 1000))
         try:
             redis = await redis_client.get_redis()
@@ -193,8 +217,8 @@ class SlotManager:
             return int(res) == 1
         except Exception as exc:
             if not settings.is_development:
-                logger.error("Redis unavailable for slot renewal, failing closed: %r", exc)
-                raise _unavailable(unavailable_message) from exc
+                logger.error("Redis unavailable for slot renewal: %r", exc)
+                raise SlotBackendUnavailable() from exc
             logger.error("REDIS UNAVAILABLE: renewing slot in memory (development only): %r", exc)
             return self._mem_renew(lease, ttl_seconds)
 

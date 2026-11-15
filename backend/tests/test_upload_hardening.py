@@ -289,9 +289,14 @@ async def test_oversized_content_length_rejected_413(client: AsyncClient, import
     assert res.json()["detail"]["code"] == "file_too_large"
 
 
-async def test_chunked_body_without_content_length_rejected_413(
+async def test_chunked_body_without_content_length_rejected(
     client: AsyncClient, import_ctx: tuple[str, dict[str, str]]
 ) -> None:
+    """
+    Upload routes now refuse a body without Content-Length with 411 before reading it (review of
+    5a-3, finding 3). Counting a body that is longer than its Content-Length is covered by
+    test_upload_preauth.py::test_lying_content_length_is_still_cut_off_on_a_real_form_route.
+    """
     url, headers = import_ctx
     boundary = "bnd"
 
@@ -303,7 +308,8 @@ async def test_chunked_body_without_content_length_rejected_413(
 
     h = {**headers, "Content-Type": f"multipart/form-data; boundary={boundary}"}
     res = await client.post(url, headers=h, content=body())
-    assert res.status_code == 413
+    assert res.status_code == 411
+    assert res.json()["detail"]["code"] == "length_required"
 
 
 async def test_too_many_multipart_parts_rejected(client: AsyncClient, import_ctx: tuple[str, dict[str, str]]) -> None:

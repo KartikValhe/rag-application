@@ -46,7 +46,7 @@ from app.core.upload_security import (
     attachment_header,
     sanitize_filename,
     stream_upload_with_limit,
-    validate_upload,
+    validate_upload_async,
 )
 from app.db.models.academic import Class, ClassSubject, Subject, TeacherAssignment
 from app.db.models.rbac import Role, UserRole
@@ -1235,9 +1235,10 @@ async def preview_timetable_import(
     # 3. Stream upload bytes with 2 MB cap
     file_bytes = await stream_upload_with_limit(file, max_bytes=2 * 1024 * 1024)
 
-    # 4. Sanitize filename and validate file type (magic bytes)
+    # 4. Sanitize filename and validate file type (magic bytes), in a worker thread so the scan
+    #    never blocks the event loop
     clean_name = sanitize_filename(file.filename)
-    format_type = validate_upload(file_bytes, clean_name, UploadProfile.TIMETABLE)
+    format_type = await validate_upload_async(file_bytes, clean_name, UploadProfile.TIMETABLE)
 
     # 5. Execute parsing in a kill-able process with 10s timeout and concurrency caps
     records = await run_killable_parse(file_bytes, format_type, current_user.tenant_id, timeout_seconds=10.0)
