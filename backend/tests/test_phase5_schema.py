@@ -361,21 +361,52 @@ async def test_tenants_have_doc_limits_defaulting_to_empty(
 
 
 async def test_new_tables_are_not_granted_to_the_platform_role(raw_db: AsyncSession) -> None:
-    rows = (
+    """No table-level grant, no column-level grant and no effective privilege (PUBLIC included)."""
+    tables = [
+        "documents", "document_classes", "document_versions", "chunks",
+        "chunk_embeddings", "storage_deletions", "ingest_jobs",
+    ]
+    table_grants = (
         await raw_db.execute(
             text(
-                "SELECT table_name FROM information_schema.role_table_grants "
+                "SELECT table_name, privilege_type FROM information_schema.role_table_grants "
                 "WHERE grantee = 'app_platform' AND table_schema = 'app' AND table_name = ANY(:t)"
             ),
-            {
-                "t": [
-                    "documents", "document_classes", "document_versions", "chunks",
-                    "chunk_embeddings", "storage_deletions", "ingest_jobs",
-                ]
-            },
+            {"t": tables},
         )
     ).all()
-    assert rows == []
+    assert table_grants == []
+    # Column-level grants (GRANT SELECT (col) ...) do not show up in role_table_grants.
+    column_grants = (
+        await raw_db.execute(
+            text(
+                "SELECT table_name, column_name, privilege_type "
+                "FROM information_schema.column_privileges "
+                "WHERE grantee = 'app_platform' AND table_schema = 'app' AND table_name = ANY(:t)"
+            ),
+            {"t": tables},
+        )
+    ).all()
+    assert column_grants == []
+    # Effective privileges, which also cover grants to PUBLIC and role inheritance.
+    for table in tables:
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
+            has = (
+                await raw_db.execute(
+                    text("SELECT has_table_privilege('app_platform', :t, :p)"),
+                    {"t": f"app.{table}", "p": privilege},
+                )
+            ).scalar_one()
+            assert not has, f"app_platform effectively has {privilege} on app.{table}"
+        any_column = (
+            await raw_db.execute(
+                text(
+                    "SELECT has_any_column_privilege('app_platform', :t, 'SELECT,INSERT,UPDATE,REFERENCES')"
+                ),
+                {"t": f"app.{table}"},
+            )
+        ).scalar_one()
+        assert not any_column, f"app_platform has a column privilege on app.{table}"
 
 
 # ── Migration prerequisites ──────────────────────────────────────────────────

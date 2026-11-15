@@ -82,6 +82,13 @@ INGEST_JOB_STATUSES: tuple[str, ...] = (
     JOB_STATUS_FAILED,
 )
 
+# Job states the worker may still change, and the finished states it may delete (RLS policies
+# worker_update / worker_delete in migration 0009).
+ACTIVE_JOB_STATUSES: tuple[str, ...] = (JOB_STATUS_QUEUED, JOB_STATUS_RUNNING)
+FINISHED_JOB_STATUSES: tuple[str, ...] = (JOB_STATUS_DONE, JOB_STATUS_FAILED)
+# A version in one of these states does not count as a duplicate of the same bytes.
+INACTIVE_VERSION_STATUSES: tuple[str, ...] = (VERSION_STATUS_FAILED, VERSION_STATUS_ARCHIVED)
+
 # Columns the app_worker role may UPDATE on ingest_jobs (nothing else is granted).
 INGEST_JOB_WORKER_UPDATE_COLUMNS: tuple[str, ...] = (
     "status",
@@ -89,6 +96,16 @@ INGEST_JOB_WORKER_UPDATE_COLUMNS: tuple[str, ...] = (
     "run_after",
     "lease_expires_at",
     "worker_id",
+    "last_error_code",
+    "updated_at",
+)
+
+# Columns the API role (app_tenant) may UPDATE on ingest_jobs: exactly what the retry path needs
+# (design A3). The lease and the worker id stay worker-only.
+INGEST_JOB_API_UPDATE_COLUMNS: tuple[str, ...] = (
+    "status",
+    "attempts",
+    "run_after",
     "last_error_code",
     "updated_at",
 )
@@ -150,13 +167,20 @@ class Document(Base):
         ForeignKeyConstraint(
             ["tenant_id", "subject_id"],
             ["app.subjects.tenant_id", "app.subjects.id"],
-            ondelete="CASCADE",
+            # A subject that still has documents cannot be deleted (the API answers 409).
+            ondelete="RESTRICT",
             name="fk_documents_subject",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "created_by"],
             ["app.users.tenant_id", "app.users.id"],
             name="fk_documents_created_by",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "deleted_by"],
+            ["app.users.tenant_id", "app.users.id"],
+            ondelete="SET NULL (deleted_by)",  # PostgreSQL 15+: tenant_id is never nulled
+            name="fk_documents_deleted_by",
         ),
         {"schema": "app"},
     )
@@ -234,8 +258,16 @@ class DocumentVersion(Base):
         UniqueConstraint(
             "tenant_id", "document_id", "version_no", name="uq_document_versions_version_no"
         ),
-        # Idempotency: the same bytes are the same version.
-        UniqueConstraint("tenant_id", "document_id", "sha256", name="uq_document_versions_sha256"),
+        # A published version always records when it was published.
+        CheckConstraint(
+            f"status <> '{VERSION_STATUS_PUBLISHED}' OR published_at IS NOT NULL",
+            name="document_versions_published_at_check",
+        ),
+        # A storage key always lives under the row's own tenant prefix.
+        CheckConstraint(
+            "storage_key LIKE 't/' || tenant_id::text || '/%'",
+            name="ck_document_versions_storage_key_prefix",
+        ),
         # Target of the chunks composite FK (document stays consistent with the version).
         UniqueConstraint("tenant_id", "id", "document_id", name="uq_document_versions_id_document"),
         ForeignKeyConstraint(
@@ -243,6 +275,36 @@ class DocumentVersion(Base):
             ["app.documents.tenant_id", "app.documents.id"],
             ondelete="CASCADE",
             name="fk_document_versions_document",
+        ),
+        # Idempotency among ACTIVE versions: the same bytes cannot be uploaded twice, but a
+        # permanently failed upload or a rollback to older bytes can be uploaded again.
+        Index(
+            "uq_document_versions_active_sha256",
+            "tenant_id",
+            "document_id",
+            "sha256",
+            unique=True,
+            postgresql_where=text(f"status NOT IN ({sql_in_list(INACTIVE_VERSION_STATUSES)})"),
+        ),
+        # Actor columns: same-tenant users. The NOT NULL actor is RESTRICTed, the nullable ones
+        # are cleared when the user row goes (PostgreSQL 15+ column list keeps tenant_id).
+        ForeignKeyConstraint(
+            ["tenant_id", "uploaded_by"],
+            ["app.users.tenant_id", "app.users.id"],
+            ondelete="RESTRICT",
+            name="fk_document_versions_uploaded_by",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "published_by"],
+            ["app.users.tenant_id", "app.users.id"],
+            ondelete="SET NULL (published_by)",
+            name="fk_document_versions_published_by",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "flags_acknowledged_by"],
+            ["app.users.tenant_id", "app.users.id"],
+            ondelete="SET NULL (flags_acknowledged_by)",
+            name="fk_document_versions_flags_acknowledged_by",
         ),
         # At most one published version, and one draft in flight, per document.
         Index(
@@ -305,6 +367,7 @@ class Chunk(Base):
 
     __tablename__ = "chunks"
     __table_args__ = (
+        CheckConstraint(f"script IN ({sql_in_list(CHUNK_SCRIPTS)})", name="chunks_script_check"),
         UniqueConstraint(
             "tenant_id", "document_version_id", "ordinal", name="uq_chunks_version_ordinal"
         ),
@@ -389,16 +452,24 @@ class ChunkEmbedding(Base):
 
 
 class StorageDeletion(Base):
-    """Outbox: object-store files waiting to be deleted by the sweeper."""
+    """
+    Outbox: object-store files waiting to be deleted by the sweeper. The tenant FK is RESTRICT,
+    not CASCADE: deleting a tenant must drain this table and purge its files first, otherwise
+    the pending deletions would vanish and the objects would be orphaned.
+    """
 
     __tablename__ = "storage_deletions"
     __table_args__ = (
+        CheckConstraint(
+            "storage_key LIKE 't/' || tenant_id::text || '/%'",
+            name="ck_storage_deletions_storage_key_prefix",
+        ),
         Index("ix_storage_deletions_due", "tenant_id", "not_before"),
         {"schema": "app"},
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("app.tenants.id", ondelete="CASCADE"), primary_key=True
+        UUID(as_uuid=True), ForeignKey("app.tenants.id", ondelete="RESTRICT"), primary_key=True
     )
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

@@ -18,6 +18,7 @@ isolation checks run automatically for the new table.
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -25,6 +26,7 @@ from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from app.core.tenant_db import tenant_session_context
 from app.db.models.academic import (
     Class,
     ClassSubject,
@@ -37,6 +39,7 @@ from app.db.models.auth import EmailToken, Invitation, RefreshToken
 from app.db.models.base import Base
 from app.db.models.branding import TenantBranding
 from app.db.models.document import (
+    INGEST_JOB_API_UPDATE_COLUMNS,
     Chunk,
     ChunkEmbedding,
     Document,
@@ -102,6 +105,8 @@ async def _document_parents(raw_db: AsyncSession, tenant_id: uuid.UUID, depth: s
         sha256=uuid.uuid4().hex + uuid.uuid4().hex,
         storage_key=f"t/{tenant_id}/d/{uuid.uuid4().hex}",
         uploaded_by=user.id,
+        published_at=datetime.now(UTC),
+        published_by=user.id,
     )
     raw_db.add(version)
     await raw_db.flush()
@@ -352,6 +357,57 @@ async def test_select_returns_only_own_tenant_rows(
 
 # â”€â”€ 2. UPDATE isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+# A plain, non-key column per table for the UPDATE probe. A table missing here fails the test on
+# purpose (KeyError), so a new tenant table always gets a probe. document_classes has no column
+# outside its keys, so its probe assigns subject_id to itself: the row still counts as updated,
+# so a table without RLS is caught by the row count.
+SELF = object()
+UPDATE_PROBES: dict[str, tuple[str, object]] = {
+    "users": ("full_name", "HACKED BY TENANT A"),
+    "refresh_tokens": ("user_agent", "HACKED BY TENANT A"),
+    "invitations": ("role_name", "hacked"),
+    "email_tokens": ("token_hash", f"hacked-by-tenant-a-{uuid.uuid4().hex}"),  # unique column
+    "roles": ("description", "HACKED BY TENANT A"),
+    "classes": ("description", "HACKED BY TENANT A"),
+    "subjects": ("description", "HACKED BY TENANT A"),
+    "audit_log": ("action", "hacked:by_tenant_a"),
+    "tenant_branding": ("tagline", "HACKED"),
+    "documents": ("title", "HACKED BY TENANT A"),
+    "document_classes": ("subject_id", SELF),
+    "document_versions": ("original_filename", "hacked.pdf"),
+    "chunks": ("content", "HACKED BY TENANT A"),
+    "chunk_embeddings": ("embedding", [0.02] * E5_SMALL_DIM),
+    "storage_deletions": ("reason", "hacked"),
+    "ingest_jobs": ("last_error_code", "hacked"),
+}
+# Append-only tables: app_tenant has no UPDATE or DELETE grant at all, so "permission denied" is
+# the expected answer there. For every other table the statement must run and affect 0 rows.
+APPEND_ONLY_TABLES = {"audit_log"}
+
+
+async def _snapshot(raw_db: AsyncSession, table: str, tenant_id: uuid.UUID) -> list[str]:
+    """Every row of `table` for one tenant as JSON text, read through the privileged session."""
+    rows = await raw_db.execute(
+        text(f"SELECT to_jsonb(t)::text FROM app.{table} t WHERE t.tenant_id = :tid ORDER BY 1"),
+        {"tid": tenant_id},
+    )
+    return list(rows.scalars().all())
+
+
+async def _tenant_role_can(
+    raw_db: AsyncSession, table: str, privilege: str, column: str | None = None
+) -> bool:
+    if column is None:
+        sql = "SELECT has_table_privilege('app_tenant', :t, :p)"
+        params: dict = {"t": f"app.{table}", "p": privilege}
+    else:
+        sql = "SELECT has_column_privilege('app_tenant', :t, :c, :p)"
+        params = {"t": f"app.{table}", "c": column, "p": privilege}
+    return bool((await raw_db.execute(text(sql), params)).scalar_one())
+
+
+# -- 2. UPDATE isolation (non-key column, row counts, owner-side proof) -----------------------
+
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_update_cannot_affect_other_tenant_rows(
     model: type,
@@ -359,34 +415,51 @@ async def test_update_cannot_affect_other_tenant_rows(
     raw_db: AsyncSession,
     tenant_a: Tenant,
     tenant_b: Tenant,
-    tenant_a_session: AsyncSession,
 ) -> None:
     """
-    An UPDATE in tenant A's context must not touch tenant B's rows.
+    Tenant A updates a NON-key column of tenant B's row. The statement must run and affect 0
+    rows (no error is accepted as a pass), the transaction is committed like a real request,
+    and the owner connection must then see tenant B's rows byte for byte unchanged. A control
+    update of tenant A's own row with the same statement shows the probe itself is valid.
     """
-    row_b = await _build_row(model, tenant_b.id, extra, raw_db)
-    await raw_db.execute(insert(model).values(**row_b))
-    # Commit so the row is visible to the other (RLS-restricted) connection; without this the
-    # test would pass even with RLS switched off, because uncommitted rows are invisible anyway.
+    table = model.__tablename__
+    column, value = UPDATE_PROBES[table]
+    tbl = model.__table__
+    new_value = tbl.c[column] if value is SELF else value
+
+    for owner in (tenant_a.id, tenant_b.id):
+        row = await _build_row(model, owner, extra, raw_db)
+        await raw_db.execute(insert(model).values(**row))
     await raw_db.commit()
+    before = await _snapshot(raw_db, table, tenant_b.id)
+    assert before, f"{table}: no tenant B row to protect"
 
-    # Attempt UPDATE from tenant A's session: it must match 0 rows because RLS hides tenant B's
-    # rows, or fail with permission denied if the table is append-only (like audit_log).
-    # The predicate is on tenant_id, which every tenant table has (the old one compared the
-    # first primary key column, tenant_id, with an id, so it could never match anything).
-    try:
-        update_result = await tenant_a_session.execute(
-            update(model).where(model.tenant_id == tenant_b.id).values(tenant_id=tenant_a.id)
-        )
-        assert update_result.rowcount == 0, (
-            f"{model.__tablename__}: UPDATE in tenant A's context affected "
-            f"{update_result.rowcount} row(s) belonging to tenant B."
-        )
-    except Exception as exc:
-        assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
+    def probe(owner_id: uuid.UUID) -> Any:
+        return update(tbl).where(tbl.c.tenant_id == owner_id).values({column: new_value})
+
+    can_update = await _tenant_role_can(raw_db, table, "UPDATE", column)
+    if table in APPEND_ONLY_TABLES:
+        assert not can_update, f"{table} is meant to be append-only"
+        with pytest.raises(DBAPIError, match="permission denied"):
+            async with tenant_session_context(str(tenant_a.id)) as session:
+                await session.execute(probe(tenant_b.id))
+    else:
+        assert can_update, f"{table}.{column} is not updatable by app_tenant: the probe proves nothing"
+        async with tenant_session_context(str(tenant_a.id)) as session:
+            foreign = await session.execute(probe(tenant_b.id))
+            assert foreign.rowcount == 0, (
+                f"{table}: UPDATE in tenant A's context affected "
+                f"{foreign.rowcount} row(s) belonging to tenant B."
+            )
+            own = await session.execute(probe(tenant_a.id))
+            assert own.rowcount >= 1, f"{table}: control update of tenant A's own row failed"
+
+    assert await _snapshot(raw_db, table, tenant_b.id) == before, (
+        f"{table}: tenant B's rows changed after tenant A's UPDATE"
+    )
 
 
-# â”€â”€ 3. DELETE isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- 3. DELETE isolation ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_delete_cannot_affect_other_tenant_rows(
@@ -395,30 +468,41 @@ async def test_delete_cannot_affect_other_tenant_rows(
     raw_db: AsyncSession,
     tenant_a: Tenant,
     tenant_b: Tenant,
-    tenant_a_session: AsyncSession,
 ) -> None:
     """
-    DELETE in tenant A's context must leave tenant B's rows untouched.
+    Tenant A deletes tenant B's rows: 0 rows affected (no error is accepted as a pass), the
+    transaction is committed, and the owner connection still sees every row of tenant B.
     """
-    row_b = await _build_row(model, tenant_b.id, extra, raw_db)
-    await raw_db.execute(insert(model).values(**row_b))
-    # Commit so the row is visible to the other (RLS-restricted) connection; without this the
-    # test would pass even with RLS switched off, because uncommitted rows are invisible anyway.
+    table = model.__tablename__
+    tbl = model.__table__
+    row = await _build_row(model, tenant_b.id, extra, raw_db)
+    await raw_db.execute(insert(model).values(**row))
     await raw_db.commit()
+    before = await _snapshot(raw_db, table, tenant_b.id)
+    assert before, f"{table}: no tenant B row to protect"
 
-    try:
-        del_result = await tenant_a_session.execute(
-            delete(model).where(model.tenant_id == tenant_b.id)
-        )
-        assert del_result.rowcount == 0, (
-            f"{model.__tablename__}: DELETE in tenant A's context removed "
-            f"{del_result.rowcount} row(s) belonging to tenant B."
-        )
-    except Exception as exc:
-        assert any(kw in str(exc).lower() for kw in ("permission denied", "policy", "violat"))
+    can_delete = await _tenant_role_can(raw_db, table, "DELETE")
+    statement = delete(tbl).where(tbl.c.tenant_id == tenant_b.id)
+    if table in APPEND_ONLY_TABLES:
+        assert not can_delete, f"{table} is meant to be append-only"
+        with pytest.raises(DBAPIError, match="permission denied"):
+            async with tenant_session_context(str(tenant_a.id)) as session:
+                await session.execute(statement)
+    else:
+        assert can_delete, f"{table}: app_tenant cannot delete, so the probe proves nothing"
+        async with tenant_session_context(str(tenant_a.id)) as session:
+            result = await session.execute(statement)
+            assert result.rowcount == 0, (
+                f"{table}: DELETE in tenant A's context removed "
+                f"{result.rowcount} row(s) belonging to tenant B."
+            )
+
+    assert await _snapshot(raw_db, table, tenant_b.id) == before, (
+        f"{table}: tenant B's rows changed after tenant A's DELETE"
+    )
 
 
-# â”€â”€ 4. INSERT WITH CHECK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- 4. INSERT WITH CHECK ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("model,extra", TENANT_TABLES)
 async def test_insert_wrong_tenant_id_rejected_by_rls(
@@ -775,30 +859,162 @@ async def test_guard_detects_an_unregistered_tenant_table() -> None:
     assert find_unregistered_tenant_tables(md, set(), {"rogue_notes": ("t", "reason")}) == []
 
 
-async def test_every_tenant_table_has_forced_rls_and_the_isolation_policy(
-    raw_db: AsyncSession,
-) -> None:
-    """ENABLE + FORCE RLS and a tenant_isolation policy using current_setting, on every table."""
-    names = _orm_tenant_table_names()
+# Exact policy inventory. The predicate text is what pg_policies prints for the policy that
+# migrations 0005, 0008 and 0009 create; a change in a policy (or an extra permissive policy that
+# would widen access) shows up as a difference here.
+_ISOLATION_PREDICATE = (
+    "(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
+)
+_JOB_ACTIVE = "((status)::text = ANY ((ARRAY['queued'::character varying, 'running'::character varying])::text[]))"
+_JOB_ANY_NEXT = (
+    "((status)::text = ANY ((ARRAY['queued'::character varying, 'running'::character varying, "
+    "'done'::character varying, 'failed'::character varying])::text[]))"
+)
+_JOB_FINISHED = "((status)::text = ANY ((ARRAY['done'::character varying, 'failed'::character varying])::text[]))"
+
+# (policy name, command, permissive, roles, USING text, WITH CHECK text)
+PolicyRow = tuple[str, str, str, tuple[str, ...], str | None, str | None]
+
+STANDARD_POLICIES: frozenset[PolicyRow] = frozenset(
+    {
+        (
+            "tenant_isolation", "ALL", "PERMISSIVE", ("public",),
+            _ISOLATION_PREDICATE, _ISOLATION_PREDICATE,
+        )
+    }
+)
+EXPECTED_POLICIES_BY_TABLE: dict[str, frozenset[PolicyRow]] = {
+    # Deliberate, since migration 0001: platform admins list tenant-admin invitations across
+    # tenants (SELECT only, app_platform only). Anything else added here needs the same review.
+    "invitations": frozenset(
+        {
+            (
+                "tenant_isolation", "ALL", "PERMISSIVE", ("public",),
+                _ISOLATION_PREDICATE, _ISOLATION_PREDICATE,
+            ),
+            ("platform_read_invitations", "SELECT", "PERMISSIVE", ("app_platform",), "true", None),
+        }
+    ),
+    # The API role sees its own tenant only. The worker gets one policy per command: it reads
+    # all jobs, updates only unfinished ones, deletes only finished ones, and never inserts.
+    "ingest_jobs": frozenset(
+        {
+            (
+                "tenant_isolation", "ALL", "PERMISSIVE", ("app_tenant",),
+                _ISOLATION_PREDICATE, _ISOLATION_PREDICATE,
+            ),
+            ("worker_select", "SELECT", "PERMISSIVE", ("app_worker",), "true", None),
+            ("worker_update", "UPDATE", "PERMISSIVE", ("app_worker",), _JOB_ACTIVE, _JOB_ANY_NEXT),
+            ("worker_delete", "DELETE", "PERMISSIVE", ("app_worker",), _JOB_FINISHED, None),
+        }
+    ),
+}
+
+
+def find_policy_deviations(
+    actual: dict[str, set[PolicyRow]],
+    tables: list[str],
+    expected_by_table: dict[str, frozenset[PolicyRow]],
+    standard: frozenset[PolicyRow],
+) -> list[str]:
+    """Describe every table whose policies differ from the expected inventory (empty = fine)."""
+    problems: list[str] = []
+    for table in tables:
+        expected = expected_by_table.get(table, standard)
+        found = actual.get(table, set())
+        for row in sorted(found - expected):
+            problems.append(f"{table}: unexpected or changed policy {row}")
+        for row in sorted(expected - found):
+            problems.append(f"{table}: missing policy {row}")
+    return problems
+
+
+async def _catalog_tenant_tables(raw_db: AsyncSession) -> list[tuple[str, bool, bool]]:
+    """(table, RLS enabled, RLS forced) for every table in schema app that has a tenant_id column."""
     rows = (
         await raw_db.execute(
             text("""
-                SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
-                       EXISTS (
-                           SELECT 1 FROM pg_policies p
-                           WHERE p.schemaname = 'app' AND p.tablename = c.relname
-                             AND p.policyname = 'tenant_isolation'
-                             AND p.qual LIKE '%current_setting%'
-                             AND p.with_check LIKE '%current_setting%')
+                SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'app' AND c.relname = ANY(:names)
-            """),
-            {"names": names},
+                WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p')
+                  AND EXISTS (SELECT 1 FROM pg_attribute a
+                              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+                                AND a.attnum > 0 AND NOT a.attisdropped)
+                ORDER BY c.relname
+            """)
         )
     ).all()
-    assert {r[0] for r in rows} == set(names), "a mapped tenant table is missing in the database"
-    bad = [r[0] for r in rows if not (r[1] and r[2] and r[3])]
-    assert not bad, f"RLS not enabled+forced with a tenant_isolation policy on: {bad}"
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+async def _catalog_policies(raw_db: AsyncSession) -> dict[str, set[PolicyRow]]:
+    rows = (
+        await raw_db.execute(
+            text(
+                "SELECT tablename, policyname, cmd, permissive, roles::text[], qual, with_check "
+                "FROM pg_policies WHERE schemaname = 'app'"
+            )
+        )
+    ).all()
+    out: dict[str, set[PolicyRow]] = {}
+    for table, name, cmd, permissive, roles, qual, with_check in rows:
+        out.setdefault(table, set()).add(
+            (name, cmd, permissive, tuple(sorted(roles)), qual, with_check)
+        )
+    return out
+
+
+async def test_every_tenant_table_has_forced_rls_and_exactly_the_expected_policies(
+    raw_db: AsyncSession,
+) -> None:
+    """
+    Tables come from the catalog (every table in schema app with a tenant_id column), not from
+    the ORM. Each needs ENABLE + FORCE RLS and EXACTLY the expected policies: same names,
+    commands, roles and predicate text. An extra permissive policy fails the test.
+    """
+    catalog = await _catalog_tenant_tables(raw_db)
+    names = [c[0] for c in catalog]
+    covered = {m.__tablename__ for m, _ in TENANT_TABLES} | set(CUSTOM_COVERAGE)
+    assert not set(names) - covered, (
+        f"tenant tables in the database without isolation coverage: {sorted(set(names) - covered)}"
+    )
+    assert set(_orm_tenant_table_names()) <= set(names), "a mapped tenant table is missing in the database"
+
+    no_rls = [c[0] for c in catalog if not (c[1] and c[2])]
+    assert not no_rls, f"RLS not enabled and forced on: {no_rls}"
+
+    problems = find_policy_deviations(
+        await _catalog_policies(raw_db), names, EXPECTED_POLICIES_BY_TABLE, STANDARD_POLICIES
+    )
+    assert not problems, "policy inventory differs:\n" + "\n".join(problems)
+
+
+async def test_policy_inventory_check_flags_an_extra_permissive_policy() -> None:
+    """Prove-it-fails: the comparison catches extra, changed, missing and wrongly scoped policies."""
+    base = {"documents": set(STANDARD_POLICIES)}
+    assert find_policy_deviations(base, ["documents"], {}, STANDARD_POLICIES) == []
+
+    extra = {"documents": {*STANDARD_POLICIES, ("open_door", "ALL", "PERMISSIVE", ("public",), "true", "true")}}
+    assert any("open_door" in p for p in find_policy_deviations(extra, ["documents"], {}, STANDARD_POLICIES))
+
+    weaker = {
+        "documents": {
+            ("tenant_isolation", "ALL", "PERMISSIVE", ("public",), "(tenant_id IS NOT NULL)", _ISOLATION_PREDICATE)
+        }
+    }
+    problems = find_policy_deviations(weaker, ["documents"], {}, STANDARD_POLICIES)
+    assert len(problems) == 2  # the changed policy and the missing standard one
+
+    missing = find_policy_deviations({}, ["documents"], {}, STANDARD_POLICIES)
+    assert any("missing policy" in p for p in missing)
+
+    wrong_role = {
+        "ingest_jobs": {
+            (n, c, p, ("public",) if n == "tenant_isolation" else r, q, w)
+            for n, c, p, r, q, w in EXPECTED_POLICIES_BY_TABLE["ingest_jobs"]
+        }
+    }
+    assert find_policy_deviations(wrong_role, ["ingest_jobs"], EXPECTED_POLICIES_BY_TABLE, STANDARD_POLICIES)
 
 
 async def test_application_roles_cannot_bypass_rls(raw_db: AsyncSession) -> None:
@@ -823,8 +1039,6 @@ async def test_application_roles_cannot_bypass_rls(raw_db: AsyncSession) -> None
 async def test_app_tenant_cannot_see_or_change_other_tenants_jobs(
     raw_db: AsyncSession, academic_world: AcademicWorld
 ) -> None:
-    from app.core.tenant_db import tenant_session_context
-
     wa, wb = academic_world.a, academic_world.b
     ga = await create_document_graph(
         raw_db, wa, subject_name="Physics", class_names=("10-A",), uploader=wa.t1
@@ -1043,6 +1257,119 @@ async def test_app_worker_cannot_update_columns_outside_its_grant(
     await _assert_worker_denied(worker_engine, "DELETE FROM app.chunks WHERE false")
 
 
+async def _jobs_in_states(
+    raw_db: AsyncSession, world: AcademicWorld, states: tuple[str, ...]
+) -> dict[str, uuid.UUID]:
+    """One job per requested status (each on its own document), committed."""
+    w = world.a
+    placements = (("Math", "10-A"), ("Physics", "10-A"), ("English", "10-A"), ("Chemistry", "11-A"))
+    jobs: dict[str, uuid.UUID] = {}
+    for status, (subject, klass) in zip(states, placements, strict=False):
+        graph = await create_document_graph(
+            raw_db, w, subject_name=subject, class_names=(klass,), uploader=w.t1
+        )
+        await raw_db.execute(update(IngestJob).where(IngestJob.id == graph.job.id).values(status=status))
+        jobs[status] = graph.job.id
+    await raw_db.commit()
+    return jobs
+
+
+async def _worker_dml(
+    engine: AsyncEngine, sql: str, params: dict, *, tenant_id: uuid.UUID | None = None
+) -> int:
+    """Run one statement as app_worker (optionally after setting app.tenant_id itself); roll back."""
+    async with engine.connect() as conn:
+        if tenant_id is not None:
+            await conn.execute(
+                text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant_id)}
+            )
+        result = await conn.execute(text(sql), params)
+        await conn.rollback()
+        return result.rowcount
+
+
+async def test_app_worker_cannot_delete_queued_or_running_jobs(
+    raw_db: AsyncSession, academic_world: AcademicWorld, worker_engine: AsyncEngine
+) -> None:
+    """The worker may only delete finished jobs, even if it sets app.tenant_id itself."""
+    jobs = await _jobs_in_states(raw_db, academic_world, ("queued", "running", "done", "failed"))
+    delete_sql = "DELETE FROM app.ingest_jobs WHERE id = :id"
+    for tenant in (None, academic_world.a.id):
+        for status in ("queued", "running"):
+            assert await _worker_dml(worker_engine, delete_sql, {"id": jobs[status]}, tenant_id=tenant) == 0, (
+                f"app_worker deleted a {status} job (tenant context set: {tenant is not None})"
+            )
+        for status in ("done", "failed"):
+            assert await _worker_dml(worker_engine, delete_sql, {"id": jobs[status]}, tenant_id=tenant) == 1
+
+    # For real now: the finished jobs go, the unfinished ones stay.
+    for status in ("done", "failed"):
+        await _worker_run(worker_engine, delete_sql, {"id": jobs[status]}, commit=True)
+    remaining = set(
+        (await raw_db.execute(select(IngestJob.id).where(IngestJob.id.in_(list(jobs.values()))))).scalars()
+    )
+    assert remaining == {jobs["queued"], jobs["running"]}
+
+
+async def test_app_worker_updates_only_unfinished_jobs(
+    raw_db: AsyncSession, academic_world: AcademicWorld, worker_engine: AsyncEngine
+) -> None:
+    jobs = await _jobs_in_states(raw_db, academic_world, ("queued", "running", "done", "failed"))
+    update_sql = "UPDATE app.ingest_jobs SET status = :s, updated_at = now() WHERE id = :id"
+    # Finished jobs are frozen for the worker (retry is an API action by the tenant).
+    for status in ("done", "failed"):
+        assert await _worker_dml(worker_engine, update_sql, {"s": "queued", "id": jobs[status]}) == 0, (
+            f"app_worker changed a {status} job"
+        )
+    # Unfinished jobs can move on, including to the finished states.
+    assert await _worker_dml(worker_engine, update_sql, {"s": "running", "id": jobs["queued"]}) == 1
+    for target in ("queued", "done", "failed"):
+        assert await _worker_dml(worker_engine, update_sql, {"s": target, "id": jobs["running"]}) == 1
+    statuses = dict(
+        (await raw_db.execute(select(IngestJob.id, IngestJob.status).where(IngestJob.id.in_(list(jobs.values()))))).all()
+    )
+    assert statuses == {
+        jobs["queued"]: "queued", jobs["running"]: "running", jobs["done"]: "done", jobs["failed"]: "failed"
+    }
+
+
+async def test_app_tenant_can_only_update_the_retry_columns_of_a_job(
+    raw_db: AsyncSession, academic_world: AcademicWorld
+) -> None:
+    """
+    The API retry path needs status, attempts, run_after, last_error_code and updated_at only
+    (design A3). The lease and the worker id stay worker-only, and identity columns are fixed.
+    """
+    w = academic_world.a
+    graph = await create_document_graph(
+        raw_db, w, subject_name="Math", class_names=("10-A",), uploader=w.t1
+    )
+    await raw_db.commit()
+    soon = datetime.now(UTC)
+
+    allowed = {
+        "status": "failed", "attempts": 0, "run_after": soon,
+        "last_error_code": None, "updated_at": soon,
+    }
+    assert set(allowed) == set(INGEST_JOB_API_UPDATE_COLUMNS)
+    denied = ("lease_expires_at", "worker_id", "version_id", "created_at", "id", "tenant_id")
+    async with tenant_session_context(str(w.id)) as session:
+        for column, value in allowed.items():
+            async with session.begin_nested():
+                res = await session.execute(
+                    text(f"UPDATE app.ingest_jobs SET {column} = :v WHERE id = :id"),
+                    {"v": value, "id": graph.job.id},
+                )
+                assert res.rowcount == 1, column
+        for column in denied:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                async with session.begin_nested():
+                    await session.execute(
+                        text(f"UPDATE app.ingest_jobs SET {column} = {column} WHERE id = :id"),
+                        {"id": graph.job.id},
+                    )
+
+
 # ── 10. Composite FKs and partial unique indexes of the document tables ──────
 
 
@@ -1117,6 +1444,7 @@ async def test_document_versions_allow_one_published_and_one_in_flight(
             sha256=uuid.uuid4().hex + uuid.uuid4().hex,
             storage_key=f"t/{w.id}/d/{uuid.uuid4().hex}",
             uploaded_by=w.t1.id,
+            published_at=datetime.now(UTC) if status == "published" else None,
         )
 
     # A second published version is rejected.

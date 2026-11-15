@@ -379,6 +379,21 @@ def downgrade() -> None:
         END $$
     """)
 
+    # Children first, so no CASCADE is needed: a dependency this migration does not know about
+    # (a view, a foreign key from a later table) makes the DROP fail loudly instead of vanishing.
     for table in reversed(NEW_TABLES):
-        op.execute(f"DROP TABLE IF EXISTS app.{table} CASCADE")
+        op.execute(f"DROP TABLE IF EXISTS app.{table}")
     op.execute("ALTER TABLE app.tenants DROP COLUMN IF EXISTS doc_limits")
+
+    # Undo the USAGE grant on the extension schema. When pgvector sits in schema app (local and
+    # CI), app_tenant's USAGE comes from init.sql, not from this migration, so it must stay.
+    conn = op.get_bind()
+    vector_schema = conn.execute(
+        text(
+            "SELECT n.nspname FROM pg_extension e "
+            "JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'"
+        )
+    ).scalar()
+    if vector_schema is not None and vector_schema != "app":
+        quoted = conn.dialect.identifier_preparer.quote_schema(vector_schema)
+        op.execute(f"REVOKE USAGE ON SCHEMA {quoted} FROM app_tenant")

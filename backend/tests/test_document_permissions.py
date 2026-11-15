@@ -109,29 +109,50 @@ async def test_migration_backfill_restores_document_permissions_for_existing_ten
 
     w = academic_world.a
     other = academic_world.b
-    # Simulate a tenant that existed before the migration: its system roles lack the new
-    # permissions (the custom viewer role keeps its own grant).
-    system_role_ids = select(Role.id).where(Role.tenant_id == w.id, Role.is_system.is_(True))
-    await raw_db.execute(
-        delete(RolePermission).where(
-            RolePermission.tenant_id == w.id,
-            RolePermission.permission_id.in_(NEW_PERMS),
-            RolePermission.role_id.in_(system_role_ids),
+    # Simulate tenants that existed before the migration. Tenant A: both system roles lack the new
+    # permissions. Tenant B is deliberately in a DIFFERENT state: only its teacher role lacks
+    # them (its tenant_admin keeps them) and it has an extra custom role. The statement is global,
+    # so it must heal B's teacher and leave everything else of B exactly as it was.
+    for tenant_id, role_names in ((w.id, ("teacher", "tenant_admin")), (other.id, ("teacher",))):
+        system_role_ids = select(Role.id).where(
+            Role.tenant_id == tenant_id, Role.is_system.is_(True), Role.name.in_(role_names)
         )
-    )
+        await raw_db.execute(
+            delete(RolePermission).where(
+                RolePermission.tenant_id == tenant_id,
+                RolePermission.permission_id.in_(NEW_PERMS),
+                RolePermission.role_id.in_(system_role_ids),
+            )
+        )
+    extra = Role(tenant_id=other.id, name="b-extra", description="tenant B only", is_system=False)
+    raw_db.add(extra)
+    await raw_db.flush()
+    raw_db.add(RolePermission(tenant_id=other.id, role_id=extra.id, permission_id="chat:use"))
+    await raw_db.flush()
+
     before = await _perms_by_role(raw_db, w.id)
     assert not (NEW_PERMS & before["teacher"])
     assert not (NEW_PERMS & before["tenant_admin"])
+    before_b = await _perms_by_role(raw_db, other.id)
+    assert not (NEW_PERMS & before_b["teacher"]), "tenant B's teacher must start without them"
+    assert before_b["tenant_admin"] >= NEW_PERMS, "tenant B's admin must start with them"
+    assert before_b["b-extra"] == {"chat:use"}
 
     await raw_db.execute(text(module.BACKFILL_ROLE_PERMISSIONS_SQL))
     after = await _perms_by_role(raw_db, w.id)
     _assert_system_role_grants(after)
-    # Custom roles are never touched by the backfill: the viewer role still has only document:view.
+    # Roles that are not teacher/tenant_admin system roles are never touched, in either tenant.
     assert after["doc-viewer"] == {"document:view"}
-    # Running it again changes nothing (idempotent), and other tenants stay correct.
+    assert after["student"] == before["student"]
+    after_b = await _perms_by_role(raw_db, other.id)
+    assert after_b["teacher"] == before_b["teacher"] | NEW_PERMS  # healed, and only by NEW_PERMS
+    for untouched in ("tenant_admin", "student", "doc-viewer", "b-extra"):
+        assert after_b[untouched] == before_b[untouched], f"tenant B role {untouched} changed"
+    assert after_b["b-extra"] == {"chat:use"}
+    # Running it again changes nothing (idempotent) in either tenant.
     await raw_db.execute(text(module.BACKFILL_ROLE_PERMISSIONS_SQL))
     assert await _perms_by_role(raw_db, w.id) == after
-    _assert_system_role_grants(await _perms_by_role(raw_db, other.id))
+    assert await _perms_by_role(raw_db, other.id) == after_b
 
 
 async def test_academic_world_roles_get_the_expected_document_permissions(

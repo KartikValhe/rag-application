@@ -197,15 +197,16 @@ class Embedder(Protocol):
 - The dimension is locked only by each model's **partial expression HNSW index** `((embedding::vector(384))) WHERE embedding_model = '<key>'` and by the cast in the query.
 - Changing models means a new partial index, written in a migration, plus a re-index. No table rewrite. Above 2,000 dims we would need a `halfvec` index.
 
-### A2. Schema (migration `0008_phase5_documents.py`, schema `app`)
+### A2. Schema (migrations `0008_phase5_documents.py` and `0009_phase5_hardening.py`, schema `app`)
 
 **Every table:**
-- `tenant_id uuid NOT NULL REFERENCES app.tenants(id) ON DELETE CASCADE`, `PRIMARY KEY (tenant_id, id)` (or a composite natural key).
+- `tenant_id uuid NOT NULL REFERENCES app.tenants(id) ON DELETE CASCADE` (**`storage_deletions` uses `ON DELETE RESTRICT`**: the outbox must not cascade away with the tenant, see backlog B15), `PRIMARY KEY (tenant_id, id)` (or a composite natural key).
 - Composite FKs to parents.
 - `GRANT SELECT, INSERT, UPDATE, DELETE ... TO app_tenant`; **no grant to `app_platform`**.
 - `ENABLE` + `FORCE ROW LEVEL SECURITY`, plus the `tenant_isolation` policy copied from `0005`, using `NULLIF(current_setting('app.tenant_id', true), '')::uuid` in both `USING` and `WITH CHECK`.
 - On Supabase: `REVOKE ALL ... FROM anon, authenticated`.
 - The migration checks `pg_extension` for `vector` and fails with a clear message if it is missing. It does not create the extension.
+- **Hardening (0009, security review of 5a-2).** Every `storage_key` is constrained to `t/<tenant_id>/...` (`CHECK (storage_key LIKE 't/' || tenant_id::text || '/%')` on `document_versions` and `storage_deletions`). Actor columns have composite FKs to `users`. 0009 refuses to run unless the migration role is a superuser or has `BYPASSRLS` (the tables have FORCE RLS, so any other role would silently see 0 rows).
 
 ```sql
 documents (
@@ -213,10 +214,10 @@ documents (
   subject_id uuid NOT NULL,                 -- one document = one subject
   title varchar(200) NOT NULL, description text,
   created_by uuid NOT NULL, created_at, updated_at,
-  deleted_at timestamptz, deleted_by uuid,  -- soft delete (tombstone, see retention)
+  deleted_at timestamptz, deleted_by uuid,  -- soft delete (tombstone, see retention); FK (tenant_id, deleted_by) -> users ON DELETE SET NULL (deleted_by)
   PRIMARY KEY (tenant_id, id),
   UNIQUE (tenant_id, id, subject_id),       -- target for the document_classes composite FK
-  FOREIGN KEY (tenant_id, subject_id) REFERENCES app.subjects(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, subject_id) REFERENCES app.subjects(tenant_id, id) ON DELETE RESTRICT,  -- a subject with documents cannot be deleted (API: 409 subject_has_documents)
   FOREIGN KEY (tenant_id, created_by) REFERENCES app.users(tenant_id, id))
 document_classes (                          -- ONE document, MANY classes, embeddings stored once
   tenant_id, document_id, class_id, subject_id,
@@ -231,18 +232,24 @@ document_versions (
   file_kind varchar(8) NOT NULL CHECK (file_kind IN ('pdf','docx','pptx','txt','md')),
   original_filename varchar(100) NOT NULL,  -- sanitize_filename() output, display only
   size_bytes bigint NOT NULL, sha256 char(64) NOT NULL, storage_key text NOT NULL,
-  page_count int, chunk_count int, flagged_chunk_count int, flags_acknowledged_by uuid,
-  embedding_model varchar(120), uploaded_by uuid NOT NULL, published_by uuid, published_at timestamptz,
+  page_count int, chunk_count int, flagged_chunk_count int,
+  flags_acknowledged_by uuid,               -- FK (tenant_id, col) -> users ON DELETE SET NULL (col)
+  embedding_model varchar(120),
+  uploaded_by uuid NOT NULL,                -- FK (tenant_id, uploaded_by) -> users ON DELETE RESTRICT
+  published_by uuid,                        -- FK (tenant_id, col) -> users ON DELETE SET NULL (col)
+  published_at timestamptz,
   created_at, updated_at,
   UNIQUE (tenant_id, document_id, version_no),
-  UNIQUE (tenant_id, document_id, sha256))                -- idempotency: same bytes = same version
+  CHECK (status <> 'published' OR published_at IS NOT NULL),
+  CHECK (storage_key LIKE 't/' || tenant_id::text || '/%'))
+  + partial unique (tenant_id, document_id, sha256) WHERE status NOT IN ('failed','archived')   -- idempotency among ACTIVE versions (see A3 step 5)
   + partial unique (tenant_id, document_id) WHERE status = 'published'
   + partial unique (tenant_id, document_id) WHERE status IN ('queued','processing','ready')   -- one draft in flight
 chunks (
   tenant_id, id, document_version_id, document_id, subject_id,      -- subject denormalized
   ordinal int NOT NULL, page_start int, page_end int, heading_path text,
   content text NOT NULL, content_sha256 char(64) NOT NULL, token_count int NOT NULL,
-  script varchar(8) NOT NULL,                 -- 'latn' | 'deva' | 'mixed'
+  script varchar(8) NOT NULL CHECK (script IN ('latn','deva','mixed')),
   content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
   injection_flags text[] NOT NULL DEFAULT '{}', excluded boolean NOT NULL DEFAULT false,
   UNIQUE (tenant_id, document_version_id, ordinal),  -- idempotent re-runs
@@ -255,7 +262,7 @@ chunk_embeddings (
   PRIMARY KEY (tenant_id, chunk_id, embedding_model),
   FOREIGN KEY (tenant_id, chunk_id) REFERENCES app.chunks ON DELETE CASCADE)
   HNSW ((embedding::vector(384)) vector_cosine_ops) WHERE embedding_model = '<e5-small key>'
-storage_deletions (tenant_id, id, storage_key, reason, attempts, not_before, created_at)  -- outbox
+storage_deletions (tenant_id, id, storage_key, reason, attempts, not_before, created_at)  -- outbox; tenant FK ON DELETE RESTRICT; CHECK (storage_key LIKE 't/' || tenant_id::text || '/%')
 ingest_jobs (                               -- the queue (see A3)
   tenant_id, id, version_id UNIQUE,         -- FK (tenant_id, version_id) -> document_versions
   status varchar(10) CHECK (status IN ('queued','running','done','failed')),
@@ -309,7 +316,7 @@ queued -> processing -> ready -> published -> archived
    - Magic bytes, then OpenXML checks (macros, embeddings, external rels, XXE, zip bomb with document caps: 60 MB total, 25 MB per member, ratio 100), then the PDF scan with the **relaxed rule** (also applied to timetable imports; regression tests for both): reject `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia` and XFA (`/XFA`); `/OpenAction` and `/AA` are allowed. The scan only sees uncompressed names, so the sandboxed parser (which never renders or executes anything) remains the real protection.
    - Text is accepted only as UTF-8 (BOM allowed). `.md` and `.txt` are told apart by extension once the content is known to be text.
    - XLSX and CSV are rejected for documents with `unsupported_format`.
-5. Compute `sha256`. If it duplicates a version of the same document, return 409 `duplicate_version` with the existing version id. If the same bytes exist in another document **visible to the caller**, warn with `duplicate_content`; otherwise stay silent (no leak).
+5. Compute `sha256`. If it duplicates an **active** version of the same document (status `queued`, `processing`, `ready` or `published`), return 409 `duplicate_version` with the existing version id. Versions that are `failed` or `archived` do not count (partial unique index `uq_document_versions_active_sha256`), so a permanently failed upload and a rollback to older bytes can be uploaded again. If the same bytes exist in another document **visible to the caller**, warn with `duplicate_content`; otherwise stay silent (no leak).
 6. Quota check inside the transaction, under `pg_advisory_xact_lock(hashtext('doc_quota:' || tenant_id))`. Count non-deleted documents and sum `size_bytes` and `page_count` against the tenant's `max_documents` (200), `max_storage_bytes` (500 MB) and `max_pages` (5,000; pages are re-checked after parsing).
 7. `document_store.put(f"t/{tenant_id}/d/{secrets.token_hex(16)}", data)`. The key is random, tenant-prefixed and never shown to clients. Then, in one transaction: document, document_classes, version (`queued`) and audit `document:upload`. If the transaction fails, a best-effort `delete` follows.
 8. The `ingest_jobs` row (`queued`, unique per `version_id`) is inserted **in the same transaction** as the version, so a job can never be lost between commit and enqueue. The endpoint returns **202** with `DocumentVersionResponse`.
@@ -337,8 +344,13 @@ queued -> processing -> ready -> published -> archived
 
   An expired `running` lease is claimable directly, which is how a killed worker's job recovers.
 - **How this interacts with RLS** (two roles, two kinds of session):
-  - `app_worker` (`LOGIN NOSUPERUSER NOBYPASSRLS`) has column-level grants on `app.ingest_jobs` only (`SELECT`; `UPDATE (status, attempts, run_after, lease_expires_at, worker_id, last_error_code, updated_at)`; `DELETE` for finished jobs) and `SELECT (id)` on `app.tenants` for the sweeper (`tenants` has **no RLS**, verified 2026-11-15, see 0d). It has **no grant at all** on documents, chunks, users or any other tenant table.
-  - `ingest_jobs` has `ENABLE` + `FORCE ROW LEVEL SECURITY` with two policies: the usual `tenant_isolation` (for `app_tenant`, so the API inserts jobs only for its own tenant) and `worker_claim`, `TO app_worker USING (true) WITH CHECK (true)`. The worker therefore sees job metadata across tenants (ids, status, timestamps) and nothing else.
+  - `app_worker` (`LOGIN NOSUPERUSER NOBYPASSRLS`) has column-level grants on `app.ingest_jobs` only (`SELECT`; `UPDATE (status, attempts, run_after, lease_expires_at, worker_id, last_error_code, updated_at)`; `DELETE`, narrowed to finished jobs by the RLS policy below) and `SELECT (id)` on `app.tenants` for the sweeper (`tenants` has **no RLS**, verified 2026-11-15, see 0d). It has **no grant at all** on documents, chunks, users or any other tenant table.
+  - `ingest_jobs` has `ENABLE` + `FORCE ROW LEVEL SECURITY` with exactly four policies (0009 replaced the single `FOR ALL` worker policy):
+    - `tenant_isolation`, `TO app_tenant` only (so the API inserts and retries jobs only for its own tenant, and the worker cannot gain access by setting `app.tenant_id` itself);
+    - `worker_select`, `FOR SELECT TO app_worker USING (true)`: the worker sees job metadata across tenants (ids, status, timestamps) and nothing else;
+    - `worker_update`, `FOR UPDATE TO app_worker USING (status IN ('queued','running')) WITH CHECK (status IN ('queued','running','done','failed'))`: finished jobs are frozen for the worker;
+    - `worker_delete`, `FOR DELETE TO app_worker USING (status IN ('done','failed'))`: it can never delete a queued or running job of any tenant.
+  - **API retry path.** `app_tenant` may update only `status`, `attempts`, `run_after`, `last_error_code` and `updated_at` of `ingest_jobs` (column grant). A retry (`POST .../versions/{version_id}/retry`) sets the job back to `queued`, `attempts = 0`, `run_after = now()`, `last_error_code = NULL`. `lease_expires_at` and `worker_id` stay worker-only.
   - Real work happens in a **separate session** as `app_tenant` whose `app.tenant_id` is set with `set_config(..., true)` from the `tenant_id` of the **claimed row** (database-derived, never from a message payload). A helper `tenant_session_for(job)` takes the `Job` object, not a raw UUID. The setting is transaction-local, so every transaction of the job sets it again before its first query.
   - Residual risk: the worker process holds both credentials, so a bug that passes the wrong job is contained to that job's tenant by RLS but not prevented. Tests cover this (C2).
 
@@ -401,7 +413,7 @@ queued -> processing -> ready -> published -> archived
 | Group | Codes |
 |---|---|
 | Phase 4 upload codes (all reused) | `file_too_large`, `too_many_parts`, `empty_file`, `disallowed_file_type`, `file_type_mismatch`, `invalid_openxml_format`, `macro_enabled_file`, `embedded_content`, `external_relationship`, `invalid_xml`, `xml_entity_expansion_forbidden`, `corrupt_archive`, `encrypted_file`, `zip_bomb_detected`, `zip_member_too_large`, `pdf_active_content`, `pdf_too_complex`, `scanned_pdf`, `password_protected_pdf`, `corrupt_pdf`, `parse_timeout`, `parse_failed`, `parse_output_too_large`, `worker_crash` |
-| New | `unsupported_format`, `invalid_encoding`, `too_many_pages`, `too_many_slides`, `text_too_large`, `no_text_found`, `unreadable_text`, `processing_failed`, `duplicate_version` (409), `document_processing_in_progress` (409), `flags_acknowledgement_required` (409), `version_not_ready` (409), `quota_documents_exceeded` / `quota_storage_exceeded` / `quota_pages_exceeded` (422), `rate_limit_exceeded` / `tenant_rate_limit_exceeded` (429 + `Retry-After`), `service_unavailable` (503), `document_manage_requires_all_classes` (403), `not_found` (404) |
+| New | `unsupported_format`, `invalid_encoding`, `too_many_pages`, `too_many_slides`, `text_too_large`, `no_text_found`, `unreadable_text`, `processing_failed`, `duplicate_version` (409, only against active versions), `subject_has_documents` (409, `DELETE /api/v1/subjects/{subject_id}`), `document_processing_in_progress` (409), `flags_acknowledgement_required` (409), `version_not_ready` (409), `quota_documents_exceeded` / `quota_storage_exceeded` / `quota_pages_exceeded` (422), `rate_limit_exceeded` / `tenant_rate_limit_exceeded` (429 + `Retry-After`), `service_unavailable` (503), `document_manage_requires_all_classes` (403), `not_found` (404) |
 
 ### A4. Permissions and scope
 
@@ -682,13 +694,25 @@ class Guardrail(Protocol):
 
 - **Extra composite FKs on `chunks`:** `(tenant_id, document_version_id, document_id)` to `document_versions` and `(tenant_id, document_id, subject_id)` to `documents`, so the denormalized `document_id` and `subject_id` cannot disagree with the version or document. This needs one more unique key, `UNIQUE (tenant_id, id, document_id)` on `document_versions`. The design had a single FK to the version.
 - **Extra indexes:** `document_classes (tenant_id, class_id, subject_id)` (scope lookups) and `storage_deletions (tenant_id, not_before)` (sweeper drain).
-- **`ingest_jobs`:** the uniqueness is `UNIQUE (tenant_id, version_id)` (composite, like every other key) instead of a bare `version_id UNIQUE`. `tenant_isolation` applies to `PUBLIC` as on all other tables; `worker_claim` is `TO app_worker`.
+- **`ingest_jobs`:** the uniqueness is `UNIQUE (tenant_id, version_id)` (composite, like every other key) instead of a bare `version_id UNIQUE`. `tenant_isolation` applied to `PUBLIC` and `worker_claim` was one `FOR ALL` policy for `app_worker` (both replaced by migration 0009, see the hardening record below).
 - **pgvector is created by `infra/postgres/init.sql`** (both databases), in the schema of `citext` found through `pg_extension`; CI uses the same file, so it needed no other change. The migration only **verifies** the extension and the `app_worker` role and fails with a clear message if either is missing. Every vector type, function and operator class in it is qualified with the schema read from `pg_extension`, and `USAGE` on that schema is granted to `app_tenant`. An existing dev database needs the role once (`CREATE ROLE app_worker ...` as in `init.sql`) before `alembic upgrade head`.
 - **One shared model key:** `app/ml/model_keys.py` (`E5_SMALL_MODEL_KEY` = repo + pinned revision from 0d). The migration (index predicate), the fixtures and later code import it. The status, stage and kind lists of the CHECK constraints come from constants in `app/db/models/document.py`, which the migration also imports; a test compares the database constraints with them.
 - **`Vector` ORM type** is a small local `UserDefinedType` (text format, no driver codec) so the `pgvector` Python package is not needed yet; 5c may swap it.
 - **`WORKER_DATABASE_URL`** is optional in `Settings` (default empty, so no secret is stored in code; the API does not need it). `.env.example` shows the dev password from `init.sql` only.
 - **Tests:** the generic isolation tests now commit the setup row (before, the row was invisible to the second connection, so SELECT/UPDATE/DELETE/no-tenant checks could not fail) and filter UPDATE/DELETE on `tenant_id` (the old predicate compared `tenant_id` with an `id`). The guard test and the `CUSTOM_COVERAGE` allow-list are in `tests/test_isolation.py`.
 - **Not done (as instructed):** `upload_security.py`, body limits, private store and `SlotManager` (5a-3); backlog B14 (`db_dsn` column grant).
+
+**5a-2 hardening record (2026-11-15; security review findings, migration `0009_phase5_hardening.py`).** 0008 is untouched except its `downgrade()`. Changes:
+
+- **`ingest_jobs` policies:** per-command worker policies and `tenant_isolation` for `app_tenant` only (A3). `app_tenant` has a column-level `UPDATE` grant limited to the retry columns.
+- **`fk_documents_subject` is `RESTRICT`** (was `CASCADE`, which silently deleted documents, versions and chunks and orphaned files). `DELETE /api/v1/subjects/{subject_id}` returns 409 `subject_has_documents`, also while only soft-deleted documents remain (they count until purged). See `docs/api/phase5.md`.
+- **`storage_deletions` tenant FK is `RESTRICT`.** Tenant offboarding must drain the outbox and purge the `t/{tenant_id}/` prefix first (backlog B15, B18).
+- **`storage_key` prefix CHECK** on `document_versions` and `storage_deletions`.
+- **Duplicate bytes (design change, approved):** `UNIQUE (tenant_id, document_id, sha256)` became a partial unique index `WHERE status NOT IN ('failed','archived')` (A3 step 5).
+- **Actor FKs:** composite FKs for `uploaded_by` (RESTRICT) and `published_by`, `flags_acknowledged_by`, `deleted_by` (`ON DELETE SET NULL (col)`, PostgreSQL 15+).
+- **CHECKs:** `chunks.script` (from `CHUNK_SCRIPTS`) and `status = 'published'` implies `published_at IS NOT NULL` (existing rows are fixed first).
+- **Migration safety:** 0009 asserts `rolsuper OR rolbypassrls` first. The 0008 downgrade now revokes the `USAGE` grant on the extension schema (unless that schema is `app`, whose grant comes from `init.sql`) and drops tables without `CASCADE`.
+- **Tests:** the generic UPDATE and DELETE isolation tests now update a non-key column, require 0 affected rows (no error is accepted) and compare tenant B's rows through an owner connection; the policy test discovers tables from the catalog and compares policy names, commands, roles and predicate text exactly. Known deliberate exception: `platform_read_invitations` (0001).
 
 ### C2. Test plan
 

@@ -17,10 +17,12 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import TenantDB
 from app.core.authz import Scope, ScopeType, require
 from app.db.models.academic import Class, ClassSubject, Enrollment, Subject, TeacherAssignment
+from app.db.models.document import Document
 from app.db.models.rbac import Role, UserRole
 from app.db.models.user import User
 from app.services.audit import record_audit_event
@@ -567,9 +569,37 @@ async def delete_subject(
         if ta_check.scalar_one_or_none() is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
 
+    # A subject that still has documents (soft-deleted tombstones count until they are purged)
+    # cannot be deleted: the database restricts it (fk_documents_subject) so documents, versions,
+    # chunks and stored files are never removed silently. The check gives the stable 409; the
+    # savepoint below covers a document created between the check and the delete.
+    subject_has_documents = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "subject_has_documents",
+            "message": (
+                "This subject still has documents, including deleted ones that are not purged "
+                "yet. Remove them before deleting the subject."
+            ),
+        },
+    )
+    in_use = await db.execute(
+        select(Document.id)
+        .where(Document.tenant_id == current_user.tenant_id, Document.subject_id == subject_id)
+        .limit(1)
+    )
+    if in_use.first() is not None:
+        raise subject_has_documents
+
     sub_name = s.name
-    await db.delete(s)
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            await db.delete(s)
+            await db.flush()
+    except IntegrityError as exc:
+        if "fk_documents_subject" not in str(exc):
+            raise
+        raise subject_has_documents from exc
 
     await record_audit_event(
         tenant_id=current_user.tenant_id,

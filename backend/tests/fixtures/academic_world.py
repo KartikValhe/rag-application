@@ -20,6 +20,7 @@ Everything is created through the privileged (no-RLS) session, like the other fi
 import hashlib
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest_asyncio
 from sqlalchemy import select
@@ -289,6 +290,9 @@ async def create_document_graph(
         storage_key=f"t/{wt.id}/d/{uuid.uuid4().hex}",
         uploaded_by=uploader.id,
         embedding_model=E5_SMALL_MODEL_KEY,
+        # A published version always records when (and by whom) it was published.
+        published_at=datetime.now(UTC) if status == "published" else None,
+        published_by=uploader.id if status == "published" else None,
     )
     db.add(version)
     await db.flush()
