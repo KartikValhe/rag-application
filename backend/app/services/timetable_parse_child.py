@@ -4,18 +4,20 @@ app/services/timetable_parse_child.py
 Entry point of the fresh parse subprocess: `python -m app.services.timetable_parse_child <format>`.
 
 Contract with the runner (timetable_parser_runner.py):
-- the uploaded file bytes arrive on stdin;
+- the uploaded file bytes arrive on stdin (raw, no framing);
 - one JSON document is written to stdout (nothing else may reach stdout);
-- on Linux, memory and CPU limits are applied before any parser code is imported.
+- on Linux, the parent-death signal, then memory and CPU limits are applied before any parser
+  code is imported (shared helpers in app/core/sandbox_child.py).
 
 This module must not import app.core.config or anything that needs secrets: the
 runner starts the child with a minimal environment.
 """
 
-import importlib
 import json
 import sys
 from typing import Any
+
+from app.core import sandbox_child
 
 # Address space and CPU limits (Linux only). The runner also enforces a 10 s wall clock.
 MAX_ADDRESS_SPACE_BYTES = 1024 * 1024 * 1024  # ~1 GB
@@ -24,13 +26,7 @@ MAX_CPU_SECONDS = 15
 
 def apply_resource_limits() -> None:
     """Apply RLIMIT_AS and RLIMIT_CPU. Skipped where the resource module does not exist (Windows)."""
-    try:
-        # importlib keeps mypy happy on platforms without the resource module
-        resource = importlib.import_module("resource")
-    except ImportError:
-        return
-    resource.setrlimit(resource.RLIMIT_AS, (MAX_ADDRESS_SPACE_BYTES, MAX_ADDRESS_SPACE_BYTES))
-    resource.setrlimit(resource.RLIMIT_CPU, (MAX_CPU_SECONDS, MAX_CPU_SECONDS))
+    sandbox_child.apply_resource_limits(MAX_ADDRESS_SPACE_BYTES, MAX_CPU_SECONDS)
 
 
 def _parse(data: bytes, format_type: str) -> dict[str, Any]:
@@ -76,6 +72,7 @@ def main() -> None:
 
 
 def _main() -> None:
+    sandbox_child.set_parent_death_signal()  # Linux: a killed API process cannot orphan the parser
     apply_resource_limits()
     # Library prints must never corrupt the JSON result
     real_stdout = sys.stdout

@@ -3,38 +3,31 @@ app/services/timetable_parser_runner.py
 ───────────────────────────────────────
 Hardened runner for timetable parsing: limits, slots and a sandboxed child process.
 
-Each parse runs in a FRESH subprocess (`python -m <child module>`):
-- minimal environment: no DATABASE_URL, SECRET_KEY, REDIS_* or any other secret;
-- empty temporary working directory, deleted afterwards;
-- file bytes in over stdin, one JSON result out over stdout (capped at 5 MB);
-- hard wall-clock timeout that kills the whole process tree;
-- the parent reads output while it waits, so large results never look like a timeout;
-- on Linux the child applies RLIMIT_AS / RLIMIT_CPU (see timetable_parse_child.py).
+The sandbox itself is generic and lives in app/core/sandbox.py (step 5b-2): a FRESH subprocess
+(`python -m <child module>`) per parse with a minimal environment, an empty temporary working
+directory, file bytes over stdin and one JSON result over stdout (capped at 5 MB here), a hard
+wall clock that kills the whole process tree, and output read while waiting. On Linux the child
+applies RLIMIT_AS / RLIMIT_CPU and the parent-death signal (see timetable_parse_child.py).
 
+This module keeps what is timetable-specific: the slots, the rate limits, the client messages and
+the mapping of sandbox errors to the Phase 4 error codes and status codes.
 Concurrency caps and rate limits use the atomic slot manager in app/core/slots.py.
 """
 
-import asyncio
-import importlib.util
+import asyncio  # noqa: F401  (tests patch asyncio.to_thread through this module)
 import json
 import logging
-import os
-import re
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import threading
-import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, status
 
+from app.core import sandbox
+from app.core.sandbox import describe_exit as _describe_exit  # noqa: F401  (kept for callers and tests)
+from app.core.sandbox import kill_tree as _kill_tree  # noqa: F401  (kept for callers and tests)
 from app.core.slots import SlotLease, SlotLimit, SlotManager, SlotRejected, default_manager
 from app.core.upload_security import UploadSecurityError
 
@@ -79,9 +72,6 @@ CHILD_ERROR_MESSAGES: dict[str, str] = {
     ),
     "corrupt_pdf": "The PDF document could not be read.",
 }
-# The child may print one marker line with the class name of an uncaught exception to stderr.
-# Only a strict identifier match is ever read from stderr; nothing else is kept or logged.
-_ERROR_TYPE_MARKER = re.compile(rb"child_error_type=([A-Za-z_][A-Za-z0-9_]{0,60})")
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # directory that contains the `app` package
 
 
@@ -166,198 +156,11 @@ async def parse_concurrency_guard(
         await manager.release(lease)
 
 
-# ─── Sandboxed child process ──────────────────────────────────────────────────
-
-def _child_python_path(child_module: str) -> str:
-    """
-    Import roots for the child. Normally only the directory that holds the `app` package.
-    The package may be installed into site-packages, so a non-default child module (used by
-    tests) is looked up in the parent and the directory that holds it is added too.
-    """
-    roots = [str(_BACKEND_ROOT)]
-    if child_module != DEFAULT_CHILD_MODULE:
-        top = child_module.split(".")[0]
-        try:
-            spec = importlib.util.find_spec(top)
-        except (ImportError, ValueError):
-            spec = None
-        if spec is not None:
-            locations = list(spec.submodule_search_locations or [])
-            if not locations and spec.origin:
-                locations = [spec.origin]
-            for loc in locations:
-                root = str(Path(loc).resolve().parent)
-                if root not in roots:
-                    roots.append(root)
-    return os.pathsep.join(roots)
-
+# ─── Sandboxed child process (generic part: app/core/sandbox.py) ─────────────
 
 def _child_env(workdir: str, child_module: str = DEFAULT_CHILD_MODULE) -> dict[str, str]:
-    """Minimal environment. Nothing is inherited from the parent except what Python itself needs."""
-    env = {
-        "PYTHONPATH": _child_python_path(child_module),
-        "PYTHONUTF8": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "TMPDIR": workdir,
-        "TEMP": workdir,
-        "TMP": workdir,
-    }
-    if sys.platform == "win32":
-        # Windows cannot start Python (winsock, random) without SYSTEMROOT
-        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
-    return env
-
-
-def _kill_tree(proc: "subprocess.Popen[bytes]") -> None:
-    """Kill the child and everything it started."""
-    if sys.platform == "win32":
-        with suppress(Exception):
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-            )
-    else:
-        with suppress(Exception):
-            os.killpg(proc.pid, signal.SIGKILL)  # child is its own session/process group leader
-    with suppress(Exception):
-        proc.kill()
-
-
-def _describe_exit(returncode: int | None, stderr_tail: bytes) -> tuple[str, str, str]:
-    """Exit code, signal name and exception class name for server-side logs. No paths or text."""
-    exit_code = "none" if returncode is None else str(returncode)
-    signal_name = "none"
-    if returncode is not None and returncode < 0:
-        try:
-            signal_name = signal.Signals(-returncode).name
-        except ValueError:
-            signal_name = f"SIG{-returncode}"
-    match = _ERROR_TYPE_MARKER.search(stderr_tail)
-    error_type = match.group(1).decode("ascii") if match else "unknown"
-    return exit_code, signal_name, error_type
-
-
-def _run_child_blocking(
-    data: bytes, format_type: str, child_module: str, timeout_seconds: float, max_output_bytes: int
-) -> bytes:
-    workdir = tempfile.mkdtemp(prefix="ttparse_")
-    proc: subprocess.Popen[bytes] | None = None
-    try:
-        popen_kwargs: dict[str, Any] = {}
-        if sys.platform == "win32":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-        else:
-            popen_kwargs["start_new_session"] = True
-
-        proc = subprocess.Popen(
-            [sys.executable, "-P", "-m", child_module, format_type],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=workdir,
-            env=_child_env(workdir, child_module),
-            close_fds=True,
-            **popen_kwargs,
-        )
-        child = proc
-        chunks: list[bytes] = []
-        overflow = threading.Event()
-
-        def write_input() -> None:
-            try:
-                assert child.stdin is not None
-                child.stdin.write(data)
-                child.stdin.close()
-            except (OSError, ValueError):
-                pass  # child died or was killed before reading everything
-
-        def read_output() -> None:
-            total = 0
-            assert child.stdout is not None
-            try:
-                while True:
-                    chunk = child.stdout.read(65536)
-                    if not chunk:
-                        return
-                    total += len(chunk)
-                    if total > max_output_bytes:
-                        overflow.set()
-                        _kill_tree(child)
-                        return
-                    chunks.append(chunk)
-            except (OSError, ValueError):
-                return
-
-        stderr_tail = bytearray()
-
-        def read_stderr() -> None:
-            # Drain stderr so the child never blocks on it; keep only the last 4 KB
-            assert child.stderr is not None
-            try:
-                while True:
-                    chunk = child.stderr.read(4096)
-                    if not chunk:
-                        return
-                    stderr_tail.extend(chunk)
-                    del stderr_tail[:-4096]
-            except (OSError, ValueError):
-                return
-
-        writer = threading.Thread(target=write_input, daemon=True)
-        reader = threading.Thread(target=read_output, daemon=True)
-        err_reader = threading.Thread(target=read_stderr, daemon=True)
-        writer.start()
-        reader.start()
-        err_reader.start()
-
-        deadline = time.monotonic() + timeout_seconds
-        reader.join(timeout_seconds)
-        timed_out = reader.is_alive()
-        if not timed_out and not overflow.is_set():
-            try:
-                child.wait(timeout=max(0.1, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                timed_out = True
-
-        if overflow.is_set():
-            raise UploadSecurityError(
-                code="parse_output_too_large",
-                message="The parsed result is too large to process.",
-            )
-        if timed_out:
-            _kill_tree(child)
-            raise UploadSecurityError(
-                code="parse_timeout",
-                message="File parsing exceeded the 10-second timeout and was terminated.",
-                status_code=status.HTTP_408_REQUEST_TIMEOUT,
-            )
-        writer.join(timeout=1.0)
-        err_reader.join(timeout=1.0)
-        output = b"".join(chunks)
-        if proc.returncode not in (0, None) or not output:
-            exit_code, signal_name, error_type = _describe_exit(proc.returncode, bytes(stderr_tail))
-            logger.warning(
-                "timetable_child_abnormal_exit exit_code=%s signal=%s error_type=%s",
-                exit_code,
-                signal_name,
-                error_type,
-            )
-        return output
-    finally:
-        if proc is not None:
-            if proc.poll() is None:
-                _kill_tree(proc)
-            with suppress(Exception):
-                proc.wait(timeout=5)
-            for pipe in (proc.stdin, proc.stdout, proc.stderr):
-                if pipe is not None:
-                    with suppress(Exception):
-                        pipe.close()
-        shutil.rmtree(workdir, ignore_errors=True)
+    """The sandbox's minimal environment, rooted at this module's view of the backend directory."""
+    return sandbox.child_env(workdir, child_module, backend_root=_BACKEND_ROOT)
 
 
 async def run_killable_parse(
@@ -370,12 +173,31 @@ async def run_killable_parse(
     """
     Parse an uploaded file in a fresh, sandboxed subprocess with a hard timeout.
     `child_module` is the module started with `python -m`; it must follow the stdin/stdout
-    contract described in timetable_parse_child.py.
+    contract described in timetable_parse_child.py (raw file bytes on stdin, no framing).
     """
+    limits = sandbox.SandboxLimits(timeout_seconds=timeout_seconds, max_output_bytes=MAX_OUTPUT_BYTES)
     async with parse_concurrency_guard(tenant_id, lease_seconds=max(SLOT_LEASE_SECONDS, timeout_seconds + 20)):
-        raw = await asyncio.to_thread(
-            _run_child_blocking, data, format_type, child_module, timeout_seconds, MAX_OUTPUT_BYTES
-        )
+        try:
+            raw = await sandbox.run_child(
+                child_module,
+                data,
+                args=(format_type,),
+                params=None,
+                limits=limits,
+                logger=logger,
+                log_event="timetable_child_abnormal_exit",
+            )
+        except sandbox.SandboxOutputTooLarge:
+            raise UploadSecurityError(
+                code="parse_output_too_large",
+                message="The parsed result is too large to process.",
+            ) from None
+        except sandbox.SandboxTimeout:
+            raise UploadSecurityError(
+                code="parse_timeout",
+                message="File parsing exceeded the 10-second timeout and was terminated.",
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            ) from None
 
     if not raw:
         raise UploadSecurityError(

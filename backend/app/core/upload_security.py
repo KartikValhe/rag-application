@@ -252,6 +252,16 @@ async def stream_upload_with_limit(
     return buffer.getvalue()
 
 
+@dataclass(frozen=True)
+class UploadInspection:
+    """What validation found: the format, and the pages (PDF) or slides (PPTX) it counted."""
+
+    kind: str
+    # PDF: uncompressed /Type /Page objects seen by the byte scan (a compressed page tree is
+    # invisible to it, backlog B33). PPTX: p:sldId entries. None for the other formats.
+    page_count: int | None = None
+
+
 def validate_upload(
     data: bytes,
     filename: str,
@@ -263,6 +273,31 @@ def validate_upload(
 ) -> str:
     """
     Validate file content (magic bytes) against the profile's allow-list and return the format.
+    The one validation: inspect_upload does the work, this returns only the format.
+    """
+    return inspect_upload(
+        data,
+        filename,
+        profile,
+        max_file_bytes=max_file_bytes,
+        max_pdf_pages=max_pdf_pages,
+        max_pptx_slides=max_pptx_slides,
+    ).kind
+
+
+def inspect_upload(
+    data: bytes,
+    filename: str,
+    profile: UploadProfile = UploadProfile.TIMETABLE,
+    *,
+    max_file_bytes: int | None = None,
+    max_pdf_pages: int | None = None,
+    max_pptx_slides: int | None = None,
+) -> UploadInspection:
+    """
+    Validate file content (magic bytes) against the profile's allow-list; return the format and
+    the page or slide count the checks saw. The document worker runs this inside its sandbox
+    (app/services/document_parse_child.py), the routes run it through validate_upload_async.
 
     TIMETABLE: 'csv', 'xlsx', 'docx', 'pdf' (and 'pptx', which the importer refuses later).
     DOCUMENT:  'pdf', 'docx', 'pptx', 'txt', 'md'. CSV and XLSX give unsupported_format; text must
@@ -302,21 +337,22 @@ def validate_upload(
     if data.startswith(b"%PDF-"):
         if profile is UploadProfile.DOCUMENT and ext != "pdf":
             raise _extension_mismatch()
-        validate_pdf_bytes(
+        pages = validate_pdf_bytes(
             data,
             max_pages=max_pdf_pages if max_pdf_pages is not None else rules.pdf_pages,
             pages_code=rules.pdf_pages_code,
         )
-        return "pdf"
+        return UploadInspection("pdf", pages)
 
     # 4. Check Zip-based formats (XLSX, DOCX, PPTX)
     if data.startswith(b"PK\x03\x04"):
-        return _sniff_openxml_format(
+        kind, slides = _sniff_openxml_format(
             data,
             filename,
             profile,
             max_slides=max_pptx_slides if max_pptx_slides is not None else rules.pptx_slides,
         )
+        return UploadInspection(kind, slides)
 
     # 5. Plain text: CSV for timetables, TXT / MD for documents
     # Reject files containing NUL bytes (binary indicators)
@@ -338,16 +374,16 @@ def validate_upload(
             raise _unsupported_format()
         if ext not in ("txt", "md"):
             raise _extension_mismatch()
-        return ext
+        return UploadInspection(ext)
 
     # Timetable CSV: verify text decodability
     try:
         data.decode("utf-8-sig")
-        return "csv"
+        return UploadInspection("csv")
     except UnicodeDecodeError:
         try:
             data.decode("cp1252")
-            return "csv"
+            return UploadInspection("csv")
         except UnicodeDecodeError as err:
             raise UploadSecurityError(
                 code="disallowed_file_type",
@@ -541,9 +577,12 @@ def _check_content_type(_name: tuple[str | None, str], attrs: Any) -> None:
         raise _reject_macro()
 
 
-def _sniff_openxml_format(data: bytes, filename: str, profile: UploadProfile, max_slides: int | None) -> str:
+def _sniff_openxml_format(
+    data: bytes, filename: str, profile: UploadProfile, max_slides: int | None
+) -> tuple[str, int | None]:
     """
-    Validate a ZIP-based OpenXML container (XLSX, DOCX, PPTX).
+    Validate a ZIP-based OpenXML container (XLSX, DOCX, PPTX). Returns the format and, for a
+    presentation, the number of slides (p:sldId entries); None for the other formats.
     The type comes from the CONTENT; the extension must agree with it.
     Every XML check fails closed, and every XML part is streamed (see _scan_xml).
     """
@@ -600,7 +639,7 @@ def _sniff_openxml_format(data: bytes, filename: str, profile: UploadProfile, ma
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
             if ext != kind:
                 raise _extension_mismatch()
-            return kind
+            return kind, (slide_ids if kind == "pptx" else None)
 
     except zipfile.BadZipFile as err:
         raise UploadSecurityError(
@@ -626,18 +665,18 @@ def _decode_name_escapes(raw: bytes) -> bytes:
 
 def validate_pdf_bytes(
     data: bytes, *, max_pages: int = MAX_PDF_PAGES, pages_code: str = "pdf_too_complex"
-) -> None:
+) -> int:
     """
     The one PDF rule, shared by timetable imports and documents. Best-effort scan of the raw bytes:
     - rejects /JavaScript, /JS, /Launch, /EmbeddedFile, /RichMedia and /XFA, also written with
       #xx escapes (/J#61vaScript);
     - allows /OpenAction and /AA (they only name actions and nothing here executes them);
-    - caps the object and page counts.
+    - caps the object and page counts, and returns the page count it saw.
     It only sees UNCOMPRESSED names and counts: a name or a /Type /Page inside a compressed object
     stream is invisible to it, so a PDF can hide both active content and its real page count from
-    this scan. It is a first filter, not a protection. The memory limit of the document parser
-    applies on Linux only, and the sandboxed document parser itself arrives with step 5b, which must
-    re-check the page count after parsing (backlog B33).
+    this scan. It is a first filter, not a protection. Since step 5b-2 the document worker runs it
+    again inside its sandbox (killable; memory limit on Linux only); the real page count comes from
+    the text extraction of 5b-3, which must re-check it (backlog B33).
     The scan is linear in the file size and its memory use does not grow with the file.
     """
     pages = 0
@@ -678,6 +717,7 @@ def validate_pdf_bytes(
         if pages_code == "too_many_pages":
             raise UploadSecurityError(code="too_many_pages", message="The PDF has too many pages to process.")
         raise UploadSecurityError(code="pdf_too_complex", message="The PDF is too large or complex to process.")
+    return pages
 
 
 def validate_zip_archive(data: bytes, profile: UploadProfile = UploadProfile.TIMETABLE) -> None:

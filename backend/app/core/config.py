@@ -88,6 +88,29 @@ class Settings(BaseSettings):
     DOC_UPLOAD_RATE_USER: int = 20  # uploads per user per hour
     DOC_UPLOAD_RATE_TENANT: int = 100  # uploads per tenant per hour
 
+    # ── Ingestion worker (design A3, step 5b-2) ─────────────────────────────
+    INGEST_GLOBAL_CONCURRENCY: int = 2  # jobs running at once on the whole platform
+    INGEST_TENANT_CONCURRENCY: int = 1  # jobs running at once per tenant
+    INGEST_LEASE_SECONDS: int = 120  # job lease and slot TTL; a dead worker's job is free after this
+    INGEST_HEARTBEAT_SECONDS: int = 30  # how often the lease and both slots are renewed
+    INGEST_MAX_JOB_SECONDS: int = 1800  # hard cap on one attempt (slot max lifetime)
+    INGEST_MAX_ATTEMPTS: int = 3
+    INGEST_RETRY_BASE_SECONDS: int = 30  # transient retry: base * 2^(attempt-1) + jitter
+    INGEST_RETRY_JITTER_SECONDS: int = 15
+    INGEST_BUSY_MIN_SECONDS: int = 15  # a busy slot sends the job back for 15-45 s (attempt refunded)
+    INGEST_BUSY_MAX_SECONDS: int = 45
+    INGEST_SHUTDOWN_GRACE_SECONDS: int = 20  # SIGTERM: time to finish before the job is released
+    INGEST_FINISHED_JOB_RETENTION_DAYS: int = 7
+    WORKER_POLL_SECONDS: float = 5.0  # idle poll interval (with jitter)
+    SWEEPER_INTERVAL_SECONDS: int = 60
+    SWEEPER_MISSING_JOB_AFTER_SECONDS: int = 120  # a queued version without a job row after this gets one
+    DOC_TOMBSTONE_RETENTION_DAYS: int = 30
+    # Sandboxed document parser (app/services/document_parse_child.py). Memory and CPU: Linux only.
+    DOC_PARSE_TIMEOUT_SECONDS: int = 120
+    DOC_PARSE_MAX_OUTPUT_BYTES: int = 20 * 1024 * 1024
+    DOC_PARSE_MEMORY_LIMIT_MB: int = 1024  # 768 on 2 GB hosts
+    DOC_PARSE_CPU_SECONDS: int = 120
+
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property
     def is_development(self) -> bool:
