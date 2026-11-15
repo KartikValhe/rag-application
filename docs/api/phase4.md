@@ -429,7 +429,7 @@ Upload and parse schedule files (CSV, XLSX, DOCX, text PDF) using an isolated ki
   | 422 | `invalid_xml` | Malformed or unreadable XML in the package (fails closed). |
   | 422 | `xml_entity_expansion_forbidden` | XXE or entity-expansion attempt. |
   | 422 | `corrupt_archive`, `encrypted_file`, `zip_bomb_detected`, `zip_member_too_large` | Invalid, password-protected or oversized archive. |
-  | 422 | `pdf_active_content` | PDF contains `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/OpenAction` or `/AA` (best-effort scan). |
+  | 422 | `pdf_active_content` | PDF contains `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia` or `/XFA` (best-effort scan; also with `#xx` escapes). `/OpenAction` and `/AA` are allowed since step 5a-3. |
   | 422 | `pdf_too_complex` | PDF over 20,000 objects or 100 pages. |
   | 422 | `scanned_pdf`, `password_protected_pdf`, `corrupt_pdf` | PDF has no text, is encrypted, or cannot be read. |
   | 422 | `nul_byte_in_csv`, `invalid_encoding`, `empty_workbook` | Content problems found by the parser. |

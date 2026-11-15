@@ -21,6 +21,8 @@ ENV/
 htmlcov/
 uploads/
 backend/uploads/
+document_store/
+backend/document_store/
 
 # Node / Frontend
 frontend/node_modules/

@@ -42,10 +42,11 @@ from sqlalchemy import delete, desc, func, select
 from app.api.deps import TenantDB
 from app.core.authz import GENERIC_NOT_FOUND, Scope, ScopeType, require
 from app.core.upload_security import (
+    UploadProfile,
     attachment_header,
     sanitize_filename,
-    sniff_and_validate_file_type,
     stream_upload_with_limit,
+    validate_upload,
 )
 from app.db.models.academic import Class, ClassSubject, Subject, TeacherAssignment
 from app.db.models.rbac import Role, UserRole
@@ -1236,7 +1237,7 @@ async def preview_timetable_import(
 
     # 4. Sanitize filename and validate file type (magic bytes)
     clean_name = sanitize_filename(file.filename)
-    format_type = sniff_and_validate_file_type(file_bytes, clean_name)
+    format_type = validate_upload(file_bytes, clean_name, UploadProfile.TIMETABLE)
 
     # 5. Execute parsing in a kill-able process with 10s timeout and concurrency caps
     records = await run_killable_parse(file_bytes, format_type, current_user.tenant_id, timeout_seconds=10.0)

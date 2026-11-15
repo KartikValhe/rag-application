@@ -71,7 +71,10 @@ class Settings(BaseSettings):
     CORS_ALLOWED_ORIGINS: str = ""  # Comma-separated list of explicit allowed origins
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"
-    UPLOAD_DIR: str = "uploads"
+    UPLOAD_DIR: str = "uploads"  # PUBLIC branding media only (logos, favicons)
+    # PRIVATE document store (original uploads). Must not be inside or contain UPLOAD_DIR. Nothing
+    # serves this directory; documents leave only through an authenticated, streaming route.
+    DOCUMENT_STORE_DIR: str = "document_store"
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property

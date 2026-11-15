@@ -85,6 +85,10 @@ _ERROR_TYPE_MARKER = re.compile(rb"child_error_type=([A-Za-z_][A-Za-z0-9_]{0,60}
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # directory that contains the `app` package
 
 
+# The text clients see when Redis is down; the slot manager itself has no timetable wording.
+UNAVAILABLE_MESSAGE = "Timetable import is temporarily unavailable. Please try again in a few minutes."
+
+
 def _slots() -> SlotManager:
     return default_manager
 
@@ -109,7 +113,7 @@ async def check_and_record_rate_limit(user_id: uuid.UUID, tenant_id: uuid.UUID) 
         SlotLimit(f"{TENANT_RATELIMIT_KEY_PREFIX}{tenant_id}", TENANT_RATE_LIMIT_COUNT, TENANT_RATE_LIMIT_WINDOW),
     ]
     try:
-        await _slots().acquire(limits)
+        await _slots().acquire(limits, unavailable_message=UNAVAILABLE_MESSAGE)
     except SlotRejected as rej:
         if rej.index == 0:
             raise _too_many(
@@ -143,7 +147,8 @@ async def parse_concurrency_guard(
                 SlotLimit(
                     f"{TENANT_CONCURRENCY_KEY_PREFIX}{tenant_id}", MAX_TENANT_CONCURRENT_PARSES, lease_seconds
                 ),
-            ]
+            ],
+            unavailable_message=UNAVAILABLE_MESSAGE,
         )
     except SlotRejected as rej:
         if rej.index == 0:

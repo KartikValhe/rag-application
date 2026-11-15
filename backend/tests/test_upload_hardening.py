@@ -185,7 +185,17 @@ def test_clean_pdf_passes() -> None:
 
 @pytest.mark.parametrize(
     "token",
-    [b"/JavaScript", b"/JS (x)", b"/Launch", b"/EmbeddedFile", b"/OpenAction 3 0 R", b"/AA << >>", b"/J#61vaScript"],
+    [
+        b"/JavaScript",
+        b"/JS (x)",
+        b"/Launch",
+        b"/EmbeddedFile",
+        b"/RichMedia",
+        b"/XFA",
+        b"/J#61vaScript",
+        b"/R#69chMedia",
+        b"/XF#41",
+    ],
 )
 def test_pdf_active_content_rejected(token: bytes) -> None:
     with pytest.raises(UploadSecurityError) as exc:
@@ -193,8 +203,14 @@ def test_pdf_active_content_rejected(token: bytes) -> None:
     assert code_of(exc) == "pdf_active_content"
 
 
+@pytest.mark.parametrize("token", [b"/OpenAction 3 0 R", b"/AA << >>", b"/O#70enAction 3 0 R"])
+def test_pdf_open_action_and_aa_are_allowed(token: bytes) -> None:
+    """Relaxed rule (Phase 5 decision 4): they only name actions; the sandboxed parser executes nothing."""
+    assert sniff_and_validate_file_type(make_pdf(token), "a.pdf") == "pdf"
+
+
 def test_pdf_similar_names_not_flagged() -> None:
-    assert sniff_and_validate_file_type(make_pdf(b"/JSON 1 /AAA 2"), "a.pdf") == "pdf"
+    assert sniff_and_validate_file_type(make_pdf(b"/JSON 1 /AAA 2 /XFAX 3 /RichMediaX 4"), "a.pdf") == "pdf"
 
 
 def test_pdf_page_and_object_caps() -> None:

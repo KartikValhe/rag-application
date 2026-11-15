@@ -14,7 +14,10 @@ atomic step, so:
 
 Redis is checked on every call. If it cannot be reached we fail CLOSED (503)
 unless ENVIRONMENT is "development", where a per-process in-memory fallback is
-used and a loud error is logged.
+used and a loud error is logged. The 503 text is supplied by the caller.
+
+A long-running holder (the document worker, step 5b) keeps its lease alive with renew():
+it extends only a token that is still live, so an expired lease is never resurrected.
 """
 
 import asyncio
@@ -59,6 +62,30 @@ end
 return {0, 0}
 """
 
+# KEYS[i]  sorted set for each key of the lease
+# ARGV[1]  token, ARGV[2] new ttl in milliseconds
+# Extends the token on every key, but only when it is still live on ALL of them.
+# Returns 1 when renewed, 0 when the lease expired or was released (nothing is changed then).
+_RENEW_LUA = """
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local token = ARGV[1]
+local ttl = tonumber(ARGV[2])
+for i = 1, #KEYS do
+  local score = redis.call('ZSCORE', KEYS[i], token)
+  if (not score) or tonumber(score) <= now then
+    return 0
+  end
+end
+for i = 1, #KEYS do
+  redis.call('ZADD', KEYS[i], 'XX', now + ttl, token)
+  if redis.call('PTTL', KEYS[i]) < ttl then
+    redis.call('PEXPIRE', KEYS[i], ttl)
+  end
+end
+return 1
+"""
+
 _COUNT_LUA = """
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -89,13 +116,14 @@ class SlotRejected(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
-def _unavailable() -> HTTPException:
+DEFAULT_UNAVAILABLE_MESSAGE = "This service is temporarily unavailable. Please try again in a few minutes."
+
+
+def _unavailable(message: str = DEFAULT_UNAVAILABLE_MESSAGE) -> HTTPException:
+    """The 503 used when Redis cannot be reached. The caller supplies the user-facing text."""
     return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "service_unavailable",
-            "message": "Timetable import is temporarily unavailable. Please try again in a few minutes.",
-        },
+        detail={"code": "service_unavailable", "message": message},
     )
 
 
@@ -105,7 +133,9 @@ class SlotManager:
         self._mem: dict[str, dict[str, float]] = {}
 
     # ── Public API ──────────────────────────────────────────────────────────
-    async def acquire(self, limits: Sequence[SlotLimit]) -> SlotLease:
+    async def acquire(
+        self, limits: Sequence[SlotLimit], *, unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE
+    ) -> SlotLease:
         token = uuid.uuid4().hex
         keys = tuple(lim.key for lim in limits)
         try:
@@ -118,8 +148,8 @@ class SlotManager:
             index, retry_ms = int(res[0]), int(res[1])
         except Exception as exc:
             if not settings.is_development:
-                logger.error("Redis unavailable for timetable slots, failing closed: %r", exc)
-                raise _unavailable() from exc
+                logger.error("Redis unavailable for slots, failing closed: %r", exc)
+                raise _unavailable(unavailable_message) from exc
             logger.error(
                 "REDIS UNAVAILABLE: using per-process in-memory slot limits (development only): %r", exc
             )
@@ -140,7 +170,35 @@ class SlotManager:
         except Exception as exc:
             logger.warning("Could not release slot (it will expire by itself): %r", exc)
 
-    async def count(self, key: str) -> int:
+    async def renew(
+        self,
+        lease: SlotLease,
+        ttl_seconds: float,
+        *,
+        unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE,
+    ) -> bool:
+        """
+        Extend a LIVE lease to `ttl_seconds` from now, atomically on every key of the lease.
+        Returns False when the lease already expired or was released: an expired token is never
+        brought back, so the caller must stop its work and treat the slot as lost.
+        Fails closed with 503 when Redis is unreachable outside development.
+        """
+        ttl_ms = max(1, int(ttl_seconds * 1000))
+        try:
+            redis = await redis_client.get_redis()
+            async with asyncio.timeout(REDIS_OP_TIMEOUT):
+                res = await redis.eval(  # type: ignore[no-untyped-call]
+                    _RENEW_LUA, len(lease.keys), *lease.keys, lease.token, ttl_ms
+                )
+            return int(res) == 1
+        except Exception as exc:
+            if not settings.is_development:
+                logger.error("Redis unavailable for slot renewal, failing closed: %r", exc)
+                raise _unavailable(unavailable_message) from exc
+            logger.error("REDIS UNAVAILABLE: renewing slot in memory (development only): %r", exc)
+            return self._mem_renew(lease, ttl_seconds)
+
+    async def count(self, key: str, *, unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE) -> int:
         """Number of live tokens for a key."""
         try:
             redis = await redis_client.get_redis()
@@ -148,7 +206,7 @@ class SlotManager:
                 return int(await redis.eval(_COUNT_LUA, 1, key))  # type: ignore[no-untyped-call]
         except Exception:
             if not settings.is_development:
-                raise _unavailable() from None
+                raise _unavailable(unavailable_message) from None
             return self._mem_count(key)
 
     # ── In-memory fallback (single event loop, no awaits: atomic) ───────────
@@ -157,6 +215,14 @@ class SlotManager:
         live = {t: exp for t, exp in self._mem.get(key, {}).items() if exp > now}
         self._mem[key] = live
         return len(live)
+
+    def _mem_renew(self, lease: SlotLease, ttl_seconds: float) -> bool:
+        now = time.monotonic()
+        if not all(self._mem.get(key, {}).get(lease.token, 0.0) > now for key in lease.keys):
+            return False
+        for key in lease.keys:
+            self._mem[key][lease.token] = now + ttl_seconds
+        return True
 
     def _mem_acquire(self, token: str, limits: Sequence[SlotLimit]) -> tuple[int, int]:
         now = time.monotonic()

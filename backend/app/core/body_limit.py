@@ -3,7 +3,12 @@ app/core/body_limit.py
 ──────────────────────
 Pure ASGI middleware that stops oversized uploads BEFORE Starlette spools the multipart body.
 
-Applies to multipart/form-data requests and to the timetable import/template routes:
+Applies to multipart/form-data requests, to the timetable import/template routes and to every
+route under a prefix of the registry below (all request types):
+- the limit comes from a small registry keyed by path prefix: the default is 2 MB + 64 KB and
+  5 multipart parts, the documents prefix gets the platform ceiling + 64 KB and 6 parts. The
+  middleware runs before auth, so it cannot know the tenant: a tenant's own (lower) file limit
+  is enforced by the route while it streams the file;
 - a declared Content-Length above the limit is answered with 413 immediately;
 - the bytes actually received are counted, so chunked requests without Content-Length
   (or with a lying Content-Length) are cut off as soon as the limit is crossed;
@@ -14,15 +19,42 @@ The reverse proxy must still cap the body size too (see README).
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.upload_security import MAX_UPLOAD_SIZE
+from app.core.upload_security import DOC_UPLOAD_CEILING_BYTES, MAX_UPLOAD_SIZE
 
 # One file plus multipart framing overhead
-MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_SIZE + 64 * 1024
+FRAMING_OVERHEAD_BYTES = 64 * 1024
+MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_SIZE + FRAMING_OVERHEAD_BYTES
 MAX_MULTIPART_PARTS = 5
+
+
+@dataclass(frozen=True)
+class BodyLimit:
+    max_body_bytes: int
+    max_parts: int
+
+
+DEFAULT_LIMIT = BodyLimit(MAX_REQUEST_BODY_BYTES, MAX_MULTIPART_PARTS)
+DOCUMENTS_LIMIT = BodyLimit(DOC_UPLOAD_CEILING_BYTES + FRAMING_OVERHEAD_BYTES, 6)
+
+# Path prefix -> limit. A prefix matches the path itself and everything below it (on a "/"
+# boundary), for every request type. Anything else uses the default limit. New upload areas get
+# an entry here, never a change to the default.
+BODY_LIMIT_PREFIXES: dict[str, BodyLimit] = {
+    "/api/v1/documents": DOCUMENTS_LIMIT,
+}
+
+
+def limit_for_path(path: str, prefixes: dict[str, BodyLimit] | None = None) -> BodyLimit | None:
+    """The registered limit for a path, or None when no prefix matches."""
+    for prefix, limit in (BODY_LIMIT_PREFIXES if prefixes is None else prefixes).items():
+        if path == prefix or path.startswith(prefix + "/"):
+            return limit
+    return None
 
 # Routes limited even when they are not multipart (the import and template endpoints)
 PROTECTED_PATH_RE = re.compile(r"/timetables/(import-preview|save-imported-draft|template\.(csv|xlsx))$")
@@ -49,8 +81,8 @@ class BodyLimitMiddleware:
         max_parts: int = MAX_MULTIPART_PARTS,
     ) -> None:
         self.app = app
-        self.max_body_bytes = max_body_bytes
-        self.max_parts = max_parts
+        # Used for every path without a registered prefix
+        self.default_limit = BodyLimit(max_body_bytes, max_parts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -60,14 +92,19 @@ class BodyLimitMiddleware:
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         content_type = headers.get(b"content-type", b"").decode("latin-1")
         is_multipart = content_type.lower().startswith("multipart/")
-        if not is_multipart and not PROTECTED_PATH_RE.search(scope.get("path", "")):
+        path = scope.get("path", "")
+        # The registry is read on every request, so it can be changed in tests without a rebuild
+        registered = limit_for_path(path)
+        if registered is None and not is_multipart and not PROTECTED_PATH_RE.search(path):
             await self.app(scope, receive, send)
             return
+        limit = registered or self.default_limit
+        max_body_bytes, max_parts = limit.max_body_bytes, limit.max_parts
 
         declared = headers.get(b"content-length")
         if declared is not None:
             try:
-                too_big = int(declared) > self.max_body_bytes
+                too_big = int(declared) > max_body_bytes
             except ValueError:
                 too_big = True
             if too_big:
@@ -92,7 +129,7 @@ class BodyLimitMiddleware:
             if message["type"] == "http.request":
                 body: bytes = message.get("body", b"")
                 total += len(body)
-                if total > self.max_body_bytes:
+                if total > max_body_bytes:
                     rejected = await self._reject_now(send, response_started, "file_too_large")
                     raise RequestBodyTooLarge("file_too_large")
                 if delimiter:
@@ -101,7 +138,7 @@ class BodyLimitMiddleware:
                     # Keep a tail shorter than the delimiter so a match is never counted twice
                     tail = window[-(len(delimiter) - 1) :] if len(delimiter) > 1 else b""
                     # N parts produce N opening delimiters plus one closing delimiter
-                    if parts > self.max_parts + 1:
+                    if parts > max_parts + 1:
                         rejected = await self._reject_now(send, response_started, "too_many_parts")
                         raise RequestBodyTooLarge("too_many_parts")
             return message
