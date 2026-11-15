@@ -485,12 +485,17 @@ async def class_schedule(
     user: User,
     class_id: uuid.UUID,
     db: AsyncSession | None = None,
+    now: datetime | None = None,
 ) -> dict[int, list[ScheduleItem]]:
     """
     Returns the full weekly published schedule for an authorized class, grouped by weekday 0-6.
+    Item dates use the tenant's calendar day (not the server's); `now` is injectable for tests.
     """
     if db is None:
         raise ValueError("db session required")
+
+    tz = get_tenant_zoneinfo(await get_tenant_timezone(db, user.tenant_id))
+    ref_date = resolve_reference_time(now, tz).date()
 
     authorized_class_ids = await resolve_authorized_class_ids(db, user, class_id)
     if class_id not in authorized_class_ids:
@@ -499,7 +504,6 @@ async def class_schedule(
     entries = await _load_published_schedule_entries(db, user.tenant_id, [class_id])
     grouped: dict[int, list[ScheduleItem]] = {d: [] for d in range(7)}
 
-    ref_date = date.today()
     for entry, c_name, s_name, s_code, t_name in entries:
         item = _build_schedule_item(entry, c_name, s_name, s_code, t_name, ref_date)
         grouped[entry.day_of_week].append(item)

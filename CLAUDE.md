@@ -55,7 +55,7 @@ npm run test:e2e        # Playwright; needs backend + frontend running with seed
 
 **Backend layout**: `api/v1/*` routers (aggregated in `router.py`) → `services/*` business logic → `db/models/*`. Config in `core/config.py` (pydantic-settings, see `.env.example`).
 
-**Timetable import**: uploads are validated by `core/upload_security.py`, then parsed (xlsx/docx/pdf) in a killable `multiprocessing` child (spawn start method) with a 10s timeout, global/per-tenant concurrency caps and rate limits (`services/timetable_parser_runner.py` → `timetable_importer.py`). Keep parsing inside this runner.
+**Timetable import**: uploads are validated by `core/upload_security.py`, then parsed (xlsx/docx/pdf) in a killable subprocess (`subprocess.Popen` running `python -m app.services.timetable_parse_child`, minimal environment, process-tree kill) with a 10s timeout, global/per-tenant concurrency caps and rate limits (`services/timetable_parser_runner.py` → `timetable_importer.py`). Keep parsing inside this runner.
 
 **Frontend**: feature folders in `frontend/src/features/*` (auth, admin, teacher, student, timetable, branding, platform, …), TanStack Query for data, axios client in `src/api`. White-label theming is driven by per-tenant branding tokens → CSS variables (`src/styles/theme.css`, `features/branding/utils/tokens.ts`).
 

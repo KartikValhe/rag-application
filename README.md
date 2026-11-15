@@ -52,6 +52,23 @@ Start PostgreSQL, Redis, and Mailpit using Docker Compose:
 docker compose up -d
 ```
 
+#### Recreating the dev database (required once after the move to the pgvector image)
+Postgres now runs `pgvector/pgvector:0.8.7-pg16-bookworm` (Debian, glibc) instead of `postgres:16-alpine` (musl). The two sort text differently, so the old `pgdata` volume must not be reused.
+
+> **WARNING: this deletes ALL local dev data** (every table in `ragplatform` and `ragplatform_test`, plus the Redis volume). Nothing is recoverable.
+
+Run from the repository root, in this order:
+```bash
+docker compose down -v
+docker compose up -d
+# wait until `docker compose ps` shows postgres as healthy
+cd backend
+alembic upgrade head
+python -m app.scripts.seed
+python -m app.scripts.create_superadmin --email "superadmin@example.com"   # use your own address; see Deployment Notes
+```
+Check the extension is available: `docker exec rag-postgres psql -U postgres -c "select name, default_version from pg_available_extensions where name='vector'"` (expect `0.8.7`).
+
 ### 3. Backend Setup
 Activate the virtual environment and install dependencies:
 ```bash
@@ -62,7 +79,7 @@ python -m venv .venv
 # Linux/macOS:
 source .venv/bin/activate
 
-pip install -r requirements.txt
+pip install ".[dev]"
 ```
 
 Run database migrations:

@@ -100,7 +100,7 @@ Student message
 
 | Topic | Decision | Tradeoff |
 |-------|----------|----------|
-| Async jobs | **ARQ** (Redis-backed, async-native, fits FastAPI). Alternative: Celery | ARQ is lighter but smaller ecosystem; Celery is heavier but battle-tested |
+| Async jobs | **Postgres job table** claimed with `FOR UPDATE SKIP LOCKED` (decided in the Phase 5 design; replaces ARQ). The job commits atomically with its data and Redis stays for limits and caches | A small custom queue behind `workers/queue.py`; polling instead of push. Swappable for another backend later |
 | ORM / migrations | SQLAlchemy 2.0 (async) + Alembic | Async SQLAlchemy has sharp edges with RLS session handling; wrap it in one helper |
 | Auth | Short-lived JWT access token (10–15 min) + rotating refresh token (stored hashed, revocable via Redis/DB) | More moving parts than session cookies, but works for SPA + future mobile **Supabase Auth is deliberately not used in v1** (see 1.6). |
 | LLM access | Provider-agnostic `LLMClient` + `Embedder` interfaces; model names in config | One more abstraction, but lets you change models/vendors and run offline eval cheaply |
@@ -116,7 +116,7 @@ Student message
 |------------------|:-----:|-----------|
 | PostgreSQL + `pgvector` + full-text search | **Yes** | Core of the plan. Enable the extension with `CREATE EXTENSION vector`; confirm the installed pgvector version before relying on iterative filtered scans (Phase 5/6) |
 | Supavisor connection pooler | **Yes** | API uses the **transaction-mode** pooler URL; Alembic migrations and long-running worker jobs use the **direct** (or session-mode) URL |
-| Storage | **Yes** | Private `documents` bucket (original uploads) and a public-read `branding` bucket (logos, favicons). Only the backend touches the private bucket, using the service key. Students and teachers receive short-lived signed URLs |
+| Storage | **Yes** | Private `documents` bucket (original uploads) and a public-read `branding` bucket (logos, favicons). Only the backend touches the private bucket, using the service key. Teachers and admins download originals through the API (streamed); students never download raw files |
 | Auth (Supabase's login system) | **No (v1)** | Supabase Auth keeps one global email per user, which conflicts with our "email unique per tenant" rule (section 1.1). Using it would mean switching to one global user with a `memberships(user_id, tenant_id, role)` table. That is a valid design, and it becomes attractive when SSO is requested (Phase 10), but it is a different Phase 1/2 data model. Decide *before* writing Phase 1 |
 | Auto-generated REST/GraphQL API (PostgREST) | **No - lock it down** | Our frontend never talks to Supabase directly. See the security rules below |
 | Realtime | **No (v1)** | Ingestion status uses polling/SSE from FastAPI so every update passes our auth. Realtime would go browser-to-Supabase and skip our checks |
@@ -168,7 +168,7 @@ engine = create_async_engine(
 - **Plans and limits:** treat the free tier as development-only (idle projects can pause, backups and storage are limited). Run the pilot on a paid plan, enable point-in-time recovery, and check current limits (database size, connections, file size) at supabase.com/pricing before sizing quotas in Phase 8.
 - **Region is permanent:** choose it in Phase 1 (data residency and latency), and host the API and workers in the same region.
 - **Lock-in is low if you stay disciplined:** we only use standard SQL plus Storage behind an `ObjectStore` interface. Moving off Supabase later means `pg_dump`/restore plus copying a bucket.
-- **Redis is still separate:** Supabase does not provide Redis, so rate limits, caches, and the ARQ queue stay on a managed Redis (Phase 1 and Phase 8 unchanged).
+- **Redis is still separate:** Supabase does not provide Redis, so rate limits, caches and slot leases stay on a managed Redis (the job queue lives in Postgres) (Phase 1 and Phase 8 unchanged).
 
 ---
 
@@ -180,13 +180,13 @@ Browser (React + TS, tenant theme via CSS variables)
    ▼
 CDN / Reverse proxy (TLS, static assets, logo caching)
    ▼
-FastAPI API (stateless, N replicas) ──────────► Redis  (cache, rate limits, job queue, pub/sub)
+FastAPI API (stateless, N replicas) ──────────► Redis  (cache, rate limits, slot leases, pub/sub)
    │                                              ▲
    ├──► Supabase PostgreSQL (RLS, pgvector, tsvector) via Supavisor pooler │
    ├──► Supabase Storage (documents, logos)       │
    ├──► LLM / Embedding provider                  │
    ▼                                              │
-ARQ Workers (ingestion, re-index, eval, exports) ─┘
+Workers (Postgres job queue: ingestion, re-index, eval, exports) ─┘
    │
 Observability: OpenTelemetry → traces/metrics/logs, Sentry
 ```
@@ -200,7 +200,7 @@ Suggested repo layout (monorepo):
     /core         # config, security, tenant context, logging
     /db           # models, session helpers, migrations (alembic)
     /services     # business logic (ingestion, retrieval, guardrails, eval)
-    /workers      # ARQ tasks
+    /workers      # Postgres job-table worker (ingest, reindex, sweeper)
   /tests          # unit, integration, isolation, eval
 /frontend
   /src
@@ -469,71 +469,42 @@ Teachers upload syllabus material per **class + subject**; the system turns it i
 
 ## Components
 
+> **Detailed design (source of truth for this phase): `docs/phase5-design.md`.** Syllabus ingestion uses **no LLM** and costs nothing to run. The summary below follows the approved design.
+
 ### Backend
-- **Upload API:** multipart upload to **Supabase Storage** (private `documents` bucket, backend-only access with the service key; object path: `tenant/{tenant_id}/class/{class_id}/subject/{subject_id}/{doc_id}/v{n}/original.ext`). Validate extension **and** MIME sniffing, size limit, page-count limit. Compute SHA-256 to detect duplicates.
-- **Job pipeline (ARQ worker):**
-  1. `parse` — PDF (PyMuPDF), DOCX, PPTX, TXT/MD; keep page numbers and heading structure. OCR fallback for scanned PDFs is a flagged item (many syllabi are scans; decide in this phase whether to include Tesseract/cloud OCR now or Phase 10).
-  2. `chunk` — structure-aware chunking: split on headings first, then by size (~500–800 tokens, ~10–15% overlap), keep `page_start/page_end` and `heading_path` for citations.
-  3. `embed` — batch calls to the embedding model with retry/backoff; store `embedding_model` and `embedding_dim` per chunk so you can re-embed later.
-  4. `index` — write chunks to Postgres in one transaction; flip document status to `ready`.
-- **Status tracking:** `uploaded → parsing → embedding → ready | failed` with an error message; progress pushed to the UI by polling (SSE later).
-- **Versioning and deletion:** re-upload creates a new version; old chunks are removed only after the new version is `ready` (no downtime window with empty results). Deleting a document deletes its file, chunks, and vectors in one transaction + a storage cleanup job.
-- **Idempotency:** re-running a job must not duplicate chunks (unique `(document_id, version, ordinal)`).
-- **Untrusted content:** treat all uploaded text as untrusted input (see "indirect prompt injection" in Phase 7). Strip control characters, record a content hash.
+- **Upload API:** one document belongs to **one subject** and is linked to **one or more classes** (embeddings stored once). Teachers may link only classes where they teach that subject; a new version needs an assignment in all linked classes; admins can always manage. Formats: PDF (text only; scanned PDFs rejected in v1), DOCX, PPTX, TXT, MD. Validation reuses `core/upload_security.py` (content sniffing, zip-bomb and XML checks) with per-route limits replacing the global 2 MB cap. PDF rule (documents **and** timetable imports): `/OpenAction` and `/AA` allowed; `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia` and XFA rejected.
+- **Pilot limits** are per-tenant settings the superadmin can raise: 10 MB per file, 200 PDF pages, 100 slides, 200 documents, 500 MB stored and 5,000 pages per tenant, 20 uploads per user per hour.
+- **Storage:** originals in a private `ObjectStore` under random tenant-prefixed keys. Students never download raw files; teacher and admin downloads are streamed through the API (`Content-Disposition: attachment`, `nosniff`), not signed URLs.
+- **Job pipeline:** a **Postgres job table** claimed with `SELECT ... FOR UPDATE SKIP LOCKED` (replaces ARQ), with leases, a sweeper and retries with backoff. The worker uses a narrow `app_worker` DB role (jobs only) and sets the tenant context from the claimed job before touching tenant data. Steps: parse in the existing sandboxed subprocess, structure-aware chunking (300-450 tokens, page numbers and headings), injection scan (flag, never drop), batch embedding, single-transaction index, auto-publish.
+- **Embeddings:** `multilingual-e5-small` on ONNX Runtime behind an `Embedder` interface (pinned revision and checksums, no `trust_remote_code`, offline after download). `embedding_model` and dimension are stored per chunk; a `reindex` job supports the `bge-m3` upgrade on 4 GB+ workers. Query embedding runs in the API process (lazy, Redis vector cache).
+- **Lifecycle (as timetables):** `queued → processing → ready → published → archived | failed`. Versions with no injection flags auto-publish when ready; flagged versions wait for teacher review; a new version archives the previous one (old chunks removed in the same transaction, so students always see one complete version). Archived files kept 30 days, at most 5 archived versions per document, tombstones purged after 30 days, admin "purge now".
+- **Retrieval (`Retriever` interface):** hybrid vector + keyword with RRF, filters built server-side from the authorized (class, subject) pairs, exact search first with HNSW for large scopes, a sufficiency threshold, and a retrieval-only "test search" endpoint for teachers.
+- **Evaluation without an LLM:** recall@k and MRR on a small golden set; CI uses a fake embedder, local runs use the real one.
 
 ### Data
-
-```sql
-CREATE TABLE documents (
-  id uuid, tenant_id uuid NOT NULL,
-  class_id uuid NOT NULL, subject_id uuid NOT NULL,       -- the scope that retrieval will filter on
-  title text NOT NULL, storage_key text NOT NULL, sha256 text NOT NULL,
-  version int NOT NULL DEFAULT 1,
-  status text NOT NULL DEFAULT 'uploaded',                -- uploaded|parsing|embedding|ready|failed
-  error text, uploaded_by uuid NOT NULL, created_at timestamptz DEFAULT now(),
-  PRIMARY KEY (tenant_id, id)
-);
-
-CREATE TABLE chunks (
-  id uuid, tenant_id uuid NOT NULL,
-  class_id uuid NOT NULL, subject_id uuid NOT NULL,       -- denormalized from document: fast filtered search
-  document_id uuid NOT NULL, version int NOT NULL, ordinal int NOT NULL,
-  page_start int, page_end int, heading_path text,        -- used for citations
-  content text NOT NULL,
-  content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED, -- 'simple' keeps it language-neutral
-  embedding vector(1024) NOT NULL,                        -- dimension follows the chosen embedding model
-  embedding_model text NOT NULL,
-  PRIMARY KEY (tenant_id, id),
-  UNIQUE (document_id, version, ordinal)                  -- idempotent re-runs
-);
-CREATE INDEX chunks_scope_idx ON chunks (tenant_id, class_id, subject_id);
-CREATE INDEX chunks_vec_idx   ON chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX chunks_fts_idx   ON chunks USING gin (content_tsv);
--- plus ENABLE/FORCE ROW LEVEL SECURITY and the same tenant_isolation policy as users
-```
-
-If a document must be shared across several classes, v1 simply uploads it once per class (storage is cheap; scoping stays trivial). A shared-document table can come later.
+`documents`, `document_classes`, `document_versions`, `chunks` (tsvector, pages, headings, injection flags), `chunk_embeddings` (per model; HNSW partial index per model), `storage_deletions`, `ingest_jobs`, plus `tenants.doc_limits`. All tenant tables have `tenant_id`, composite FKs, RLS ENABLE+FORCE and isolation tests. Full DDL in `docs/phase5-design.md` section A2.
 
 ### Frontend
-- Teacher "Course materials" page: choose class + subject (only assigned ones appear), drag-and-drop upload, list with live status chips, retry on failure, delete, replace with new version.
-- Admin view: all documents in the tenant, filter by class/subject, storage usage.
+- Teacher "Course materials" page: choose subject and classes (only assigned ones appear), drag-and-drop upload, live status chips, retry, replace, delete, flag review, test search. Blocked actions on shared documents explain why.
+- Admin view: all documents, filter by class/subject, storage usage, purge.
 
 ## Exit criteria
-- [ ] Teacher uploads a 100-page PDF; it reaches `ready` with chunk count > 0 and page numbers stored.
+- [ ] Teacher uploads a 100-page PDF; it reaches `published` (or `ready` when flagged) with chunk count > 0 and page numbers stored.
 - [ ] Killing the worker mid-job and restarting it completes the job without duplicates.
-- [ ] Corrupt, password-protected, or oversized files fail with a readable message, not a stack trace or a stuck job.
-- [ ] A teacher cannot upload or delete for a class/subject they aren't assigned to.
-- [ ] Isolation tests cover `documents`, `chunks`, and Supabase Storage paths (tenant A's signed URL cannot fetch tenant B's file, and the `anon`/`authenticated` roles cannot list the bucket).
-- [ ] Replacing a document keeps the old version searchable until the new one is `ready`.
+- [ ] Corrupt, password-protected, scanned or oversized files fail with a stable error code and readable message, not a stack trace or a stuck job.
+- [ ] A teacher cannot upload to or manage documents for a class/subject pair they are not assigned to (generic 404); students cannot list or download documents.
+- [ ] Isolation tests cover all new tables and the `app_worker` role; canary-string tests prove no leakage across tenants, classes or subjects.
+- [ ] Replacing a document keeps the old version searchable until the new one is published.
+- [ ] Retrieval evaluation baselines recorded (en, hi, mr); e5-small vs bge-m3 comparison recorded.
 
 ## Risks
 | Risk | Mitigation |
 |------|------------|
-| Poor parsing (tables, scans, two-column PDFs, math) wrecks answer quality later | Build a small **parser test corpus** of real syllabi from pilot users now; inspect chunks by eye in an admin debug view |
-| Embedding cost/latency on big uploads | Batch + rate-limit workers; per-tenant upload quota (enforced in Phase 8) |
-| Embedding model change forces re-index | Store model name per chunk; write a `reindex` job now, even if only used once |
-| Malware in uploads | Size/type validation now; optional ClamAV scan step before parse |
-| Chunking choices hard to evaluate yet | Revisit with metrics in Phase 7; keep chunking parameters in config |
+| Poor parsing (tables, scans, two-column PDFs, math, legacy Devanagari fonts) wrecks answer quality | Parser test corpus of real syllabi; `scanned_pdf` and `unreadable_text` gates with clear messages; OCR deferred |
+| Embedding cost/latency on big uploads | Local ONNX model, batching, per-tenant slots and limits |
+| Embedding model change forces re-index | Model name and dimension per chunk; `reindex` job built now |
+| Malware in uploads | Type/size/structure validation, sandboxed parser, no rendering; optional ClamAV later |
+| Chunking choices hard to evaluate yet | Retrieval harness now; revisit with metrics in Phase 7 |
 
 ---
 
@@ -547,16 +518,14 @@ A registered student asks a question and gets an answer **grounded only in that 
 ### Backend
 - **Chat router (before any retrieval or LLM call):** a deterministic, rule-based intent classifier (keyword and pattern rules, plus fuzzy matching of class and subject names against the caller's *authorized* classes only). Schedule intents ("next lecture/class/period", "today's/tomorrow's timetable", "when is <subject>", "which room") go to the Phase 4 schedule lookup service and are answered with fixed, localizable templates: **no embeddings, no retrieval, no LLM**. If the question is not a schedule intent, or confidence is low, it falls through to the RAG path below. Rules: role-aware (student, teacher, admin as in Phase 4); an admin asking about "all classes" gets all classes, or a named class gets subject, teacher, room and time; ambiguous class names produce a short clarification question; unknown or unpublished timetables produce a clear message. Log unmatched or low-confidence phrasing (without personal data) so the rules can be improved. Router decisions are written to the message record (`route = schedule | rag | refused`) for analytics and evaluation.
 - **Chat API:** `POST /api/chat/conversations` (class + optional subject), `POST /api/chat/conversations/{id}/messages` returning **Server-Sent Events** (tokens, then a final event with citations and message id). History endpoints for list/resume/delete.
-- **Authorization:** user must be enrolled in the class (or be a teacher assigned to it for previews). The class id is validated server-side; **the retrieval filter is built from the authorized scope, never from raw client input.**
-- **Retrieval service:**
-  1. *Condense* the question with recent turns into a standalone query (small/cheap model call, skipped for the first message).
-  2. *Hybrid search:* vector top-k (e.g. 20) + Postgres full-text top-k, merged with **Reciprocal Rank Fusion**. Filter: `tenant_id = :t AND class_id = :c [AND subject_id = :s]`.
-  3. *Optional rerank* (cross-encoder or LLM reranker) down to ~5 chunks; make it a config switch and decide using Phase 7 metrics.
-  4. *Sufficiency check:* if the best score is under a threshold, return a polite "I couldn't find this in your class material" **without calling the LLM**. This one rule prevents most hallucinations.
-- **Prompt assembly:** system prompt (tenant bot name, tone, language, scope rules) + retrieved chunks inside clearly delimited blocks labeled with source ids + conversation window. Instruct: answer only from sources, cite source ids, say when unsure.
-- **Citations:** model outputs source ids; backend maps them to `{document title, page range, heading, snippet}` and stores them with the message. Drop any citation id the model invented.
-- **Persistence:** `conversations`, `messages` (role, content, token counts, latency, model, retrieval debug info), `message_citations`, `message_feedback` (thumbs up/down + optional comment).
-- **Minimal guardrail now:** max input length, refuse when no context. Full guardrail layer is Phase 7.
+- **Authorization:** user must be enrolled in the class (or be a teacher assigned to it for previews). The class id is validated server-side; **the retrieval filter is built from the authorized (class, subject) pairs, never from raw client input.**
+- **Retrieval service:** the Phase 5 `Retriever` (hybrid vector + keyword with RRF, sufficiency threshold). Optional rerank is a config switch decided with Phase 7 metrics. *Condense* (small model call) runs only on follow-up turns that are short or contain a referring word; if retrieval is insufficient the answer is "I couldn't find this in your class material" **without calling the LLM**.
+- **LLM access (`docs/phase5-design.md` Part B):** an `LLMClient` interface with Groq (zero data retention, primary), OpenRouter (ZDR-only routing, fallback) and Gemini (development with sample data only; its terms require users 18+ and say "not for consumer use") adapters; config-driven model allow-list with pinned IDs, timeouts, jittered retries that respect `Retry-After`, per-provider circuit breakers and limits in Redis, normalized SSE streaming and errors, per-tenant and per-user usage accounting and daily caps. When every provider is exhausted the chat returns a **retrieval-only answer** (best passages with citations). Before any real student data: verify ZDR on our Groq plan and measure Hindi and Marathi answer quality.
+- **Data protection:** per-tenant `allowed_llm_providers`; providers that may train on inputs are never used outside development; personal data is stripped before any call; API keys only in the environment or a secret manager, separate per environment, never logged. A **chat-log retention policy is required before the pilot.**
+- **Prompt assembly:** system prompt (tenant bot name, tone, language, scope rules) + retrieved chunks inside `<source id="S1">` blocks that are declared to be data, not instructions + conversation window. Instruct: answer only from sources, cite source ids, say when unsure. Injection-flagged chunks are passed to the Phase 7 guardrail hooks.
+- **Citations:** model outputs `[S#]` labels; backend maps them to chunks and stores `{document title, page range, heading, snippet}` snapshots with the message. Any label that was not retrieved is dropped.
+- **Persistence:** `conversations`, `messages` (route, provider, model, latency, token counts, retrieval debug info), `message_citations`, `message_feedback` (thumbs up/down + optional comment), `llm_usage_events`, `tenant_settings`.
+- **Minimal guardrail now:** max input length, refuse when no context, with input and output checkpoints that Phase 7 fills in.
 
 ### Data
 `conversations`, `messages`, `message_citations`, `message_feedback`; all tenant-scoped with RLS.
@@ -653,7 +622,7 @@ Uploaded documents are untrusted. A document may contain "ignore the rules and s
 # PHASE 8: Redis hardening: caching, rate limiting, quotas (2 weeks)
 
 ## Goal
-Protect cost and stability and speed up hot paths. Redis has been used lightly since Phase 1 (login throttling, queue); this phase turns it into a deliberate layer.
+Protect cost and stability and speed up hot paths. Redis has been used lightly since Phase 1 (login throttling, slot leases); this phase turns it into a deliberate layer.
 
 ## Components
 

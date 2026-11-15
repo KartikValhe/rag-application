@@ -468,6 +468,33 @@ async def test_admin_one_class_and_all_classes() -> None:
     assert exc_info.value.status_code == 404
 
 
+async def test_class_schedule_dates_use_tenant_timezone() -> None:
+    """Regression (backlog B6): class_schedule item dates use the tenant's calendar day.
+
+    Fixed clock: 2026-11-09 20:00 UTC is already 2026-11-10 01:30 in Asia/Kolkata, so the
+    server date (Nov 9) and the tenant date (Nov 10) differ.
+    """
+    tid = uuid.uuid4()
+    cid = uuid.uuid4()
+    user = User(id=uuid.uuid4(), tenant_id=tid, full_name="Admin", is_admin=True)
+    e1 = TimetableEntry(
+        tenant_id=tid, timetable_id=uuid.uuid4(), class_id=cid, subject_id=uuid.uuid4(),
+        day_of_week=1, start_time=time(9, 0), end_time=time(10, 0), room="R1",
+    )
+    db = MockScheduleDB(
+        tenant_id=tid,
+        timezone="Asia/Kolkata",
+        user_roles={user.id: ["tenant_admin"]},
+        class_ids=[cid],
+        entries=[(e1, "10-A", "Maths", "MTH", None)],
+    )
+    fixed_now = datetime(2026, 11, 9, 20, 0, tzinfo=ZoneInfo("UTC"))
+
+    grouped = await class_schedule(user, class_id=cid, db=db, now=fixed_now)
+
+    assert grouped[1][0].date == "2026-11-10"
+
+
 async def test_different_tenant_timezone() -> None:
     """Case 11: Tenant configured in America/New_York resolves local clock properly."""
     tid = uuid.uuid4()
