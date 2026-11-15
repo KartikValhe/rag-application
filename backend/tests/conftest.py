@@ -39,6 +39,7 @@ from app.db.models.user import User
 from app.main import app
 from app.services.rbac import seed_tenant_system_roles
 from tests.fixtures.academic_world import academic_world  # noqa: F401  (pytest fixture)
+from tests.fixtures.documents import document_store_root  # noqa: F401  (pytest fixture)
 
 # ── Database setup ────────────────────────────────────────────────────────────
 

@@ -11,20 +11,26 @@ Routes:
   GET    /platform/tenants
   POST   /platform/tenants
   PATCH  /platform/tenants/{tenant_id}
+  PATCH  /platform/tenants/{tenant_id}/limits
   POST   /platform/tenants/{tenant_id}/admins
 """
 
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select, update
 
 from app.api.deps import PlatformAdminUser, PlatformDB
-from app.core.authz import platform_endpoint, public_endpoint
+from app.core.authz import GENERIC_NOT_FOUND, platform_endpoint, public_endpoint
 from app.core.security import create_platform_access_token, verify_password
-from app.db.engine import SessionLocal
+from app.core.tenant_db import tenant_session_context
+from app.db.engine import PlatformSessionLocal, SessionLocal
 from app.db.models.tenant import PlatformAdmin, Tenant
+from app.schemas.document import DocumentLimitsModel, TenantDocumentLimitsResponse
+from app.services import document_limits
+from app.services.audit import record_audit_event
 from app.services.email import send_temp_password_email
 from app.services.invitation import create_admin_user
 
@@ -208,6 +214,67 @@ async def update_tenant(
             except Exception:
                 pass
     return _to_tenant_response(tenant)
+
+
+@router.patch(
+    "/tenants/{tenant_id}/limits",
+    response_model=TenantDocumentLimitsResponse,
+    dependencies=[Depends(platform_endpoint())],
+)
+async def update_tenant_document_limits(
+    tenant_id: uuid.UUID,
+    request: Request,
+    admin: PlatformAdminUser,
+    body: dict[str, Any] = Body(...),
+) -> TenantDocumentLimitsResponse:
+    """
+    Set or clear one tenant's document limit overrides (design A2). A value sets an override, null
+    removes it. Unknown names, non-positive or non-integer values and values above the platform
+    ceiling are refused with 422 and a stable code; nothing is written then.
+
+    The tenants row is written through app_platform (app_tenant may only read doc_limits). The
+    audit entry goes into the tenant's own audit log through a tenant session, like the
+    registration-mode change; the platform admin is not a user of the tenant, so actor_id is null
+    and the admin id is in the details. The audit transaction commits first, inside the platform
+    transaction, so a failed audit write leaves the limits unchanged.
+    """
+    async with PlatformSessionLocal() as pdb, pdb.begin():
+        # FOR NO KEY UPDATE, not FOR UPDATE: the audit insert below (another session) checks its
+        # foreign key to this row with a KEY SHARE lock, which FOR UPDATE would block forever.
+        row = (
+            await pdb.execute(
+                select(Tenant.doc_limits).where(Tenant.id == tenant_id).with_for_update(key_share=True)
+            )
+        ).one_or_none()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
+        previous: dict[str, Any] = dict(row[0] or {})
+        try:
+            overrides = document_limits.apply_patch(previous, body)
+            effective = document_limits.merge_limits(overrides)
+        except document_limits.DocumentLimitsError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": exc.code, "message": exc.message},
+            ) from None
+        await pdb.execute(update(Tenant).where(Tenant.id == tenant_id).values(doc_limits=overrides))
+        async with tenant_session_context(str(tenant_id)) as tdb:
+            await record_audit_event(
+                tenant_id=tenant_id,
+                action="tenant:update_doc_limits",
+                target_type="tenant",
+                target_id=str(tenant_id),
+                details={"previous": previous, "new": overrides, "platform_admin_id": str(admin.id)},
+                actor_id=None,
+                request=request,
+                db=tdb,
+            )
+    return TenantDocumentLimitsResponse(
+        tenant_id=tenant_id,
+        overrides=overrides,
+        effective=DocumentLimitsModel(**effective.as_dict()),
+        ceilings=DocumentLimitsModel(**document_limits.PLATFORM_CEILINGS),
+    )
 
 
 @router.post(

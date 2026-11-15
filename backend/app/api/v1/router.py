@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import academic, admin, audit, auth, branding, platform, roles, timetable
+from app.api.v1 import academic, admin, audit, auth, branding, documents, platform, roles, timetable
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(auth.router)
@@ -14,4 +14,6 @@ router.include_router(timetable.router)
 router.include_router(audit.router)
 router.include_router(branding.public_router)
 router.include_router(branding.admin_router)
+router.include_router(documents.router)
+router.include_router(documents.admin_router)
 

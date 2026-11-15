@@ -1,6 +1,6 @@
 # Phase 5 API Reference: Documents
 
-Started during the 5a-2 security hardening. The document endpoints themselves (upload, replace, list, retry, delete, purge, test search) are specified in `docs/phase5-design.md` (A3, A4) and get their full contract here in step 5e. This page lists the contract changes that already exist and the upload rules built in step 5a-3 (section 3).
+Started during the 5a-2 security hardening. This page lists the contract changes to existing endpoints (section 1), the stable error codes (section 2), the upload rules built in step 5a-3 (section 3) and the document routes built in step 5b-1 (sections 4-6). Publish, flags and test search come in 5c/5d; until a worker exists (5b-2) uploaded versions stay `queued`.
 
 ---
 
@@ -88,4 +88,99 @@ Rejected with `pdf_active_content`: `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedF
 
 ### 3.4 Private document store
 
-Originals are kept in a **private** store (`get_document_store()`), separate from the public branding store: its own root (`DOCUMENT_STORE_DIR`), no URL method, never served by a route. Keys are `t/{tenant_id}/d/{32 random hex}`; every call names the caller's tenant and any key outside that tenant's prefix (or in another shape) raises `InvalidStorageKey`. Writes are atomic (temp file in the same directory with `O_EXCL` and mode 0600, `fsync`, then `os.replace`; a failed or interrupted write leaves no file); directories are 0700 (best effort on Windows, which ignores POSIX modes). `stream()` opens the file only when iteration starts and closes it in `finally`. The public branding store's `get_url` refuses a document key. Downloads are streamed through an authenticated route (5b). Supabase Storage replaces the local backend later behind the same interface.
+Originals are kept in a **private** store (`get_document_store()`), separate from the public branding store: its own root (`DOCUMENT_STORE_DIR`), no URL method, never served by a route. Keys are `t/{tenant_id}/d/{32 random hex}`; every call names the caller's tenant and any key outside that tenant's prefix (or in another shape) raises `InvalidStorageKey`. Writes are atomic (temp file in the same directory with `O_EXCL` and mode 0600, `fsync`, then `os.replace`; a failed or interrupted write leaves no file); directories are 0700 (best effort on Windows, which ignores POSIX modes). `stream()` opens the file only when iteration starts and closes it in `finally`. The public branding store's `get_url` refuses a document key. Downloads are streamed through an authenticated route (section 4). Supabase Storage replaces the local backend later behind the same interface.
+
+---
+
+## 4. Document routes (step 5b-1)
+
+Implemented in `app/api/v1/documents.py`; scope in `app/services/document_scope.py`; models in `app/schemas/document.py`. Every route is behind `require(permission)` (default-deny). Every error is `{"detail": {"code", "message"}}` with a fixed message per code (a few add fields, noted below). Students hold no `document:*` permission, so every document route answers them `403 permission_denied`.
+
+**Scope rule (one shared function).** Scope is a set of (class, subject) **pairs**, never a cross product. Admins: every offered pair. Teachers: their `teacher_assignments` pairs that the class offers. Anyone else (including a custom role with only `document:view`): no pairs.
+- *View* needs one linked pair in scope. *Manage* (replace, rename, unlink, delete, retry, version delete) needs **all** linked pairs.
+- No linked pair in scope, unknown id, another tenant's id or a soft-deleted document: **`404 not_found`**, always the same body `{"detail": {"code": "not_found", "message": "Resource not found."}}`.
+- Some but not all pairs: **`403 document_manage_requires_all_classes`**. `DocumentResponse.can_manage` is then `false` and `blocked_reason` is `"document_manage_requires_all_classes"`, so the UI can explain it.
+
+### 4.1 Routes
+
+`...` below is `/api/v1/documents/{document_id}`. A version id that belongs to another document is the generic 404.
+
+| Method and path | Permission | Request | Success | Errors (besides 401 and 403 `permission_denied`) |
+|---|---|---|---|---|
+| `POST /api/v1/documents` | `document:upload` | multipart: `file`, `title` (1-200 characters after trimming), `subject_id`, `class_ids` (repeat the field; 1-50) | `202` `DocumentVersionResponse` | 404; 413; 422 `invalid_title`, `too_many_classes`, validation and quota codes; 429; 503 |
+| `POST .../versions` | `document:upload` + manage on all classes | multipart: `file` | `202` `DocumentVersionResponse` | 403 manage; 404; 409 `duplicate_version`, `document_processing_in_progress`; 413; 422; 429; 503 |
+| `GET /api/v1/documents` | `document:view` | query: `class_id`, `subject_id`, `status` (of the latest version), `cursor`, `limit` (1-100, default 20) | `200` `DocumentListResponse` | 422 `invalid_cursor`, `invalid_status` |
+| `GET ...` | `document:view` | | `200` `DocumentResponse` | 404 |
+| `PATCH ...` | `document:upload` | JSON `DocumentUpdateRequest` | `200` `DocumentResponse` | 403 manage; 404; 422 (`invalid_title`, an unknown field such as `subject_id`, empty `class_ids`) |
+| `DELETE ...` | `document:delete` + manage on all classes | | `204` | 403 manage; 404 |
+| `GET .../versions/{version_id}/status` | `document:view` | | `200` `DocumentStatusResponse` | 404 |
+| `POST .../versions/{version_id}/retry` | `document:upload` + manage on all classes | | `202` `DocumentVersionResponse` | 403 manage; 404; 409 `version_not_retryable`, `document_processing_in_progress`, `duplicate_version` |
+| `DELETE .../versions/{version_id}` | `document:upload` + manage on all classes | | `204` | 403 manage; 404; 409 `version_not_deletable` |
+| `GET .../versions/{version_id}/download` | `document:view` | | `200` file stream | 404 (also when the file is missing) |
+| `GET /api/v1/admin/documents/usage` | `settings:manage` | | `200` `DocumentUsageResponse` | |
+| `POST /api/v1/admin/documents/{document_id}/purge` | `settings:manage` | | `204` | 404; 409 `document_not_deleted` |
+| `PATCH /api/v1/platform/tenants/{tenant_id}/limits` | platform superadmin | JSON object of limit overrides (section 6) | `200` `TenantDocumentLimitsResponse` | 401; 404; 422 `unknown_limit`, `invalid_limit_value`, `limit_above_ceiling` |
+
+### 4.2 Behaviour
+
+- **Upload** (both POST routes, design A3): scope check (404), then the hourly rate limits for the user and the tenant (429 with `Retry-After`; Redis down outside development gives 503), then the file is read within the **tenant's** `max_file_bytes` (413), then `validate_upload_async` with the document profile and the tenant's page and slide caps (codes in sections 2 and 3), then sha256. Then one transaction: quota lock, duplicate and in-flight checks, quota check, write to the private store, document, links, version (`queued`), ingest job (`queued`), audit `document:upload` or `document:version_upload`. If anything after the file write fails, the file is deleted again. A rejected upload leaves no file and no rows.
+- **`duplicate_version` (409)** carries `version_id`, the active version with the same bytes. Bytes of a `failed` or `archived` version may be uploaded again.
+- **`duplicate_content`** is a warning, not an error: `DocumentVersionResponse.warnings` contains it when the same bytes exist in another live document the caller can see. Otherwise `warnings` is `[]`.
+- **Quotas (422):** `quota_documents_exceeded` (live documents + 1 > `max_documents`); `quota_storage_exceeded` (bytes of every version of every live document + the new file > `max_storage_bytes`); `quota_pages_exceeded` (pages of active versions already at `max_pages`: the page count of a new file is only known after parsing, which checks again). A value exactly at the limit is allowed. Soft-deleted documents do not count.
+- **PATCH:** linking a class needs that (class, subject) pair in the caller's own pairs (else 404); renaming or unlinking needs manage on all linked classes (else 403). The subject never changes. Audited as `document:update` with the added and removed class ids.
+- **DELETE (soft), one transaction:** tombstone (`deleted_at`, `deleted_by`); chunks deleted; versions `archived`; queued or running jobs `failed` with `last_error_code = "document_deleted"`; every file into the storage outbox (due now); audit `document:delete`. The document then answers 404 to everyone, and the subject cannot be deleted (`409 subject_has_documents`) until the tombstone is purged.
+- **Purge:** only for a soft-deleted document. Deletes the tombstone and its versions (chunks, links and jobs cascade) and its files now; a file that cannot be deleted right now stays in the outbox for the sweeper. Audited as `document:purge`.
+- **Retry:** only a `failed` version whose `error_code` is transient (`processing_failed`, `worker_crash`). The version goes back to `queued`; the job to `queued` with `attempts = 0`, `run_after = now()` and no error. Audited as `document:retry`.
+- **Version delete:** only `ready` (draft) or `failed` versions. The row goes and its file goes into the outbox. Audited as `document:version_delete`.
+- **Download headers:** `Content-Disposition: attachment` (built by `attachment_header()` from the stored, sanitized file name), `Content-Type: application/octet-stream`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`, `Cache-Control: private, no-store`, `Content-Length`. The file is found through the database row; the store refuses any key outside the caller's tenant. A file that vanishes during the download aborts the response. Audited as `document:download`.
+
+## 5. Response and request models
+
+All models have `extra="forbid"`, and **every key is always present** (`null` when empty). Timestamps are ISO 8601 with a time zone.
+
+- `NamedRef`: `{id, name}`.
+- `DocumentVersionResponse`: `{id, document_id, version_no, status, stage, error_code, file_kind, original_filename, size_bytes, page_count, chunk_count, flagged_chunk_count, created_at, published_at, warnings: string[]}`. `status` is one of `queued, processing, ready, published, archived, failed`; `file_kind` one of `pdf, docx, pptx, txt, md`.
+- `DocumentResponse`: `{id, title, description, subject: NamedRef, classes: NamedRef[], created_by, created_at, updated_at, latest_version: DocumentVersionResponse | null, published_version: DocumentVersionResponse | null, can_manage: boolean, blocked_reason: "document_manage_requires_all_classes" | null}`.
+- `DocumentListResponse`: `{items: DocumentResponse[], next_cursor: string | null}`. Pass `next_cursor` back as `cursor` for the next page; it is opaque.
+- `DocumentStatusResponse`: `{document_id, version_id, version_no, status, stage, error_code, retryable: boolean, updated_at}`.
+- `DocumentUsageResponse`: `{documents, storage_bytes, pages, limits: DocumentLimits}`.
+- `DocumentLimits`: `{max_file_bytes, max_pdf_pages, max_pptx_slides, max_documents, max_storage_bytes, max_pages, uploads_per_user_per_hour, uploads_per_tenant_per_hour}`, all integers.
+- `DocumentUpdateRequest` (PATCH body): `{title?: string (1-200), class_ids?: uuid[] (1-50)}`. Any other key is a 422.
+- `TenantDocumentLimitsResponse`: `{tenant_id, overrides: {key: integer}, effective: DocumentLimits, ceilings: DocumentLimits}`.
+
+## 6. Per-tenant limits (`PATCH /api/v1/platform/tenants/{tenant_id}/limits`)
+
+The body is a JSON object: a value sets an override, `null` removes it (back to the platform default). Overrides merge with the existing ones. Values must be positive integers (not booleans, strings or floats) and at most the platform ceiling. They are stored in `tenants.doc_limits`. The audit entry `tenant:update_doc_limits` goes into the tenant's own audit log with `actor_id = null` and `details = {previous, new, platform_admin_id}`. An unknown tenant is the generic 404.
+
+| Key | Default (env) | Ceiling |
+|---|---|---|
+| `max_file_bytes` | 10 MB (`DOC_MAX_FILE_BYTES`) | 50 MB |
+| `max_pdf_pages` | 200 (`DOC_MAX_PDF_PAGES`) | 2,000 |
+| `max_pptx_slides` | 100 (`DOC_MAX_PPTX_SLIDES`) | 1,000 |
+| `max_documents` | 200 (`QUOTA_MAX_DOCUMENTS`) | 10,000 |
+| `max_storage_bytes` | 500 MB (`QUOTA_MAX_STORAGE_BYTES`) | 20 GB |
+| `max_pages` | 5,000 (`QUOTA_MAX_PAGES`) | 200,000 |
+| `uploads_per_user_per_hour` | 20 (`DOC_UPLOAD_RATE_USER`) | 500 |
+| `uploads_per_tenant_per_hour` | 100 (`DOC_UPLOAD_RATE_TENANT`) | 5,000 |
+
+The API reads a tenant's limits through the tenant session (`app_tenant` may read `doc_limits` of its own row only, migration `0011`). A stored value that fails validation makes the upload fail instead of silently raising a limit.
+
+## 7. New stable codes in 5b-1
+
+| Code | HTTP | Where |
+|---|---|---|
+| `document_manage_requires_all_classes` | 403 | replace, PATCH (rename or unlink), DELETE, retry, version delete |
+| `document_processing_in_progress` | 409 | replace, retry: a version is `queued`, `processing` or `ready` |
+| `duplicate_version` | 409 | replace, retry; carries `version_id` |
+| `version_not_retryable` | 409 | retry: the version is not failed, or failed for a permanent reason |
+| `version_not_deletable` | 409 | version delete: the version is not `ready` or `failed` |
+| `document_not_deleted` | 409 | purge of a live document |
+| `quota_documents_exceeded`, `quota_storage_exceeded`, `quota_pages_exceeded` | 422 | upload, replace |
+| `invalid_title` | 422 | upload, PATCH: blank title |
+| `too_many_classes` | 422 | upload: more than 50 classes |
+| `invalid_cursor`, `invalid_status` | 422 | list |
+| `rate_limit_exceeded`, `tenant_rate_limit_exceeded` | 429 + `Retry-After` | upload, replace; the body also has `retry_after_seconds` |
+| `service_unavailable` | 503 | upload: the private store could not be written, or Redis is down outside development |
+| `unknown_limit`, `invalid_limit_value`, `limit_above_ceiling` | 422 | platform limits endpoint |
+
+The frontend error mapper for these codes and for the request-guard codes of section 2 (400 `duplicate_header` / `invalid_content_length`, 411, 415, 429, 503) is backlog item B36.

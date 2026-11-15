@@ -1064,12 +1064,16 @@ async def test_tenants_policies_are_exactly_one_set_per_role(raw_db: AsyncSessio
     }
 
 
-def _tenants_column_privilege_inventory() -> set[tuple[str, str, str]]:
-    """(role, privilege, column) that migration 0010 leaves on app.tenants (besides the owner)."""
+def _tenants_column_privilege_inventory(*, after_0011: bool = True) -> set[tuple[str, str, str]]:
+    """
+    (role, privilege, column) on app.tenants (besides the owner) at the head (0011), or exactly as
+    migration 0010 left it when after_0011=False (what the 0011 downgrade must restore).
+    """
     columns = {c.name for c in Tenant.__table__.columns}
     assert {"id", "slug", "status", "timezone", "name", "doc_limits", "db_dsn"} <= columns
+    tenant_select = ("id", "slug", "status", "timezone") + (("doc_limits",) if after_0011 else ())
     inventory: set[tuple[str, str, str]] = set()
-    inventory |= {("app_tenant", "SELECT", c) for c in ("id", "slug", "status", "timezone")}
+    inventory |= {("app_tenant", "SELECT", c) for c in tenant_select}
     inventory |= {("app_tenant", "UPDATE", "timezone")}
     inventory |= {("app_worker", "SELECT", "id")}
     inventory |= {("app_platform", "SELECT", c) for c in columns}
@@ -1082,7 +1086,8 @@ async def test_tenants_column_privileges_inventory(raw_db: AsyncSession) -> None
     """
     EXACT privileges on app.tenants for every role except the owner: no more and no less. The
     column view includes what table-level grants expand to, so a regrant of table-wide SELECT to
-    app_tenant (which would expose db_dsn and doc_limits) shows up as extra columns here.
+    app_tenant (which would expose db_dsn) shows up as extra columns here. Since 0011 app_tenant
+    reads doc_limits (its own row only, through the tenant_self_select policy).
     """
     rows = (
         await raw_db.execute(

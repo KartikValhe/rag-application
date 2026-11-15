@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     # serves this directory; documents leave only through an authenticated, streaming route.
     DOCUMENT_STORE_DIR: str = "document_store"
 
+    # ── Document limits (design A2) ─────────────────────────────────────────
+    # Platform defaults for every tenant. A superadmin can override them per tenant
+    # (tenants.doc_limits), always within the hard ceilings in app/services/document_limits.py.
+    DOC_MAX_FILE_BYTES: int = 10 * 1024 * 1024
+    DOC_MAX_PDF_PAGES: int = 200
+    DOC_MAX_PPTX_SLIDES: int = 100
+    QUOTA_MAX_DOCUMENTS: int = 200
+    QUOTA_MAX_STORAGE_BYTES: int = 500 * 1024 * 1024
+    QUOTA_MAX_PAGES: int = 5000
+    DOC_UPLOAD_RATE_USER: int = 20  # uploads per user per hour
+    DOC_UPLOAD_RATE_TENANT: int = 100  # uploads per tenant per hour
+
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property
     def is_development(self) -> bool:

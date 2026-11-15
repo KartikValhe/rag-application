@@ -4,8 +4,8 @@ tests/test_tenants_rls.py
 Row level security and column grants on app.tenants (migration 0010, design A3).
 
 What the three roles may do with the tenants table:
-  app_tenant   sees only its own row (SELECT policy), reads only id, slug, status, timezone, and
-               updates only its own timezone. No INSERT, no DELETE.
+  app_tenant   sees only its own row (SELECT policy), reads only id, slug, status, timezone (and
+               doc_limits since 0011), and updates only its own timezone. No INSERT, no DELETE.
   app_platform sees and writes every row, but never changes id or slug and never sets an explicit id.
   app_worker   sees every row and reads only the id column (the sweeper, covered in test_isolation).
 
@@ -136,15 +136,16 @@ async def test_app_tenant_cannot_update_another_tenants_timezone(
 # ── app_tenant: which columns ────────────────────────────────────────────────
 
 
+# doc_limits is readable since migration 0011 (own row only): see tests/test_document_limits.py.
 @pytest.mark.parametrize(
     "select_list",
-    ["db_dsn", "doc_limits", "name", "registration_mode", "kind", "created_at", "*", "tenants.*"],
+    ["db_dsn", "name", "registration_mode", "kind", "created_at", "*", "tenants.*", "doc_limits, db_dsn"],
 )
 async def test_app_tenant_cannot_select_columns_outside_its_grant(tenant_a: Tenant, select_list: str) -> None:
     await _assert_tenant_denied(tenant_a.id, f"SELECT {select_list} FROM app.tenants")
 
 
-@pytest.mark.parametrize("column", ["db_dsn", "doc_limits", "name", "registration_mode"])
+@pytest.mark.parametrize("column", ["db_dsn", "name", "registration_mode"])
 async def test_app_tenant_cannot_filter_or_sort_on_hidden_columns(tenant_a: Tenant, column: str) -> None:
     """A hidden column must not leak through WHERE or ORDER BY either."""
     await _assert_tenant_denied(tenant_a.id, f"SELECT id FROM app.tenants WHERE {column}::text IS NOT NULL")

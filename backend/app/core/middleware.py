@@ -90,7 +90,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "img-src 'self' data: https://fastapi.tiangolo.com; "
                 "frame-ancestors 'none'"
             )
-        else:
+        elif "content-security-policy" not in response.headers:
+            # A route may set a stricter policy of its own (the document download adds "sandbox").
             response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         if not settings.is_development:
             response.headers["Strict-Transport-Security"] = (
