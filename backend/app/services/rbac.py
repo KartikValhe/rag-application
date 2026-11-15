@@ -35,6 +35,8 @@ SYSTEM_ROLE_DEFINITIONS: dict[str, dict[str, Any]] = {
             "subject:manage",
             "document:upload",
             "document:delete",
+            "document:view",
+            "document:publish",
             "timetable:manage",
             "timetable:publish",
             "timetable:view",

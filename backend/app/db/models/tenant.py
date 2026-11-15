@@ -9,9 +9,10 @@ Only the `app_platform` DB role may read/write them.
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import CheckConstraint, DateTime, String, Text, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models.base import Base
@@ -75,6 +76,13 @@ class Tenant(Base):
         String(64),
         nullable=False,
         server_default="Asia/Kolkata",
+    )
+    # Per-tenant document limits (overrides of the platform defaults, see design A2).
+    # Written only by the superadmin endpoint; validated against hard platform ceilings.
+    doc_limits: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -43,6 +43,8 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # init.sql also creates the pgvector extension (next to citext) and the app_worker role in
+      # ragplatform and ragplatform_test; migration 0008 verifies both and does not create them.
       - name: Initialize DB Roles & Schema
         run: |
           docker cp infra/postgres/init.sql ${{ job.services.postgres.id }}:/tmp/init.sql
@@ -73,6 +75,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://app_tenant:tenant_password@localhost:5432/ragplatform_test
           PLATFORM_DATABASE_URL: postgresql+asyncpg://app_platform:platform_password@localhost:5432/ragplatform_test
           MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ragplatform_test
+          WORKER_DATABASE_URL: postgresql+asyncpg://app_worker:worker_password@localhost:5432/ragplatform_test
           REDIS_URL: redis://localhost:6379/1
           SECRET_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           PLATFORM_SECRET_KEY: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -85,6 +88,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://app_tenant:tenant_password@localhost:5432/ragplatform_test
           PLATFORM_DATABASE_URL: postgresql+asyncpg://app_platform:platform_password@localhost:5432/ragplatform_test
           MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ragplatform_test
+          WORKER_DATABASE_URL: postgresql+asyncpg://app_worker:worker_password@localhost:5432/ragplatform_test
           REDIS_URL: redis://localhost:6379/1
           SECRET_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           PLATFORM_SECRET_KEY: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

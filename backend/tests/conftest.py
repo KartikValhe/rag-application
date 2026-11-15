@@ -31,6 +31,10 @@ os.environ.setdefault(
     "MIGRATION_DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres@localhost:5433/ragplatform",
 )
+os.environ.setdefault(
+    "WORKER_DATABASE_URL",
+    "postgresql+asyncpg://app_worker:worker_password@localhost:5433/ragplatform",
+)
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")  # DB 1 for tests
 os.environ.setdefault("SECRET_KEY", "a" * 64)
 os.environ.setdefault("PLATFORM_SECRET_KEY", "b" * 64)
@@ -43,6 +47,7 @@ from app.db.models.tenant import PlatformAdmin, Tenant
 from app.db.models.user import User
 from app.main import app
 from app.services.rbac import seed_tenant_system_roles
+from tests.fixtures.academic_world import academic_world  # noqa: F401  (pytest fixture)
 
 # ── Database setup ────────────────────────────────────────────────────────────
 

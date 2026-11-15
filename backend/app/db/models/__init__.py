@@ -16,6 +16,15 @@ from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
 from app.db.models.base import Base
 from app.db.models.branding import TenantBranding
+from app.db.models.document import (
+    Chunk,
+    ChunkEmbedding,
+    Document,
+    DocumentClass,
+    DocumentVersion,
+    IngestJob,
+    StorageDeletion,
+)
 from app.db.models.rbac import (
     Permission,
     Role,
@@ -47,4 +56,11 @@ __all__ = [
     "TenantBranding",
     "Timetable",
     "TimetableEntry",
+    "Document",
+    "DocumentClass",
+    "DocumentVersion",
+    "Chunk",
+    "ChunkEmbedding",
+    "StorageDeletion",
+    "IngestJob",
 ]

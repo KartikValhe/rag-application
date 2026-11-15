@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # worker processes that need session-mode semantics.
     MIGRATION_DATABASE_URL: str = ""
 
+    # Document ingestion worker engine, connecting as the app_worker role. That role can only
+    # claim and update rows of app.ingest_jobs (see migration 0008). Optional for the API
+    # process; required by the worker (step 5b). No default and no secret is stored here.
+    WORKER_DATABASE_URL: str = ""
+
     # ── Redis ───────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: str = ""

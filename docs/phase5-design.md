@@ -1,7 +1,7 @@
 # Phase 5 / 6 Design: Syllabus Ingestion, Retrieval and the Free LLM Layer
 
 Status: DECISIONS APPLIED (section C6 resolved) · Date: 2026-11-13, updated 2026-11-15 · Scope: Phase 5 in detail, Phase 6 at interface level, plus delivery.
-Read with: `docs/implementation_plan.md` (sections 1.1-1.6, Phases 5-7), `docs/api/phase4.md` (format), ADR 001/002.
+Read with: `docs/implementation_plan.md` (sections 1.1-1.6, Phases 5-7), `docs/api/phase4.md` (format), ADR 001/002/004 (004 = Postgres job queue).
 Anything marked **UNVERIFIED** was not confirmed against a primary source or the code during this review.
 
 ## 0. Facts found in the repo that change the plan
@@ -677,6 +677,18 @@ class Guardrail(Protocol):
 | **6b** Router + chat API | `chat_router.py`; conversations/messages tables; SSE endpoint skeleton; schedule route end-to-end | `services/chat_router.py`, `api/v1/chat.py`, `schemas/chat.py`, `alembic/versions/0010_*.py` | Phase 6 schedule exit criteria with a zero-LLM assertion; a student outside the class gets 404 | Ask schedule questions as student, teacher and admin in all three languages |
 | **6c** RAG answers | `rag_answer.py`, PII masking, prompt template, citation validation, fallback, metadata | `services/rag_answer.py`, `services/pii.py` | Not-found path makes no LLM call; invalid citations dropped; all-providers-down gives a retrieval-only answer | Real answers with citations on your documents |
 | **6d** Hooks + leaks | Guardrail pipeline stubs; chat canary tests across tenant, class and subject; `docs/api/phase6.md` | `services/guardrails.py`, `tests/security/*` | Leak suite green, and its prove-it-fails counterpart fails on purpose | Try cross-class probing questions yourself |
+
+**5a-2 record (2026-11-15; migration, models, permissions, isolation).** Deviations from sections A2/A3 and additions, all in `0008_phase5_documents.py` unless noted:
+
+- **Extra composite FKs on `chunks`:** `(tenant_id, document_version_id, document_id)` to `document_versions` and `(tenant_id, document_id, subject_id)` to `documents`, so the denormalized `document_id` and `subject_id` cannot disagree with the version or document. This needs one more unique key, `UNIQUE (tenant_id, id, document_id)` on `document_versions`. The design had a single FK to the version.
+- **Extra indexes:** `document_classes (tenant_id, class_id, subject_id)` (scope lookups) and `storage_deletions (tenant_id, not_before)` (sweeper drain).
+- **`ingest_jobs`:** the uniqueness is `UNIQUE (tenant_id, version_id)` (composite, like every other key) instead of a bare `version_id UNIQUE`. `tenant_isolation` applies to `PUBLIC` as on all other tables; `worker_claim` is `TO app_worker`.
+- **pgvector is created by `infra/postgres/init.sql`** (both databases), in the schema of `citext` found through `pg_extension`; CI uses the same file, so it needed no other change. The migration only **verifies** the extension and the `app_worker` role and fails with a clear message if either is missing. Every vector type, function and operator class in it is qualified with the schema read from `pg_extension`, and `USAGE` on that schema is granted to `app_tenant`. An existing dev database needs the role once (`CREATE ROLE app_worker ...` as in `init.sql`) before `alembic upgrade head`.
+- **One shared model key:** `app/ml/model_keys.py` (`E5_SMALL_MODEL_KEY` = repo + pinned revision from 0d). The migration (index predicate), the fixtures and later code import it. The status, stage and kind lists of the CHECK constraints come from constants in `app/db/models/document.py`, which the migration also imports; a test compares the database constraints with them.
+- **`Vector` ORM type** is a small local `UserDefinedType` (text format, no driver codec) so the `pgvector` Python package is not needed yet; 5c may swap it.
+- **`WORKER_DATABASE_URL`** is optional in `Settings` (default empty, so no secret is stored in code; the API does not need it). `.env.example` shows the dev password from `init.sql` only.
+- **Tests:** the generic isolation tests now commit the setup row (before, the row was invisible to the second connection, so SELECT/UPDATE/DELETE/no-tenant checks could not fail) and filter UPDATE/DELETE on `tenant_id` (the old predicate compared `tenant_id` with an `id`). The guard test and the `CUSTOM_COVERAGE` allow-list are in `tests/test_isolation.py`.
+- **Not done (as instructed):** `upload_security.py`, body limits, private store and `SlotManager` (5a-3); backlog B14 (`db_dsn` column grant).
 
 ### C2. Test plan
 

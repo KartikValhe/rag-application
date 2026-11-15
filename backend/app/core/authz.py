@@ -41,6 +41,8 @@ ALL_SYSTEM_PERMISSIONS = {
     "assignment:manage",
     "document:upload",
     "document:delete",
+    "document:view",
+    "document:publish",
     "timetable:manage",
     "timetable:publish",
     "timetable:view",

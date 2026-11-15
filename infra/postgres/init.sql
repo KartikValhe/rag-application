@@ -12,6 +12,17 @@ CREATE SCHEMA IF NOT EXISTS app;
 CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA app;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA app;
 
+-- pgvector lives in the same schema as citext (found from pg_extension, never hardcoded).
+DO $$
+DECLARE
+    ext_schema name;
+BEGIN
+    SELECT n.nspname INTO ext_schema
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'citext';
+    EXECUTE format('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA %I', ext_schema);
+END $$;
+
 -- Create app_tenant role (used by FastAPI for tenant traffic - NOBYPASSRLS)
 DO $$
 BEGIN
@@ -30,9 +41,21 @@ BEGIN
     END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA app TO app_tenant, app_platform;
+
+-- Create app_worker role (document ingestion worker). It can only claim and update rows of
+-- app.ingest_jobs and read tenant ids; migration 0008 grants exactly that and nothing else.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_worker') THEN
+        CREATE ROLE app_worker LOGIN PASSWORD 'worker_password'
+            NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA app TO app_tenant, app_platform, app_worker;
 ALTER ROLE app_tenant SET search_path = app;
 ALTER ROLE app_platform SET search_path = app;
+ALTER ROLE app_worker SET search_path = app;
 
 -- 3. Setup ragplatform_test (test db)
 \connect ragplatform_test
@@ -40,6 +63,17 @@ ALTER ROLE app_platform SET search_path = app;
 CREATE SCHEMA IF NOT EXISTS app;
 CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA app;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA app;
+
+-- pgvector lives in the same schema as citext (found from pg_extension, never hardcoded).
+DO $$
+DECLARE
+    ext_schema name;
+BEGIN
+    SELECT n.nspname INTO ext_schema
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'citext';
+    EXECUTE format('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA %I', ext_schema);
+END $$;
 
 DO $$
 BEGIN
@@ -57,7 +91,19 @@ BEGIN
     END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA app TO app_tenant, app_platform;
+
+-- Create app_worker role (document ingestion worker). It can only claim and update rows of
+-- app.ingest_jobs and read tenant ids; migration 0008 grants exactly that and nothing else.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_worker') THEN
+        CREATE ROLE app_worker LOGIN PASSWORD 'worker_password'
+            NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA app TO app_tenant, app_platform, app_worker;
 ALTER ROLE app_tenant SET search_path = app;
 ALTER ROLE app_platform SET search_path = app;
+ALTER ROLE app_worker SET search_path = app;
 

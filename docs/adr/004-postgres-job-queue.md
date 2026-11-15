@@ -1,4 +1,4 @@
-# ADR 003: Postgres Job Queue
+# ADR 004: Postgres Job Queue
 
 ## Status
 Accepted (2026-11-15)
