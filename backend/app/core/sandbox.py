@@ -20,9 +20,17 @@ Shared by the timetable import (services/timetable_parser_runner.py) and the doc
 - logs an abnormal exit with the exit code, the signal name and the exception CLASS name only
   (a strict marker line from sandbox_child), never stderr text, paths or content.
 
-The memory (RLIMIT_AS) and CPU (RLIMIT_CPU) limits and the parent-death signal are applied by the
-child itself (sandbox_child.run); RLIMIT_* and PR_SET_PDEATHSIG exist on Linux only. On Windows
-(development only) the wall clock is the only limit.
+The memory (RLIMIT_AS) and CPU (RLIMIT_CPU) limits, the parent-death signal and the non-dumpable flag
+are applied by the child itself (sandbox_child.run); they exist on Linux only. On Windows (development
+only) the wall clock is the only limit.
+
+What this module does NOT do (see "Worker deployment requirements" in README.md and design C3): the child
+runs as the SAME user as its parent. The parent (the worker) makes itself non-dumpable at startup, so the
+child cannot read /proc/<parent pid>/environ, but nothing here stops it from reading files that user can
+read (the backend source folder, a .env file). That is deployment's job: a container with a non-root user,
+no .env file in the image, filesystem permissions, no outbound network. Known gaps of the kill: a
+grandchild whose parent already exited is missed by `taskkill /T`, `killpg` misses a grandchild that
+called setsid, and the parent-death signal covers only the direct child (backlog B44).
 
 This module does not import the app settings: callers pass every limit.
 """
@@ -35,8 +43,10 @@ import os
 import re
 import shutil
 import signal
+import site
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -92,13 +102,24 @@ class SandboxCrash(SandboxError):
 # ── Environment ──────────────────────────────────────────────────────────────
 
 
+def _is_interpreter_site_dir(path: Path) -> bool:
+    """True for the interpreter's own site-packages (already on the child's path by default)."""
+    resolved = path.resolve()
+    candidates = {sysconfig.get_paths().get("purelib", ""), sysconfig.get_paths().get("platlib", "")}
+    with suppress(AttributeError):  # some virtualenv builds of `site` have no getsitepackages
+        candidates.update(site.getsitepackages())
+    return any(c and Path(c).resolve() == resolved for c in candidates)
+
+
 def child_python_path(child_module: str, backend_root: Path = BACKEND_ROOT) -> str:
     """
-    Import roots for the child. For a module of the `app` package only the directory that holds
-    it. The package may be installed into site-packages, so another module (a test child) is looked
-    up in the parent and the directory that holds it is added too.
+    Import roots for the child, as few as it needs. For a module of the `app` package only the
+    directory that holds it, and not even that when the package is installed into site-packages (a
+    production image): the child's default path reaches it already, so the backend source folder
+    (with whatever else lies next to it) is not on the path at all. A module outside `app` (a test
+    child) is looked up in the parent and the directory that holds it is added too.
     """
-    roots = [str(backend_root)]
+    roots = [] if _is_interpreter_site_dir(backend_root) else [str(backend_root)]
     top = child_module.split(".")[0]
     if top != "app":
         try:
@@ -126,7 +147,6 @@ def child_env(
 ) -> dict[str, str]:
     """Minimal environment. Nothing is inherited from the parent except what Python itself needs."""
     env = {
-        "PYTHONPATH": child_python_path(child_module, backend_root),
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -134,6 +154,9 @@ def child_env(
         "TEMP": workdir,
         "TMP": workdir,
     }
+    python_path = child_python_path(child_module, backend_root)
+    if python_path:
+        env["PYTHONPATH"] = python_path
     if memory_limit_bytes:
         env[MEMORY_ENV] = str(int(memory_limit_bytes))
     if cpu_seconds:

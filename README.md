@@ -223,6 +223,18 @@ When deploying to staging or production environments, observe the following mand
    - OpenXML relationships: only plain hyperlink relationships (`.../relationships/hyperlink`) may use `TargetMode="External"`; they are never followed or fetched. Every other external target (oleObject, attachedTemplate, externalLink, frame, external images or media) is rejected.
    - OpenXML files (xlsx, docx, pptx) are typed by content (`xl/workbook.xml`, `word/document.xml`, `ppt/presentation.xml`), must match their extension, and are rejected on any `vbaProject.bin`, `/embeddings/` part, nested ZIP or OLE content, external relationship, or malformed XML.
 
+### Worker deployment requirements
+
+The document ingestion worker parses untrusted files in a child process (`app/core/sandbox.py`). The child has a clean environment, an empty working directory, a time limit and (Linux) memory, CPU and parent-death limits, **but it runs as the same user as the worker and the operating system gives it no filesystem or network confinement of its own.** In production the worker therefore MUST run like this:
+
+- **In a container, as a non-root user** (root can read every `/proc` file). Both the worker and its child set `PR_SET_DUMPABLE` to 0 at startup (Linux), so the child cannot read `/proc/<worker pid>/environ`, where the database URLs and `SECRET_KEY` live.
+- **Secrets from environment variables or a secret manager, and NO `.env` file inside the image** (add it to `.dockerignore`). Nothing a parser exploit could read should be in the image.
+- **The child must not be able to read the backend source or other data it does not need:** install the package into site-packages (non-editable wheel; the child's import path then holds no backend folder), use a read-only root filesystem and mount only what is needed (the document store directory, a scratch directory). The child is the same user, so it can still read what the worker reads (including every tenant's stored files) until it runs as a separate user or in its own container (backlog B44).
+- **Memory, CPU and process limits from the container (cgroup)**: `--memory`, `--cpus`, `--pids-limit`. The child's `RLIMIT_AS`/`RLIMIT_CPU` are only a second layer, and Linux only.
+- **No outbound network for the worker** except PostgreSQL, Redis and (later) object storage.
+
+**Windows and macOS have none of these protections** (no non-dumpable flag, no rlimits, no parent-death signal, no container). Use them for development only.
+
 ---
 
 ---

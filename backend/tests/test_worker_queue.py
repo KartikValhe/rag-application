@@ -17,7 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.workers import queue as queue_module
-from app.workers.db import TenantRef, WorkerDatabases, tenant_session_for
+from app.workers.db import TenantRef, WorkerDatabases, trusted_statement
 from app.workers.queue import Job, JobQueue
 from tests.fixtures.academic_world import AcademicWorld
 from tests.fixtures.documents import make_document
@@ -262,11 +262,39 @@ async def test_app_worker_still_cannot_touch_tenant_tables_directly(worker_dbs: 
 # ── tenant_session_for ───────────────────────────────────────────────────────
 
 
-async def test_tenant_session_for_accepts_a_job_object_never_a_loose_id(worker_dbs: WorkerDatabases) -> None:
-    for loose in (uuid.uuid4(), str(uuid.uuid4()), {"tenant_id": str(uuid.uuid4())}, None):
-        with pytest.raises(TypeError):
-            async with tenant_session_for(loose):  # type: ignore[arg-type]
-                pass
+async def test_tenant_session_for_accepts_a_job_object_never_a_loose_id(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path, quiet_queue: None
+) -> None:
+    from dataclasses import dataclass
+
+    a, b = academic_world.a, academic_world.b
+    await make_document(raw_db, a, subject="Physics", classes=("10-A",), uploader=a.t1, status="published", title="CANARY-A-ARG")
+    await make_document(raw_db, b, subject="Physics", classes=("10-B",), uploader=b.t2, status="published", title="CANARY-B-ARG")
+    await queued_version(raw_db, a, tmp_path)
+    job = await make_queue(worker_dbs).claim("w")
+    assert job is not None and job.tenant_id == a.id
+
+    @dataclass
+    class LooksLikeAJob:  # same attributes, but not a claimed row
+        tenant_id: uuid.UUID
+
+    log = StatementLog(worker_dbs.tenant_engine)
+    try:
+        for loose in (b.id, str(b.id), {"tenant_id": str(b.id)}, None, LooksLikeAJob(b.id)):
+            with pytest.raises(TypeError):
+                async with worker_dbs.tenant_sessions.for_job(loose):  # type: ignore[arg-type]
+                    pass
+    finally:
+        log.close()
+    assert log.statements == [], "a refused call must not touch the database"
+
+    # What IS accepted gets exactly the tenant of that object, and sees only that tenant's rows
+    for scoped, own, foreign in ((job, a, "CANARY-B-ARG"), (TenantRef(b.id), b, "CANARY-A-ARG")):
+        async with worker_dbs.tenant_sessions.for_job(scoped) as db:
+            current = (await db.execute(trusted_statement("SELECT current_setting('app.tenant_id', true)"))).scalar_one()
+            titles = set((await db.execute(text("SELECT title FROM app.documents"))).scalars())
+        assert current == str(own.id)
+        assert foreign not in titles and titles, titles
 
 
 async def test_the_session_tenant_comes_from_the_claimed_row_and_sees_only_that_tenant(

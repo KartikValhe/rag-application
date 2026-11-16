@@ -91,13 +91,92 @@ async def test_timeout_kills_the_child(tmp_path: Path) -> None:
     assert await _wait_dead(int(pid_file.read_text()))
 
 
-async def test_timeout_kills_the_whole_process_tree(tmp_path: Path) -> None:
+async def _both_pids(pid_file: Path) -> tuple[int, int]:
+    """Wait (up to 30 s) until the test child has written its own pid and its grandchild's pid."""
+    for _ in range(600):
+        if pid_file.exists() and "," in pid_file.read_text():
+            child, grandchild = (int(p) for p in pid_file.read_text().split(","))
+            return child, grandchild
+        await asyncio.sleep(0.05)
+    raise AssertionError("the test child never reported its pids")
+
+
+async def test_the_whole_process_tree_is_killed_while_both_are_alive(tmp_path: Path) -> None:
+    """
+    Deterministic (review of 5b-1/5b-2, finding 11): the kill is triggered only after the test has SEEN
+    both processes alive, so it does not depend on how long Python takes to start, and a tree kill that
+    only works while the parent is still alive is exactly what this covers.
+    """
     pid_file = tmp_path / "pids.txt"
+    task = asyncio.create_task(_run("tree", params={"pid_file": str(pid_file)}, limits=sandbox.SandboxLimits(60.0, 1024)))
+    child, grandchild = await _both_pids(pid_file)
+    assert _pid_alive(child) and _pid_alive(grandchild), "precondition: both processes must be alive at kill time"
+    task.cancel()  # the sandbox kills the tree when its caller is cancelled (same kill_tree as a timeout)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await _wait_dead(child)
+    assert await _wait_dead(grandchild), "grandchild survived the kill of its parent's tree"
+
+
+async def test_a_timeout_kills_the_tree_that_was_seen_alive(tmp_path: Path) -> None:
+    """The wall clock path: the limit is long, the test fires it deterministically through the deadline."""
+    pid_file = tmp_path / "pids.txt"
+    limits = sandbox.SandboxLimits(timeout_seconds=15.0, max_output_bytes=1024)
+    task = asyncio.create_task(_run("tree", params={"pid_file": str(pid_file)}, limits=limits))
+    child, grandchild = await _both_pids(pid_file)
+    assert _pid_alive(child) and _pid_alive(grandchild)
     with pytest.raises(sandbox.SandboxTimeout):
-        await _run("tree", params={"pid_file": str(pid_file)}, limits=sandbox.SandboxLimits(2.0, 1024))
-    child, grandchild = (int(p) for p in pid_file.read_text().split(","))
+        await asyncio.wait_for(task, 40)
     assert await _wait_dead(child)
     assert await _wait_dead(grandchild), "grandchild survived the sandbox timeout"
+
+
+def _spawn_like_the_sandbox(mode: str, pid_file: Path, workdir: Path) -> "subprocess.Popen[bytes]":
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        [sys.executable, "-P", "-m", CHILD, mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(workdir), env=sandbox.child_env(str(workdir), CHILD), **kwargs,  # type: ignore[call-overload]
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps({"pid_file": str(pid_file)}).encode() + b"\n")
+    proc.stdin.close()
+    return proc
+
+
+@pytest.mark.xfail(
+    sys.platform == "win32", strict=True,
+    reason="KNOWN GAP (backlog B44): taskkill /T cannot find a grandchild whose parent already exited; "
+    "a Windows Job Object set to kill on close would. Strict: this test must start passing when that lands.",
+)
+def test_a_grandchild_whose_parent_already_exited_is_killed(tmp_path: Path) -> None:
+    pid_file = tmp_path / "pids.txt"
+    proc = _spawn_like_the_sandbox("orphan", pid_file, tmp_path)
+    grandchild = 0
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (pid_file.exists() and "," in pid_file.read_text()):
+            time.sleep(0.05)
+        child, grandchild = (int(p) for p in pid_file.read_text().split(","))
+        proc.wait(timeout=30)  # the child returned its result and exited; its grandchild lives on
+        assert not _pid_alive(child) and _pid_alive(grandchild), "precondition: parent gone, grandchild alive"
+        sandbox.kill_tree(proc)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _pid_alive(grandchild):
+            time.sleep(0.1)
+        assert not _pid_alive(grandchild), "an orphaned grandchild survived kill_tree"
+    finally:
+        if grandchild and _pid_alive(grandchild):  # never leave a sleeper behind
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/PID", str(grandchild)], capture_output=True, check=False)
+            else:
+                os.kill(grandchild, 9)
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
 
 async def test_output_over_the_cap_is_refused_and_the_child_killed() -> None:

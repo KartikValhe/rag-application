@@ -6,10 +6,10 @@ protection off with monkeypatch, runs the SAME scenario again and requires the h
 shows the helper really checks the protection and does not pass by accident.
 
   1. FOR UPDATE SKIP LOCKED removed       -> the double-claim helper raises.
-  2. tenant taken from an argument        -> the session-scope helper raises.
+  2. the tenant guard switched off        -> a stage that sets a payload tenant on its own session is seen.
   3. expired-lease reclaim removed        -> the reclaim helper raises.
   4. slot release skipped on failure      -> the slot helper raises.
-  5. the tenant is not set per transaction-> the per-transaction helper raises.
+  5. a stage opens a session without the helper -> the per-transaction helper raises (whole job log).
   6. the job ownership check removed       -> the stale-worker helper raises.
   7. the lease forgets its backend         -> the Redis-lease helper raises.
   8. the fresh-session file check removed  -> the lost-commit scenario raises.
@@ -19,7 +19,6 @@ TEST database only: the autouse fixture asserts current_database() ends in _test
 
 import dataclasses
 import os
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,7 +30,6 @@ from app.api.v1 import documents as documents_api
 from app.core import redis_client
 from app.core.config import settings
 from app.core.slots import SlotLimit, SlotManager
-from app.workers import db as worker_db
 from app.workers import errors, ingest, stages
 from app.workers import queue as queue_module
 from app.workers.db import WorkerDatabases
@@ -44,11 +42,11 @@ from tests.fixtures.worker import (
     queued_version,
 )
 from tests.security.slot_assertions import assert_redis_lease_is_not_judged_from_memory
+from tests.security.tenant_guard_assertions import assert_own_session_cannot_read_a_payload_tenant
 from tests.security.worker_assertions import (
     StatementLog,
     assert_every_transaction_sets_tenant_first,
     assert_expired_lease_reclaimed,
-    assert_job_session_is_scoped_to_its_tenant,
     assert_locked_job_is_skipped,
     assert_no_slots_held,
     assert_stale_worker_cannot_write,
@@ -73,45 +71,47 @@ async def test_removing_skip_locked_is_caught_by_the_double_claim_helper(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
     quiet_queue: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for subject in ("Math", "Physics", "English", "Chemistry"):
-        await queued_version(raw_db, academic_world.a, tmp_path, subject=subject, classes=("11-A",) if subject == "Chemistry" else ("10-A",))
-    queue = make_queue(worker_dbs)
+    async def two_claimable_jobs() -> None:
+        # A tenant offers one job per claim round, so the two claimable jobs belong to two tenants.
+        # Whatever the first run left running is finished first (a tenant at its cap offers nothing).
+        await raw_db.execute(text("UPDATE app.ingest_jobs SET status = 'done' WHERE status = 'running' AND tenant_id IN (:a, :b)"),
+                             {"a": academic_world.a.id, "b": academic_world.b.id})
+        await raw_db.commit()
+        await queued_version(raw_db, academic_world.a, tmp_path, subject="Math")
+        await queued_version(raw_db, academic_world.b, tmp_path, subject="Physics")
 
+    queue = make_queue(worker_dbs)
+    await two_claimable_jobs()
     await assert_locked_job_is_skipped(queue, worker_dbs.worker_engine)  # protection ON: passes
 
-    assert "FOR UPDATE SKIP LOCKED" in queue_module.CLAIM_SQL
-    monkeypatch.setattr(queue_module, "CLAIM_SQL", queue_module.CLAIM_SQL.replace("FOR UPDATE SKIP LOCKED", ""))
+    assert "FOR UPDATE OF j SKIP LOCKED" in queue_module.CLAIM_SQL
+    monkeypatch.setattr(queue_module, "CLAIM_SQL", queue_module.CLAIM_SQL.replace("FOR UPDATE OF j SKIP LOCKED", ""))
+    await two_claimable_jobs()
     with pytest.raises(AssertionError, match="blocked on a locked row|claimed the same job"):
         await assert_locked_job_is_skipped(queue, worker_dbs.worker_engine, timeout=2.0)
 
 
-# ── 2. The tenant comes from the claimed row ─────────────────────────────────
+# ── 2. A stage cannot take the tenant from somewhere else ────────────────────
+# Rewritten (review of 5b-1/5b-2): the old test patched tenant_session_for itself, so it only proved that
+# the helper notices a broken helper. Now the stage is a code path that opens a session WITHOUT the
+# helper and sets the tenant it got from a message payload. The engine guard is the protection; with it
+# switched off the same helper must raise.
 
 
-async def test_taking_the_tenant_from_an_argument_is_caught_by_the_scope_helper(
+async def test_a_stage_that_sets_the_tenant_from_a_payload_is_caught_when_the_guard_is_off(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
-    quiet_queue: None, monkeypatch: pytest.MonkeyPatch,
+    quiet_queue: None,
 ) -> None:
     a, b = academic_world.a, academic_world.b
     await make_document(raw_db, a, subject="Physics", classes=("10-A",), uploader=a.t1, status="published", title="CANARY-A")
     await make_document(raw_db, b, subject="Physics", classes=("10-B",), uploader=b.t2, status="published", title="CANARY-B")
-    await queued_version(raw_db, a, tmp_path)
-    job = await make_queue(worker_dbs).claim("w")
-    assert job is not None and job.tenant_id == a.id
 
-    await assert_job_session_is_scoped_to_its_tenant(worker_dbs.tenant_sessions, job)  # protection ON: passes
+    await assert_own_session_cannot_read_a_payload_tenant(worker_dbs.tenant_sessions, b.id, "CANARY-B")  # guard ON
 
-    payload_tenant = b.id  # e.g. a tenant id that arrived in a message payload
-
-    @asynccontextmanager
-    async def from_argument(_job: object, *, sessionmaker: object = None):  # type: ignore[no-untyped-def]
-        async with sessionmaker() as session, session.begin():  # type: ignore[operator]
-            await session.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(payload_tenant)})
-            yield session
-
-    monkeypatch.setattr(worker_db, "tenant_session_for", from_argument)
-    with pytest.raises(AssertionError, match="is not the job row's tenant|another tenant's rows"):
-        await assert_job_session_is_scoped_to_its_tenant(worker_dbs.tenant_sessions, job)
+    assert worker_dbs.tenant_guard is not None
+    worker_dbs.tenant_guard.remove()  # the protection OFF
+    with pytest.raises(AssertionError, match="read another tenant's rows"):
+        await assert_own_session_cannot_read_a_payload_tenant(worker_dbs.tenant_sessions, b.id, "CANARY-B")
 
 
 # ── 3. Lease-expiry reclaim ──────────────────────────────────────────────────
@@ -174,37 +174,43 @@ async def test_skipping_slot_release_on_failure_is_caught_by_the_slot_helper(
         await assert_no_slots_held(ingest_slots, w.id)
 
 
-# ── 5. The tenant is set in every transaction ────────────────────────────────
+# ── 5. The tenant is set in every transaction of a job ───────────────────────
+# Rewritten (review of 5b-1/5b-2): the old test patched tenant_session_for. Now a whole job runs and its
+# statement log (every transaction, every statement) goes to the helper. The bad code path is a STAGE that
+# opens a session some other way (straight from the sessionmaker) and queries without setting the tenant.
 
 
-async def test_not_setting_the_tenant_per_transaction_is_caught_by_the_transaction_helper(
+async def _logged_job(
+    dbs: WorkerDatabases, w: object, raw_db: AsyncSession, tmp_path: Path, slots: SlotManager, *, sneaky: bool
+) -> StatementLog:
+    await queued_version(raw_db, w, tmp_path)  # type: ignore[arg-type]
+    pipeline = FakePipeline()
+
+    async def own_session(sctx: stages.StageContext) -> None:
+        async with sctx.tenant_sessions.sessionmaker() as session, session.begin():  # not the helper
+            await session.execute(text("SELECT count(*) FROM app.documents"))
+
+    if sneaky:
+        pipeline.hooks["parse"] = own_session
+    log = StatementLog(dbs.tenant_engine)
+    try:
+        assert await ingest.run_one(make_context(dbs, tmp_path, slots), pipeline.stages()) == ingest.JobOutcome.DONE
+    finally:
+        log.close()
+    return log
+
+
+async def test_a_stage_that_opens_a_session_some_other_way_is_caught_by_the_transaction_helper(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
-    quiet_queue: None, monkeypatch: pytest.MonkeyPatch,
+    quiet_queue: None, ingest_slots: SlotManager,
 ) -> None:
-    await queued_version(raw_db, academic_world.a, tmp_path)
-    job = await make_queue(worker_dbs).claim("w")
-    assert job is not None
+    w = academic_world.a
+    honest = await _logged_job(worker_dbs, w, raw_db, tmp_path, ingest_slots, sneaky=False)
+    assert_every_transaction_sets_tenant_first(honest, at_least=5)  # every transaction of a normal job: passes
 
-    async def three_transactions() -> StatementLog:
-        log = StatementLog(worker_dbs.tenant_engine)
-        try:
-            for _ in range(3):
-                async with worker_dbs.tenant_sessions.for_job(job) as db:
-                    await db.execute(text("SELECT count(*) FROM app.documents"))
-        finally:
-            log.close()
-        return log
-
-    assert_every_transaction_sets_tenant_first(await three_transactions(), at_least=3)  # protection ON: passes
-
-    @asynccontextmanager
-    async def sets_once_then_forgets(_job: object, *, sessionmaker: object = None):  # type: ignore[no-untyped-def]
-        async with sessionmaker() as session, session.begin():  # type: ignore[operator]
-            yield session  # no set_config at all
-
-    monkeypatch.setattr(worker_db, "tenant_session_for", sets_once_then_forgets)
+    sneaky = await _logged_job(worker_dbs, w, raw_db, tmp_path, ingest_slots, sneaky=True)
     with pytest.raises(AssertionError, match="before setting the tenant"):
-        assert_every_transaction_sets_tenant_first(await three_transactions(), at_least=3)
+        assert_every_transaction_sets_tenant_first(sneaky, at_least=5)
 
 
 # ── 6. Job ownership ─────────────────────────────────────────────────────────

@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
+from app.core import sandbox_child
 from app.core.slots import (
     RenewResult,
     SlotBackendUnavailable,
@@ -539,7 +540,12 @@ async def _amain(stages: IngestStages) -> None:
     dbs = WorkerDatabases.from_settings()
     await dbs.verify_roles()
     worker_id = f"worker-{uuid.uuid4().hex[:12]}"
-    queue = JobQueue(dbs.worker_engine, max_attempts=config.max_attempts, lease_seconds=config.lease_seconds)
+    queue = JobQueue(
+        dbs.worker_engine,
+        max_attempts=config.max_attempts,
+        lease_seconds=config.lease_seconds,
+        tenant_concurrency=config.tenant_concurrency,
+    )
     store = get_document_store()
     ctx = WorkerContext(
         queue=queue,
@@ -568,6 +574,9 @@ async def _amain(stages: IngestStages) -> None:
 
 
 def main() -> int:
+    # The worker's environment holds the database URLs and SECRET_KEY. Make the process non-dumpable
+    # (Linux) so a compromised parser child of the same user cannot read /proc/<this pid>/environ.
+    sandbox_child.set_non_dumpable()
     try:
         stages = assemble_default_stages()
     except PipelineNotAssembled as exc:

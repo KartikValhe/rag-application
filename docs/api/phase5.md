@@ -114,7 +114,7 @@ Implemented in `app/api/v1/documents.py`; scope in `app/services/document_scope.
 | `PATCH ...` | `document:upload` | JSON `DocumentUpdateRequest` | `200` `DocumentResponse` | 403 manage; 404; 422 (`invalid_title`, an unknown field such as `subject_id`, empty `class_ids`) |
 | `DELETE ...` | `document:delete` + manage on all classes | | `204` | 403 manage; 404 |
 | `GET .../versions/{version_id}/status` | `document:view` | | `200` `DocumentStatusResponse` | 404 |
-| `POST .../versions/{version_id}/retry` | `document:upload` + manage on all classes | | `202` `DocumentVersionResponse` | 403 manage; 404; 409 `version_not_retryable`, `document_processing_in_progress`, `duplicate_version` |
+| `POST .../versions/{version_id}/retry` | `document:upload` + manage on all classes | | `202` `DocumentVersionResponse` | 403 manage; 404; 409 `version_not_retryable`, `document_processing_in_progress`, `duplicate_version`, `retry_limit_reached`; 429 `retry_rate_limit_exceeded`, `retry_version_rate_limit_exceeded`; 503 |
 | `DELETE .../versions/{version_id}` | `document:upload` + manage on all classes | | `204` | 403 manage; 404; 409 `version_not_deletable` |
 | `GET .../versions/{version_id}/download` | `document:view` | | `200` file stream | 404 (also when the file is missing) |
 | `GET /api/v1/admin/documents/usage` | `settings:manage` | | `200` `DocumentUsageResponse` | |
@@ -180,8 +180,12 @@ The API reads a tenant's limits through the tenant session (`app_tenant` may rea
 | `too_many_classes` | 422 | upload: more than 50 classes |
 | `invalid_cursor`, `invalid_status` | 422 | list |
 | `rate_limit_exceeded`, `tenant_rate_limit_exceeded` | 429 + `Retry-After` | upload, replace; the body also has `retry_after_seconds` |
-| `service_unavailable` | 503 | upload: the private store could not be written, or Redis is down outside development |
+| `retry_limit_reached` | 409 | retry: this version was already retried by hand `DOC_RETRY_MAX_PER_VERSION` times (default 5, counted from the audit log). The file keeps failing: upload it again as a new version |
+| `retry_rate_limit_exceeded`, `retry_version_rate_limit_exceeded` | 429 + `Retry-After` | retry: more than `DOC_RETRY_RATE_USER` (10) retries per user per hour, or `DOC_RETRY_RATE_VERSION` (3) per version per hour; the body also has `retry_after_seconds`. Checked after the 404/403 checks, so an unknown id never uses up a window |
+| `service_unavailable` | 503 | upload and retry: the private store could not be written, or Redis is down outside development (the rate limits fail closed) |
 | `unknown_limit`, `invalid_limit_value`, `limit_above_ceiling` | 422 | platform limits endpoint |
+
+**Security headers.** Every response of the API, whatever its status and whoever produced it (a route, the body guard's 401/411/413, an unhandled error turned into a generic `500 {"detail": {"code": "internal_error", ...}}`, a 304), carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, a `Content-Security-Policy` (`default-src 'none'; frame-ancestors 'none'`) and, outside development, HSTS. A route may keep its own CSP only if it has a plain `sandbox` directive (the document download does); any other route CSP is replaced by the default.
 
 The frontend error mapper for these codes and for the request-guard codes of section 2 (400 `duplicate_header` / `invalid_content_length`, 411, 415, 429, 503) is backlog item B36.
 

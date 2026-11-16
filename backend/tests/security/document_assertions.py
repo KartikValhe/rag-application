@@ -85,3 +85,32 @@ def assert_key_refused_for_other_tenant(exc: BaseException | None) -> None:
     from app.services.document_store import InvalidStorageKey
 
     assert isinstance(exc, InvalidStorageKey), f"a foreign tenant key was not refused (got {exc!r})"
+
+
+# Every route that returns a document (or a file of one) for a document id, besides the list.
+# The detail response carries the versions (there is no separate versions listing route).
+DOCUMENT_READ_ROUTES: dict[str, str] = {
+    "detail": "/api/v1/documents/{d}",
+    "status": "/api/v1/documents/{d}/versions/{v}/status",
+    "download": "/api/v1/documents/{d}/versions/{v}/download",
+}
+
+
+async def assert_read_route_refuses_foreign_document(
+    client: Any, headers: dict[str, str], route: str, document_id: uuid.UUID, version_id: uuid.UUID
+) -> None:
+    """One read route, a document the caller cannot see: the generic 404, never the document or its file."""
+    url = DOCUMENT_READ_ROUTES[route].format(d=document_id, v=version_id)
+    resp = await client.get(url, headers=headers)
+    if resp.status_code != 404:  # a leak answers 200 with JSON or with the file's bytes: do not parse it
+        raise AssertionError(f"GET {route}: a document outside the caller's scope was served (status {resp.status_code})")
+    try:
+        assert_generic_404(resp)
+    except AssertionError as exc:
+        raise AssertionError(f"GET {route}: a document outside the caller's scope was served: {exc}") from None
+
+
+async def assert_list_hides_foreign_documents(client: Any, headers: dict[str, str], allowed: Iterable[uuid.UUID | str]) -> None:
+    resp = await client.get("/api/v1/documents", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert_no_foreign_documents([i["id"] for i in resp.json()["items"]], allowed)

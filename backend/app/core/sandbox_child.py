@@ -4,6 +4,9 @@ app/core/sandbox_child.py
 The child side of the sandbox (app/core/sandbox.py). A child module calls `run(handler)` from its
 `__main__` block and gets, before any of its own code runs:
 
+  - a process that cannot be inspected (Linux): prctl(PR_SET_DUMPABLE, 0), so a parser exploit cannot
+    read this process's memory, and, with the PARENT non-dumpable as well (the worker sets it at
+    startup), cannot read /proc/<parent pid>/environ, where the parent's secrets live;
   - the parent-death signal (Linux): prctl(PR_SET_PDEATHSIG, SIGKILL), so a worker that is killed
     cannot leave its parser running. If the parent already died before the call, the child exits;
   - the memory (RLIMIT_AS) and CPU (RLIMIT_CPU) limits the parent passed in the environment
@@ -28,12 +31,33 @@ from collections.abc import Callable
 from typing import Any, BinaryIO
 
 PR_SET_PDEATHSIG = 1
+PR_SET_DUMPABLE = 4
 MEMORY_ENV = "SANDBOX_MEMORY_LIMIT_BYTES"
 CPU_ENV = "SANDBOX_CPU_SECONDS"
 PARENT_PID_ENV = "SANDBOX_PARENT_PID"
 MAX_HEADER_BYTES = 64 * 1024
 
 Handler = Callable[[dict[str, Any], bytes], dict[str, Any]]
+
+
+def set_non_dumpable() -> bool:
+    """
+    prctl(PR_SET_DUMPABLE, 0): the kernel then makes /proc/<pid>/environ, /proc/<pid>/mem and friends
+    unreadable for other processes of the same user, and refuses ptrace and core dumps. Called by the
+    worker at startup (its environment holds the database URLs and SECRET_KEY) and by the sandbox child
+    before it touches input. The flag is reset by execve, so a child must set it itself. Returns True when
+    set. Off Linux (Windows development, macOS) this is a safe no-op that returns False: those systems
+    have NO such protection and are for development only. It does nothing against root.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        return bool(libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0)
+    except (OSError, AttributeError):
+        return False
 
 
 def set_parent_death_signal() -> bool:
@@ -95,6 +119,7 @@ def read_request(stream: BinaryIO) -> tuple[dict[str, Any], bytes]:
 def run(handler: Handler) -> None:
     """The whole child bootstrap. Exits 0 after writing the result, 1 on any uncaught error."""
     try:
+        set_non_dumpable()  # first of all: before any input is read
         set_parent_death_signal()
         apply_resource_limits(_int_env(MEMORY_ENV), _int_env(CPU_ENV))
         real_stdout = sys.stdout

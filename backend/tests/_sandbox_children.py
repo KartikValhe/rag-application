@@ -36,6 +36,12 @@ def _handle(request: dict[str, Any], data: bytes) -> dict[str, Any]:
         with open(request["pid_file"], "w") as fh:
             fh.write(f"{os.getpid()},{grandchild.pid}")
         time.sleep(60)
+    if mode == "orphan":
+        # The grandchild's parent (this child) exits at once: only a group/job kill still finds it
+        grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        with open(request["pid_file"], "w") as fh:
+            fh.write(f"{os.getpid()},{grandchild.pid}")
+        return {"success": True}
     if mode == "huge":
         return {"success": True, "blob": "x" * int(request["size"])}
     if mode == "noisy":
@@ -53,6 +59,18 @@ def _handle(request: dict[str, Any], data: bytes) -> dict[str, Any]:
             "as": resource.getrlimit(resource.RLIMIT_AS)[0],
             "cpu": resource.getrlimit(resource.RLIMIT_CPU)[0],
         }
+    if mode == "dumpable":
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        return {"success": True, "dumpable": libc.prctl(3, 0, 0, 0, 0)}  # PR_GET_DUMPABLE
+    if mode == "parent_environ":
+        # What a parser exploit would try first: read the secrets of the process that started it
+        try:
+            with open(f"/proc/{os.getppid()}/environ", "rb") as fh:
+                return {"success": True, "readable": True, "text": fh.read().decode("latin-1")}
+        except OSError as exc:
+            return {"success": True, "readable": False, "errno": exc.errno}
     if mode == "pdeathsig":
         import ctypes
         import signal

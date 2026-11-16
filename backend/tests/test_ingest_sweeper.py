@@ -9,6 +9,7 @@ holds thousands of tenants left by other tests).
 import asyncio
 import uuid
 from collections.abc import Collection
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from app.workers.db import WorkerDatabases
 from tests.fixtures.academic_world import AcademicWorld
 from tests.fixtures.documents import make_document
 from tests.fixtures.worker import (
+    FAST,
     FakeClock,
     chunk_count,
     job_row,
@@ -130,7 +132,9 @@ async def test_a_queued_version_older_than_two_minutes_without_a_job_gets_one(
     assert await _scalar(raw_db, "SELECT count(*) FROM app.ingest_jobs WHERE version_id = :v", v=fresh.version.id) == 0  # too young
     assert await _scalar(raw_db, "SELECT count(*) FROM app.ingest_jobs WHERE version_id = :v", v=has_job.version.id) == 1  # no duplicate
     assert (await sw.run_once()).recreated_jobs == 0  # idempotent
-    queue = make_queue(worker_dbs)
+    # Two jobs of ONE tenant one after the other: needs a running cap of 2 (the default cap of 1 would
+    # rightly refuse the second claim while the first job is running)
+    queue = make_queue(worker_dbs, replace(FAST, tenant_concurrency=2))
     claimed = {j.version_id for j in (await queue.claim("w1"), await queue.claim("w2")) if j is not None}
     assert claimed == {old.version.id, has_job.version.id}  # the re-created job is a normal queued job
 

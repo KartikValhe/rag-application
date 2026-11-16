@@ -18,7 +18,7 @@ from app.core.slots import SlotManager
 from app.db.models.document import Chunk
 from app.workers import errors, ingest, stages
 from app.workers import queue as queue_module
-from app.workers.db import TenantSessions
+from app.workers.db import TenantSessions, trusted_statement
 from app.workers.queue import Job, JobQueue
 
 
@@ -28,6 +28,44 @@ def assert_exactly_one_claim(results: list[Job | None]) -> Job:
     assert len(got) == 1, f"expected exactly one claimer to get the job, {len(got)} did: {got}"
     assert got[0].attempts == 1, f"the job was claimed more than once (attempts={got[0].attempts})"
     return got[0]
+
+
+def assert_no_double_claim(results: list[Job | None]) -> list[Job]:
+    """Several simultaneous claimers: every job is claimed at most once, and only once per attempt."""
+    got = [r for r in results if r is not None]
+    ids = [j.id for j in got]
+    assert len(ids) == len(set(ids)), f"a job was claimed by two workers: {ids}"
+    assert all(j.attempts == 1 for j in got), "a job was claimed more than once"
+    return got
+
+
+def assert_small_tenant_not_stuck_behind_backlog(
+    claims: list[Job | None], *, small_job_id: uuid.UUID, big_tenant: uuid.UUID, within: int
+) -> None:
+    """
+    One tenant has a big, OLDER backlog; another tenant has a single newer job. The small tenant's job
+    must be among the first `within` claims, not behind the whole backlog.
+    """
+    ids = [c.id if c is not None else None for c in claims]
+    assert small_job_id in ids[:within], (
+        f"the small tenant's job was claimed at position {ids.index(small_job_id) + 1 if small_job_id in ids else 'never'},"
+        f" behind {sum(1 for c in claims[:within] if c is not None and c.tenant_id == big_tenant)} job(s) of the big tenant's backlog"
+    )
+
+
+def assert_tenant_at_its_cap_is_skipped(claims: list[Job | None]) -> None:
+    """One tenant with a backlog and a running job: the next claim must find nothing (INGEST_TENANT_CONCURRENCY = 1)."""
+    assert claims[0] is not None, "the first claim found nothing"
+    assert all(c is None for c in claims[1:]), "a tenant that already has a running job was claimed again"
+
+
+def assert_one_claim_per_tenant_per_round(results: list[Job | None]) -> None:
+    """Simultaneous claimers: a tenant's backlog may not take several claims of the same round."""
+    got = [r for r in results if r is not None]
+    per_tenant: dict[uuid.UUID, int] = {}
+    for job in got:
+        per_tenant[job.tenant_id] = per_tenant.get(job.tenant_id, 0) + 1
+    assert all(n == 1 for n in per_tenant.values()), f"one tenant took several claims of the same round: {per_tenant}"
 
 
 async def assert_locked_job_is_skipped(queue: JobQueue, engine: AsyncEngine, *, timeout: float = 3.0) -> tuple[Job, Job]:
@@ -62,7 +100,8 @@ async def assert_expired_lease_reclaimed(queue: JobQueue, job_id: uuid.UUID, pre
 async def assert_job_session_is_scoped_to_its_tenant(sessions: TenantSessions, job: Job | Any) -> None:
     """The session built for a job has the job row's tenant and sees no other tenant's rows."""
     async with sessions.for_job(job) as db:
-        current = (await db.execute(text("SELECT current_setting('app.tenant_id', true)"))).scalar_one()
+        # The tenant guard rejects an untrusted statement that mentions app.tenant_id: use the module's own
+        current = (await db.execute(trusted_statement("SELECT current_setting('app.tenant_id', true)"))).scalar_one()
         assert current == str(job.tenant_id), f"session tenant {current} is not the job row's tenant {job.tenant_id}"
         seen = set((await db.execute(text("SELECT DISTINCT tenant_id FROM app.documents"))).scalars())
         assert seen <= {job.tenant_id}, f"the session saw another tenant's rows: {seen - {job.tenant_id}}"
@@ -116,12 +155,23 @@ _DIALECT_PROBES = ("select pg_catalog.version", "select current_schema", "show s
 
 
 def assert_every_transaction_sets_tenant_first(log: StatementLog, *, at_least: int) -> None:
-    """Every transaction of a tenant session sets app.tenant_id before any other statement."""
+    """
+    Every transaction of a tenant session sets app.tenant_id exactly once, as its FIRST statement, and no
+    other statement of it touches the setting. The only other mention allowed is the helper's own check
+    right before the commit (a SELECT of current_setting). EVERY statement is checked, not just the first:
+    a set_config in the middle of a transaction (a stage that switches tenant) must fail here too.
+    """
     groups = [g for g in log.transactions if g and not all(s.lower().startswith(_DIALECT_PROBES) for s in g)]
     assert len(groups) >= at_least, f"expected at least {at_least} transactions, saw {len(groups)}"
     for group in groups:
         first = group[0].lower()
         assert "set_config('app.tenant_id'" in first, f"a transaction ran a query before setting the tenant: {group[0][:120]}"
+        for later in group[1:]:
+            low = later.lower()
+            if "set_config" in low or "app.tenant_id" in low:
+                assert low.lstrip().startswith("select current_setting('app.tenant_id'"), (
+                    f"a later statement of a transaction touched the tenant setting: {later[:120]}"
+                )
 
 
 def assert_only_queue_tables(log: StatementLog) -> None:

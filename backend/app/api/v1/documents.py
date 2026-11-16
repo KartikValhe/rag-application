@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import TenantDB
 from app.core.authz import GENERIC_NOT_FOUND, require
+from app.core.config import settings
 from app.core.tenant_db import tenant_session_context
 from app.core.upload_security import (
     UploadProfile,
@@ -731,8 +732,11 @@ async def retry_version(
         async with tenant_session_context(str(tid)) as db:
             await document_scope.load_document_for(db, user, document_id, action="manage", for_update=True)
             v = await _load_version(db, tid, document_id, version_id, for_update=True)
+            await document_upload.check_retry_rate(user.id, v.id)  # after the 404/403 checks: no probing
             if v.status != VERSION_STATUS_FAILED or v.error_code not in document_upload.TRANSIENT_ERROR_CODES:
                 raise api_error(status.HTTP_409_CONFLICT, "version_not_retryable")
+            if await document_upload.count_manual_retries(db, tid, document_id, v.id) >= settings.DOC_RETRY_MAX_PER_VERSION:
+                raise api_error(status.HTTP_409_CONFLICT, "retry_limit_reached")
             if await document_upload.in_flight_version(db, tid, document_id) is not None:
                 raise api_error(status.HTTP_409_CONFLICT, "document_processing_in_progress")
             duplicate = await document_upload.active_duplicate(db, tid, document_id, v.sha256)

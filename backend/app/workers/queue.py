@@ -36,16 +36,35 @@ NOW = "COALESCE(CAST(:now AS timestamptz), now())"
 QUEUED_DUE_SQL = f"(status = 'queued' AND run_after <= {NOW})"
 RECLAIM_EXPIRED_SQL = f"OR (status = 'running' AND lease_expires_at < {NOW})"
 
-# Design A3. One short transaction: pick one due job, lock it (skipping rows other workers hold), mark
-# it running with a new lease, count the attempt.
+# Design A3, made fair (review of 5b-1/5b-2, finding 6). ONE statement, one short transaction:
+#
+#   - each tenant offers exactly ONE candidate, its oldest due job (the `j.id = (SELECT q.id ...)` line).
+#     A tenant's backlog therefore never crowds out others, and two simultaneous claimers that race for
+#     the same tenant's first job send the loser (SKIP LOCKED) on to another tenant;
+#   - a tenant already running INGEST_TENANT_CONCURRENCY live jobs (running, lease not expired) offers
+#     nothing (`live.running < :tenant_cap`);
+#   - the tenant with the fewest live running jobs goes first, then the oldest queued job.
+#
+# The cap here is a fairness rule, not a hard limit: two statements that start at the same instant do not
+# see each other's uncommitted claims. The Redis tenant slot (workers/ingest.py) stays the hard cap and
+# sends a job that finds it busy back with its attempt refunded. FOR UPDATE ... SKIP LOCKED is unchanged.
 CLAIM_SQL = f"""
 WITH next AS (
-  SELECT tenant_id, id FROM app.ingest_jobs
+  SELECT j.tenant_id, j.id FROM app.ingest_jobs j
+  CROSS JOIN LATERAL (
+    SELECT count(*) AS running FROM app.ingest_jobs r
+    WHERE r.tenant_id = j.tenant_id AND r.status = 'running' AND r.lease_expires_at >= {NOW}) live
   WHERE ({QUEUED_DUE_SQL}
       {RECLAIM_EXPIRED_SQL})
-    AND attempts < :max_attempts
-  ORDER BY run_after, created_at LIMIT 1
-  FOR UPDATE SKIP LOCKED)
+    AND j.attempts < :max_attempts
+    AND live.running < :tenant_cap
+    AND j.id = (SELECT q.id FROM app.ingest_jobs q
+                WHERE q.tenant_id = j.tenant_id AND q.attempts < :max_attempts
+                  AND ({QUEUED_DUE_SQL}
+                      {RECLAIM_EXPIRED_SQL})
+                ORDER BY q.run_after, q.created_at LIMIT 1)
+  ORDER BY live.running, j.run_after, j.created_at LIMIT 1
+  FOR UPDATE OF j SKIP LOCKED)
 UPDATE app.ingest_jobs j
 SET status = 'running', attempts = j.attempts + 1,
     lease_expires_at = {NOW} + make_interval(secs => :lease), worker_id = :worker, updated_at = {NOW}
@@ -132,11 +151,13 @@ class JobQueue:
         *,
         max_attempts: int,
         lease_seconds: float,
+        tenant_concurrency: int = 1,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.engine = engine
         self.max_attempts = max_attempts
         self.lease_seconds = lease_seconds
+        self.tenant_concurrency = tenant_concurrency
         self.clock = clock
 
     def _now(self) -> datetime | None:
@@ -147,6 +168,7 @@ class JobQueue:
             "max_attempts": self.max_attempts,
             "lease": float(self.lease_seconds),
             "worker": worker_id,
+            "tenant_cap": self.tenant_concurrency,
             "now": self._now(),
         }
 

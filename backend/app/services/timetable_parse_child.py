@@ -72,6 +72,7 @@ def main() -> None:
 
 
 def _main() -> None:
+    sandbox_child.set_non_dumpable()  # Linux: the parser cannot read its parent's environment or memory
     sandbox_child.set_parent_death_signal()  # Linux: a killed API process cannot orphan the parser
     apply_resource_limits()
     # Library prints must never corrupt the JSON result

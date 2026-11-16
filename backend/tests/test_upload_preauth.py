@@ -287,11 +287,20 @@ def test_every_form_route_of_the_real_app_is_in_the_upload_registry() -> None:
 # ─── Finding 5: middleware order in main.py ──────────────────────────────────
 
 def test_body_limit_runs_before_every_layer_that_could_read_the_body() -> None:
-    """Outermost first: only CORS (which never reads the body) may sit in front of the limit/auth check."""
+    """
+    Outermost first: only CORS and the security-headers layer may sit in front of the limit/auth check.
+    Neither reads the body: CORS only adds headers, and the headers layer (finding 10 of the 5b-1/5b-2
+    review: the guard's own 401/413 need the headers too) never calls `receive`.
+    """
+    import inspect
+
+    from app.core.middleware import SecurityHeadersMiddleware
+
     classes = [m.cls for m in app.user_middleware]
     assert BodyLimitMiddleware in classes
     i = classes.index(BodyLimitMiddleware)
-    assert classes[:i] == [CORSMiddleware], classes
+    assert classes[:i] == [CORSMiddleware, SecurityHeadersMiddleware], classes
+    assert "receive(" not in inspect.getsource(SecurityHeadersMiddleware).replace("self.app(scope, receive,", "")
     # Form parsing only happens inside the routes, so every route is behind the check
     assert all(c is not BodyLimitMiddleware for c in classes[i + 1 :])
 

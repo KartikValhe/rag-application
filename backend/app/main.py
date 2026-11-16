@@ -61,16 +61,23 @@ app = FastAPI(
 
 # ── Middleware (order matters: outermost is applied first) ────────────────────
 
+# Add order is the reverse of the run order. Outermost first: CORS, security headers, body guard,
+# tenant resolution, routes.
+#
 # Tenant resolution must run before any route handler so that context vars
 # (request_id, tenant_slug) are set when route dependencies execute.
 app.add_middleware(TenantResolutionMiddleware)
-app.add_middleware(SecurityHeadersMiddleware)
 
 # Body guard: duplicate headers, Content-Length, the pre-body Bearer check on upload routes, the
 # per-IP upload cap and the body limits. It must run before anything reads the body; forms are
-# only parsed inside the routes. Only CORS sits in front of it: CORS never reads the body, and a
-# browser can then read the 401/413 (for example to refresh an expired token).
+# only parsed inside the routes.
 app.add_middleware(BodyLimitMiddleware)
+
+# Security headers sit OUTSIDE the body guard, so its 401/411/413 carry them too, and they also
+# cover an unhandled error (turned into a generic 500 inside this layer). Only CORS is in front of
+# it: CORS never reads the body, and a browser can then read these errors (for example to refresh
+# an expired token).
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Configure CORS with an explicit origin whitelist (outermost)
 app.add_middleware(

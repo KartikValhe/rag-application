@@ -6,7 +6,8 @@ protection is switched off with monkeypatch, the SAME scenario runs again throug
 the helper must RAISE. That shows the helper really checks the protection and does not pass by
 accident. Every test first runs the scenario with the protection ON (the helper passes), then OFF.
 
-  1. authorized_pairs returns every pair of the tenant -> a teacher sees another teacher's documents.
+  1. authorized_pairs returns every pair of the tenant -> a teacher reads another teacher's documents
+     through ANY read route (list, detail, status, download), each checked on its own.
   2. the quota check is removed                       -> an upload over the documents quota passes.
   3. the store's tenant-prefix check is removed        -> another tenant's key is accepted.
 
@@ -25,11 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.db.models.academic import ClassSubject
 from app.services import document_scope, document_store, document_upload
 from tests.fixtures.academic_world import AcademicWorld, WorldTenant
-from tests.fixtures.documents import auth, make_document, upload
+from tests.fixtures.documents import MadeDocument, auth, make_document, upload
 from tests.security.document_assertions import (
+    DOCUMENT_READ_ROUTES,
     assert_key_refused_for_other_tenant,
-    assert_no_foreign_documents,
+    assert_list_hides_foreign_documents,
     assert_quota_refused,
+    assert_read_route_refuses_foreign_document,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -49,32 +52,41 @@ async def _test_database_only() -> None:
 # ── 1. Scope ─────────────────────────────────────────────────────────────────
 
 
-async def _t2_visible_ids(client: AsyncClient, w: WorldTenant) -> list[str]:
-    resp = await client.get("/api/v1/documents", headers=auth(w, w.t2))
-    assert resp.status_code == 200, resp.text
-    return [i["id"] for i in resp.json()["items"]]
+ROUTES = ["list", *DOCUMENT_READ_ROUTES]
 
 
-async def test_all_pairs_scope_is_caught_by_the_no_foreign_documents_helper(
-    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+async def _check_route(client: AsyncClient, w: WorldTenant, route: str, made: MadeDocument, allowed: list[uuid.UUID]) -> None:
+    """The caller is T2, the document is T1's (a pair T2 does not teach). Raises when the route leaks it."""
+    if route == "list":
+        await assert_list_hides_foreign_documents(client, auth(w, w.t2), allowed)
+    else:
+        await assert_read_route_refuses_foreign_document(client, auth(w, w.t2), route, made.document.id, made.version.id)
+
+
+# Rewritten (review of 5b-1/5b-2): the first version covered the list route only, so a leak through the
+# detail, status or download route would not have been noticed. Every read route is checked, and for
+# each one the protection is switched off on its own and the helper must raise.
+@pytest.mark.parametrize("route", ROUTES)
+async def test_all_pairs_scope_is_caught_by_the_helper_of_every_read_route(
+    route: str, client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession,
+    document_store_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     w = academic_world.a
-    t1_math = await make_document(raw_db, w, subject="Math", classes=("10-A", "10-B"), uploader=w.t1)
+    t1_math = await make_document(raw_db, w, subject="Math", classes=("10-A", "10-B"), uploader=w.t1,
+                                  status="published", store_root=document_store_root)
     t2_chem = await make_document(raw_db, w, subject="Chemistry", classes=("11-A",), uploader=w.t2)
     allowed_for_t2 = [t2_chem.document.id]
 
-    # Protection ON: T2 sees only his own pair's document.
-    assert_no_foreign_documents(await _t2_visible_ids(client, w), allowed_for_t2)
+    # Protection ON: T2 gets the generic 404 on T1's document through this route (and the list hides it).
+    await _check_route(client, w, route, t1_math, allowed_for_t2)
 
     async def all_pairs(db: AsyncSession, user: object, *, purpose: str) -> frozenset[tuple[uuid.UUID, uuid.UUID]]:
         rows = await db.execute(select(ClassSubject.class_id, ClassSubject.subject_id))
         return frozenset((r[0], r[1]) for r in rows.all())
 
     monkeypatch.setattr(document_scope, "authorized_pairs", all_pairs)
-    leaked = await _t2_visible_ids(client, w)
-    assert str(t1_math.document.id) in leaked
     with pytest.raises(AssertionError, match="outside the caller's scope"):
-        assert_no_foreign_documents(leaked, allowed_for_t2)
+        await _check_route(client, w, route, t1_math, allowed_for_t2)
 
 
 # ── 2. Quota ─────────────────────────────────────────────────────────────────

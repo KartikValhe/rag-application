@@ -6,6 +6,8 @@ routes, shared by app/api/v1/documents.py and the admin usage endpoint:
 
   - check_upload_rate:  per-user and per-tenant hourly upload windows (SlotManager, one atomic step,
                         fails closed with 503 when Redis is down outside development);
+  - check_retry_rate / count_manual_retries: the limits of the retry route (hourly windows per user and
+                        per version, and a total cap of manual retries per version);
   - tenant_usage / lock_quota / check_quota: the quota check, run inside the upload transaction
                         under pg_advisory_xact_lock(hashtext('doc_quota:' || tenant_id));
   - active_duplicate / in_flight_version: the duplicate and one-in-flight rules (the partial unique
@@ -24,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import slots
 from app.core.authz import GENERIC_NOT_FOUND
+from app.core.config import settings
+from app.db.models.audit import AuditLog
 from app.db.models.document import (
     IN_FLIGHT_VERSION_STATUSES,
     INACTIVE_VERSION_STATUSES,
@@ -35,6 +39,9 @@ from app.services.document_limits import DocumentLimits
 
 USER_RATE_KEY_PREFIX = "ratelimit:doc_upload:user:"
 TENANT_RATE_KEY_PREFIX = "ratelimit:doc_upload:tenant:"
+RETRY_USER_RATE_KEY_PREFIX = "ratelimit:doc_retry:user:"
+RETRY_VERSION_RATE_KEY_PREFIX = "ratelimit:doc_retry:version:"
+RETRY_ACTION = "document:retry"
 RATE_WINDOW_SECONDS = 3600
 UNAVAILABLE_MESSAGE = "Document upload is temporarily unavailable. Please try again in a few minutes."
 
@@ -58,6 +65,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "document_not_deleted": "Only deleted documents can be purged.",
     "invalid_title": "The title must not be empty.",
     "invalid_cursor": "The cursor is not valid.",
+    "retry_limit_reached": "This file has been retried too many times. Upload it again as a new version.",
     "service_unavailable": "Document storage is temporarily unavailable. Please try again in a few minutes.",
 }
 
@@ -106,6 +114,53 @@ async def check_upload_rate(user_id: uuid.UUID, tenant_id: uuid.UUID, limits: Do
             "Your organisation has reached its hourly upload limit. Please wait and try again.",
             rej.retry_after_seconds,
         ) from None
+
+
+async def check_retry_rate(user_id: uuid.UUID, version_id: uuid.UUID) -> None:
+    """
+    Record one manual retry in the user's and the version's hourly windows, atomically (a version-level
+    rejection never uses up the user's window). 429 with Retry-After, or 503 (fail closed) when Redis is
+    unreachable outside development.
+    """
+    windows = [
+        slots.SlotLimit(f"{RETRY_USER_RATE_KEY_PREFIX}{user_id}", settings.DOC_RETRY_RATE_USER, RATE_WINDOW_SECONDS),
+        slots.SlotLimit(
+            f"{RETRY_VERSION_RATE_KEY_PREFIX}{version_id}", settings.DOC_RETRY_RATE_VERSION, RATE_WINDOW_SECONDS
+        ),
+    ]
+    try:
+        await _slots().acquire(windows, unavailable_message=UNAVAILABLE_MESSAGE)
+    except slots.SlotRejected as rej:
+        if rej.index == 0:
+            raise _too_many(
+                "retry_rate_limit_exceeded",
+                "You are retrying too often. Please wait a while and try again.",
+                rej.retry_after_seconds,
+            ) from None
+        raise _too_many(
+            "retry_version_rate_limit_exceeded",
+            "This file was retried too often just now. Please wait a while and try again.",
+            rej.retry_after_seconds,
+        ) from None
+
+
+async def count_manual_retries(db: AsyncSession, tenant_id: uuid.UUID, document_id: uuid.UUID, version_id: uuid.UUID) -> int:
+    """
+    How often this version was retried by hand: its `document:retry` entries in the append-only audit log
+    (the retry route writes one in the same transaction as the retry itself). The caller holds the
+    document and version row locks, so two retries of one version are serialized and cannot both pass.
+    """
+    count = await db.scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            AuditLog.tenant_id == tenant_id,
+            AuditLog.action == RETRY_ACTION,
+            AuditLog.target_id == str(document_id),
+            AuditLog.details["version_id"].astext == str(version_id),
+        )
+    )
+    return int(count or 0)
 
 
 # ── Quotas (A3 step 6) ───────────────────────────────────────────────────────

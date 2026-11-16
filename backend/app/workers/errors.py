@@ -97,6 +97,18 @@ class PermanentIngestError(IngestError):
         super().__init__(code if code in PERMANENT_ERROR_CODES else "parse_failed")
 
 
+class TenantContextViolation(PermanentIngestError):
+    """
+    A stage tried to change the tenant context of its session, or the context was not the job's at
+    commit time (workers/db.py). A bug in a stage: retrying cannot help, so it is permanent
+    (`processing_failed`). `reason` is a fixed category word, never SQL text.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("processing_failed")
+        self.reason = reason
+
+
 class TransientIngestError(IngestError):
     permanent = False
 

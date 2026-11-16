@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     QUOTA_MAX_PAGES: int = 5000
     DOC_UPLOAD_RATE_USER: int = 20  # uploads per user per hour
     DOC_UPLOAD_RATE_TENANT: int = 100  # uploads per tenant per hour
+    DOC_RETRY_RATE_USER: int = 10  # manual retries per user per hour
+    DOC_RETRY_RATE_VERSION: int = 3  # manual retries per version per hour
+    DOC_RETRY_MAX_PER_VERSION: int = 5  # manual retries of one version, in total (then retry_limit_reached)
 
     # ── Ingestion worker (design A3, step 5b-2) ─────────────────────────────
     INGEST_GLOBAL_CONCURRENCY: int = 2  # jobs running at once on the whole platform

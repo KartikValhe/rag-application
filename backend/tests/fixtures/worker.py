@@ -123,7 +123,11 @@ def make_queue(
     dbs: WorkerDatabases, config: ingest.IngestSettings = FAST, *, clock: Callable[[], datetime] | None = None
 ) -> JobQueue:
     return JobQueue(
-        dbs.worker_engine, max_attempts=config.max_attempts, lease_seconds=config.lease_seconds, clock=clock
+        dbs.worker_engine,
+        max_attempts=config.max_attempts,
+        lease_seconds=config.lease_seconds,
+        tenant_concurrency=config.tenant_concurrency,
+        clock=clock,
     )
 
 
