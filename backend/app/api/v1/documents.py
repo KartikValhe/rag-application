@@ -20,6 +20,7 @@ links, version (queued), ingest job (queued) and audit. If anything after the fi
 file is deleted again (compensating delete), so a failed upload leaves no file and no rows.
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -285,6 +286,32 @@ async def _discard_file(store: document_store.PrivateObjectStore, tenant_id: uui
         logger.error("document_compensating_delete_failed", tenant_id=str(tenant_id), error=type(exc).__name__)
 
 
+async def _discard_unless_committed(store: document_store.PrivateObjectStore, tenant_id: uuid.UUID, key: str) -> None:
+    """
+    Cleanup after an upload transaction that ended in an error or a cancellation. A lost connection or a
+    cancellation during COMMIT can hide a commit that SUCCEEDED, and then a version references the file.
+    So a FRESH session first asks whether any version uses the storage key; the file is deleted only when
+    none does. If the check itself fails nothing is known, so the file is KEPT and logged: a stray file is
+    harmless, a committed version without its file is not (orphan reconciliation: backlog B41).
+    """
+    try:
+        async with tenant_session_context(str(tenant_id)) as db:
+            referenced = (
+                await db.execute(
+                    select(
+                        exists().where(DocumentVersion.tenant_id == tenant_id, DocumentVersion.storage_key == key)
+                    )
+                )
+            ).scalar_one()
+    except Exception as exc:
+        logger.error("document_orphan_check_failed", tenant_id=str(tenant_id), error=type(exc).__name__)
+        return
+    if referenced:
+        logger.warning("document_file_kept_after_committed_upload", tenant_id=str(tenant_id))
+        return
+    await _discard_file(store, tenant_id, key)
+
+
 async def _commit_version(
     request: Request,
     user: User,
@@ -383,7 +410,7 @@ async def _commit_version(
             response = _version_response(version, warnings)
     except IntegrityError as exc:
         if stored:
-            await _discard_file(store, tid, key)
+            await _discard_unless_committed(store, tid, key)
         mapped = document_upload.integrity_error_to_http(exc)
         if mapped is None:
             raise
@@ -393,8 +420,10 @@ async def _commit_version(
             mapped.detail["version_id"] = str(existing) if existing else None
         raise mapped from None
     except BaseException:
+        # Also on asyncio.CancelledError. The cleanup is shielded so a second cancellation cannot cut it
+        # short, and the original exception (the cancellation included) is always re-raised.
         if stored:
-            await _discard_file(store, tid, key)
+            await asyncio.shield(_discard_unless_committed(store, tid, key))
         raise
     return response
 

@@ -162,9 +162,14 @@ class Sweeper:
                 try:
                     await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": SWEEPER_LOCK_KEY})
                     await lock_conn.commit()
-                except Exception:
-                    # Never hand a connection that may still hold the lock back to the pool
+                except BaseException as exc:
+                    # Never hand a connection that may still hold the lock back to the pool. BaseException,
+                    # not Exception: a cancellation that hits the unlock must discard the connection too
+                    # (closing it ends the session, which releases the lock). A failed unlock does not fail
+                    # the run; a cancellation is re-raised after the connection is gone.
                     await lock_conn.invalidate()
+                    if not isinstance(exc, Exception):
+                        raise
 
     async def _sweep(self) -> SweepReport:
         report = SweepReport(ran=True)

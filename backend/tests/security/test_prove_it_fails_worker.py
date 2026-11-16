@@ -10,10 +10,14 @@ shows the helper really checks the protection and does not pass by accident.
   3. expired-lease reclaim removed        -> the reclaim helper raises.
   4. slot release skipped on failure      -> the slot helper raises.
   5. the tenant is not set per transaction-> the per-transaction helper raises.
+  6. the job ownership check removed       -> the stale-worker helper raises.
+  7. the lease forgets its backend         -> the Redis-lease helper raises.
+  8. the fresh-session file check removed  -> the lost-commit scenario raises.
 
 TEST database only: the autouse fixture asserts current_database() ends in _test before anything runs.
 """
 
+import dataclasses
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -23,7 +27,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from app.core.slots import SlotManager
+from app.api.v1 import documents as documents_api
+from app.core import redis_client
+from app.core.config import settings
+from app.core.slots import SlotLimit, SlotManager
 from app.workers import db as worker_db
 from app.workers import errors, ingest, stages
 from app.workers import queue as queue_module
@@ -36,6 +43,7 @@ from tests.fixtures.worker import (
     make_queue,
     queued_version,
 )
+from tests.security.slot_assertions import assert_redis_lease_is_not_judged_from_memory
 from tests.security.worker_assertions import (
     StatementLog,
     assert_every_transaction_sets_tenant_first,
@@ -43,6 +51,7 @@ from tests.security.worker_assertions import (
     assert_job_session_is_scoped_to_its_tenant,
     assert_locked_job_is_skipped,
     assert_no_slots_held,
+    assert_stale_worker_cannot_write,
 )
 
 
@@ -196,3 +205,79 @@ async def test_not_setting_the_tenant_per_transaction_is_caught_by_the_transacti
     monkeypatch.setattr(worker_db, "tenant_session_for", sets_once_then_forgets)
     with pytest.raises(AssertionError, match="before setting the tenant"):
         assert_every_transaction_sets_tenant_first(await three_transactions(), at_least=3)
+
+
+# ── 6. Job ownership ─────────────────────────────────────────────────────────
+
+
+async def test_removing_the_ownership_check_is_caught_by_the_stale_writer_helper(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
+    quiet_queue: None, ingest_slots: SlotManager, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_worker_review_fixes import _new_owner_writes_chunks, _reclaimed_job
+
+    made, old, stale, new, fresh = await _reclaimed_job(worker_dbs, raw_db, tmp_path, ingest_slots, academic_world.a)
+    await _new_owner_writes_chunks(new, fresh, 3)
+
+    await assert_stale_worker_cannot_write(old, stale, raw_db, made.version.id)  # protection ON: passes
+
+    async def no_check(_db: object, _job: object) -> None:
+        return None
+
+    monkeypatch.setattr(stages, "lock_job_ownership", no_check)
+    with pytest.raises(AssertionError, match="a stale worker could"):
+        await assert_stale_worker_cannot_write(old, stale, raw_db, made.version.id)
+
+
+# ── 7. The lease records its backend ─────────────────────────────────────────
+
+
+async def test_a_lease_that_forgets_its_backend_is_caught_by_the_redis_lease_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typing import Any
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    try:
+        real = await redis_client.get_redis()
+        await real.ping()
+    except Exception:
+        pytest.skip("Redis not reachable")
+
+    async def down() -> Any:
+        raise ConnectionError("redis down")
+
+    async def back() -> Any:
+        return real
+
+    def break_redis() -> None:
+        monkeypatch.setattr(redis_client, "get_redis", down)
+
+    def restore_redis() -> None:
+        monkeypatch.setattr(redis_client, "get_redis", back)
+
+    manager = SlotManager()
+    lease = await manager.acquire([SlotLimit("test:prove-it:lease", 1, 30.0)])
+    await assert_redis_lease_is_not_judged_from_memory(manager, lease, break_redis, restore_redis)  # protection ON
+    await manager.release(lease)
+
+    lease2 = await manager.acquire([SlotLimit("test:prove-it:lease", 1, 30.0)])
+    forgetful = dataclasses.replace(lease2, backend="memory")  # the lease no longer says Redis holds it
+    with pytest.raises(AssertionError, match="renewed without Redis|lost although"):
+        await assert_redis_lease_is_not_judged_from_memory(manager, forgetful, break_redis, restore_redis)
+    await manager.release(lease2)
+
+
+# ── 8. The fresh-session file check ──────────────────────────────────────────
+
+
+async def test_removing_the_fresh_session_file_check_is_caught_by_the_lost_commit_scenario(
+    academic_world: AcademicWorld, raw_db: AsyncSession, document_store_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_upload_cleanup import run_lost_commit_scenario
+
+    await run_lost_commit_scenario(monkeypatch, academic_world.a, raw_db, document_store_root)  # protection ON
+
+    monkeypatch.setattr(documents_api, "_discard_unless_committed", documents_api._discard_file)  # the old behaviour
+    with pytest.raises(AssertionError, match="missing files"):
+        await run_lost_commit_scenario(monkeypatch, academic_world.b, raw_db, document_store_root)

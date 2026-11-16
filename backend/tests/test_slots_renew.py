@@ -14,9 +14,11 @@ import pytest
 from fastapi import HTTPException
 
 from app.core import redis_client
+from app.core import slots as slots_module
 from app.core.config import settings
 from app.core.slots import (
     DEFAULT_UNAVAILABLE_MESSAGE,
+    RenewResult,
     SlotBackendUnavailable,
     SlotLease,
     SlotLimit,
@@ -279,3 +281,138 @@ async def test_a_cap_already_reached_returns_false_and_changes_nothing(mgr: Slot
     assert await mgr.renew(lease, 60.0, max_total_seconds=0.2) is False
     await asyncio.sleep(0.5)
     assert await mgr.count(key) == 0  # still expired at its ORIGINAL time, not extended
+
+
+# ─── Review of 5b, finding 3: a lease remembers which backend holds its token ───
+
+@pytest.fixture
+async def real_redis() -> Any:
+    try:
+        r = await redis_client.get_redis()
+        await r.ping()
+    except Exception:
+        pytest.skip("Redis not reachable")
+    return r
+
+
+async def test_a_redis_held_lease_is_never_renewed_from_memory_when_redis_fails_in_development(
+    real_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    m = SlotManager()
+    key = new_key()
+    lease = await m.acquire([lim(key, ttl=30.0)])
+
+    async def down() -> Any:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", down)
+    with pytest.raises(SlotBackendUnavailable):  # not False: the token is still alive in Redis
+        await m.renew(lease, 30.0)
+
+    async def back() -> Any:
+        return real_redis
+
+    monkeypatch.setattr(redis_client, "get_redis", back)
+    assert await m.renew(lease, 30.0) is True  # Redis recovered and the lease was never lost
+    await m.release(lease)
+
+
+async def test_a_slow_redis_call_is_unavailability_not_a_lost_lease(
+    real_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A renewal slower than REDIS_OP_TIMEOUT (development mode, Redis-held lease) raises, it does not fall back."""
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    monkeypatch.setattr(slots_module, "REDIS_OP_TIMEOUT", 0.05)
+    m = SlotManager()
+    lease = await m.acquire([lim(new_key(), ttl=30.0)])
+
+    class Slow:
+        async def eval(self, *_: Any, **__: Any) -> Any:
+            await asyncio.sleep(30)  # cancelled by the 0.05 s timeout long before it ends
+
+    async def get_slow() -> Any:
+        return Slow()
+
+    monkeypatch.setattr(redis_client, "get_redis", get_slow)
+    with pytest.raises(SlotBackendUnavailable):
+        await m.renew(lease, 30.0)
+
+
+async def test_a_lease_records_the_backend_that_holds_it(real_redis: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    m = SlotManager()
+    in_redis = await m.acquire([lim(new_key())])
+    assert in_redis.backend == "redis"
+    await m.release(in_redis)
+
+    async def down() -> Any:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", down)
+    in_memory = await m.acquire([lim(new_key())])
+    assert in_memory.backend == "memory"
+
+
+async def test_a_memory_lease_is_renewed_in_memory_and_never_asks_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+
+    async def down() -> Any:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", down)
+    m = SlotManager()
+    lease = await m.acquire([lim(new_key(), ttl=30.0)])
+
+    class MustNotBeUsed:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError("a memory lease must not be renewed in Redis")
+
+    async def recovered() -> Any:
+        return MustNotBeUsed()
+
+    monkeypatch.setattr(redis_client, "get_redis", recovered)  # Redis is back, but never saw this token
+    assert await m.renew(lease, 30.0) is True
+    await m.release(lease)
+
+
+# ─── Review of 5b, finding 5: renew says WHY it refused ──────────────────────
+
+async def test_renew_lease_reports_renewed(mgr: SlotManager) -> None:
+    lease = await mgr.acquire([lim(new_key(), ttl=30.0)])
+    assert await mgr.renew_lease(lease, 30.0) is RenewResult.RENEWED
+    assert await mgr.renew_lease(lease, 30.0, max_total_seconds=3600.0) is RenewResult.RENEWED
+    await mgr.release(lease)
+
+
+async def test_renew_lease_reports_a_lost_lease(mgr: SlotManager) -> None:
+    lease = await mgr.acquire([lim(new_key(), ttl=30.0)])
+    await mgr.release(lease)
+    assert await mgr.renew_lease(lease, 30.0) is RenewResult.LEASE_LOST
+    assert await mgr.renew_lease(lease, 30.0, max_total_seconds=3600.0) is RenewResult.LEASE_LOST
+
+
+async def test_renew_lease_reports_the_maximum_lifetime_and_leaves_the_lease_alone(mgr: SlotManager) -> None:
+    key = new_key()
+    lease = await mgr.acquire([lim(key, ttl=30.0)])
+    assert await mgr.renew_lease(lease, 30.0, max_total_seconds=0.0) is RenewResult.MAX_LIFETIME
+    assert await mgr.count(key) == 1  # refused, not released: the holder decides what to do
+    await mgr.release(lease)
+
+
+async def test_the_maximum_lifetime_is_reported_before_redis_is_asked(redis_down_in_production: None) -> None:
+    result = await SlotManager().renew_lease(SlotLease(token="t", keys=(new_key(),)), 5.0, max_total_seconds=0.0)
+    assert result is RenewResult.MAX_LIFETIME
+
+
+async def test_renew_lease_raises_when_the_backend_is_down(redis_down_in_production: None) -> None:
+    with pytest.raises(SlotBackendUnavailable):
+        await SlotManager().renew_lease(SlotLease(token="t", keys=(new_key(),)), 5.0)
+
+
+async def test_renew_is_renew_lease_reduced_to_a_bool(mgr: SlotManager) -> None:
+    lease = await mgr.acquire([lim(new_key(), ttl=30.0)])
+    assert await mgr.renew(lease, 30.0, max_total_seconds=0.0) is False  # max lifetime
+    assert await mgr.renew(lease, 30.0) is True
+    await mgr.release(lease)
+    assert await mgr.renew(lease, 30.0) is False  # lost

@@ -12,10 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.core.slots import SlotManager
-from app.workers import ingest
+from app.db.models.document import Chunk
+from app.workers import errors, ingest, stages
 from app.workers import queue as queue_module
 from app.workers.db import TenantSessions
 from app.workers.queue import Job, JobQueue
@@ -131,3 +132,72 @@ def assert_only_queue_tables(log: StatementLog) -> None:
     for statement in log.statements:
         for table in re.findall(r"\bapp\.([a-z_]+)", statement.lower()):
             assert table in allowed, f"the worker connection touched {table}: {statement[:120]}"
+
+
+async def _version_snapshot(db: AsyncSession, version_id: uuid.UUID) -> tuple[Any, ...]:
+    row = (
+        await db.execute(
+            text("SELECT status, stage, error_code, chunk_count FROM app.document_versions WHERE id = :v"),
+            {"v": version_id},
+        )
+    ).one()
+    chunk_ids = sorted(
+        (await db.execute(text("SELECT id FROM app.chunks WHERE document_version_id = :v"), {"v": version_id})).scalars()
+    )
+    return (*row, tuple(chunk_ids))
+
+
+async def assert_stale_worker_cannot_write(
+    ctx: ingest.WorkerContext, stale: Job, raw_db: AsyncSession, version_id: uuid.UUID
+) -> None:
+    """
+    `stale` is a job that another worker reclaimed (its lease expired). Every way the stale worker can
+    write version, chunk or job state must raise JobStopped("job_lost") and change nothing: not the
+    chunks, not the version's status, stage or error code. Without the ownership check the first
+    write succeeds and this helper raises AssertionError.
+    """
+    row = (
+        await raw_db.execute(
+            text(
+                "SELECT v.document_id, d.subject_id FROM app.document_versions v "
+                "JOIN app.documents d ON d.tenant_id = v.tenant_id AND d.id = v.document_id WHERE v.id = :v"
+            ),
+            {"v": version_id},
+        )
+    ).one()
+    document_id, subject_id = row
+
+    async def write_chunks() -> None:
+        async with stages.active_version_session(ctx.tenant_sessions, stale) as db:
+            db.add(
+                Chunk(
+                    tenant_id=stale.tenant_id, document_version_id=version_id, document_id=document_id,
+                    subject_id=subject_id, ordinal=99, page_start=1, page_end=1, heading_path="stale",
+                    content="written by a stale worker", content_sha256="0" * 64, token_count=3, script="latn",
+                )
+            )
+
+    async def mark_ready() -> None:
+        async with stages.active_version_session(ctx.tenant_sessions, stale) as db:
+            await db.execute(
+                text("UPDATE app.document_versions SET status = 'ready', stage = NULL WHERE tenant_id = :t AND id = :v"),
+                {"t": stale.tenant_id, "v": version_id},
+            )
+
+    before = await _version_snapshot(raw_db, version_id)
+    attempts = {
+        "write chunks": write_chunks,
+        "mark the version ready": mark_ready,
+        "enter a stage": lambda: ingest._enter_stage(ctx, stale, "chunk"),
+        "set the version failed": lambda: ingest._set_version(ctx, stale, "failed", "scanned_pdf"),
+        "put the version back to queued": lambda: ingest._set_version(ctx, stale, "queued", None),
+    }
+    for label, attempt in attempts.items():
+        try:
+            await attempt()
+        except errors.JobStopped as stop:
+            assert stop.reason == "job_lost", f"stale worker ({label}) was stopped for {stop.reason!r}, not job_lost"
+        else:
+            raise AssertionError(f"a stale worker could {label} after its job was reclaimed")
+    after = await _version_snapshot(raw_db, version_id)
+    assert after == before, f"a stale worker changed the new owner's rows: {before} -> {after}"

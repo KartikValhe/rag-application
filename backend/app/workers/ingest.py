@@ -9,12 +9,18 @@ One job, start to finish (`ingest_document_version`):
   2. both slots are taken through the SlotManager: `concurrency:doc_ingest:global`
      (INGEST_GLOBAL_CONCURRENCY) and `concurrency:doc_ingest:tenant:{id}` (INGEST_TENANT_CONCURRENCY),
      TTL INGEST_LEASE_SECONDS. A busy slot sends the job back to `queued` (run_after = now + 15-45 s
-     jitter, attempt refunded) before anything else is touched;
+     jitter, attempt refunded) before anything else is touched. So does an UNAVAILABLE backend at this
+     point (Redis down: the slots cannot be taken; the database down when the job starts): an outage is
+     not the job's fault, so it never uses up attempts (outcome BACKEND_DOWN);
   3. in a TENANT session (tenant from the claimed row) the version moves to `processing`;
-  4. a heartbeat task renews the job lease and both slots every INGEST_HEARTBEAT_SECONDS. When a renew
-     returns False (lease expired, released, or past its maximum lifetime) or raises
-     SlotBackendUnavailable, or the job row is no longer this worker's, the stages are CANCELLED (the
-     sandbox kills its child) and the job is released: it is never continued;
+  4. a heartbeat task renews the job lease and both slots every INGEST_HEARTBEAT_SECONDS. The stages are
+     CANCELLED (the sandbox kills its child) and the job is released, never continued, when
+       - the slot lease is lost (expired or released): requeued with backoff (attempt counted);
+       - Redis stays unavailable for HEARTBEAT_MAX_BACKEND_FAILURES renewals in a row (one slow or
+         failed call alone is not a reason to stop): requeued with backoff;
+       - the lease reached its maximum lifetime (INGEST_MAX_JOB_SECONDS): a PERMANENT failure with the
+         code `job_time_limit_exceeded`, because a retry would only run into the same cap;
+       - the job row is no longer this worker's: nothing is written;
   5. the injectable stages run in order (workers/stages.py): validate, parse, chunk, embed, index;
   6. the job is marked `done`.
 
@@ -23,6 +29,12 @@ Failures: a PermanentIngestError fails the version (error_code) and the job; a T
 jitter until INGEST_MAX_ATTEMPTS, then the version and the job fail with `processing_failed`.
 A job whose version was deleted or archived (backlog B40), or whose row was frozen, is CANCELLED and
 writes nothing more. Slots are always released (also on SIGTERM and on failures).
+
+Ownership: every write of version, chunk or job state by the worker runs in a transaction that first
+locks the job row and checks that it is still this worker's (`stages.lock_job_ownership`: running, this
+worker id, this attempt). A worker whose lease expired and whose job another worker reclaimed therefore
+raises JobStopped("job_lost") at its next write and changes nothing, so it can neither overwrite the new
+owner's chunks nor mark the version ready, failed or queued.
 
 Deviation from the written order (documented in docs/phase5-design.md): the slots are taken BEFORE the
 version moves to `processing`, so a busy slot never makes a version flap between processing and queued.
@@ -39,16 +51,24 @@ import random
 import signal
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
-from app.core.slots import SlotBackendUnavailable, SlotLease, SlotLimit, SlotManager, SlotRejected
+from app.core.slots import (
+    RenewResult,
+    SlotBackendUnavailable,
+    SlotLease,
+    SlotLimit,
+    SlotManager,
+    SlotRejected,
+)
 from app.services import document_limits, document_store
 from app.workers import errors
+from app.workers import stages as stage_module
 from app.workers.db import TenantSessions, WorkerDatabases
 from app.workers.queue import Job, JobQueue
 from app.workers.stages import (
@@ -68,6 +88,14 @@ logger = logging.getLogger(__name__)
 GLOBAL_SLOT_KEY = "concurrency:doc_ingest:global"
 TENANT_SLOT_PREFIX = "concurrency:doc_ingest:tenant:"
 SLOT_UNAVAILABLE_MESSAGE = "Document processing is temporarily unavailable."
+
+# The heartbeat gives up on Redis after this many failed renewals IN A ROW. With the production values
+# (a renewal every 30 s, a 120 s lease) the third failure comes 90 s after the last good renewal, while
+# the slots are still alive.
+HEARTBEAT_MAX_BACKEND_FAILURES = 3
+STOP_SLOT_LEASE_LOST = "slot_lease_lost"
+STOP_REDIS_UNAVAILABLE = "redis_unavailable"
+STOP_MAX_LIFETIME = "max_job_lifetime"
 
 
 def tenant_slot_key(tenant_id: uuid.UUID) -> str:
@@ -118,8 +146,9 @@ class JobOutcome(enum.Enum):
     DONE = "done"
     BUSY = "busy"  # a slot was full: requeued, attempt refunded
     RETRY = "retry"  # transient error: requeued with backoff
-    FAILED = "failed"  # permanent error, or attempts exhausted
+    FAILED = "failed"  # permanent error (also the maximum job lifetime), or attempts exhausted
     STOPPED = "stopped"  # heartbeat lost a slot or Redis: released and requeued
+    BACKEND_DOWN = "backend_down"  # Redis or the database unavailable at the start: requeued, attempt refunded
     CANCELLED = "cancelled"  # the version or the job row was taken away (document deleted)
 
 
@@ -133,6 +162,8 @@ class WorkerContext:
     rng: random.Random
     worker_id: str
     clock: Callable[[], datetime] | None = None  # None: the database's now()
+    # The heartbeat's wait between two renewals. Tests inject a manual tick instead of real time.
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 # ── Timing ───────────────────────────────────────────────────────────────────
@@ -173,6 +204,7 @@ async def _begin(ctx: WorkerContext, job: Job) -> tuple[VersionInfo, document_li
         ).first()
         if row is None or row[6] not in ("queued", "processing"):
             raise errors.JobStopped("cancelled")
+        await stage_module.lock_job_ownership(db, job)
         limits = await document_limits.load_tenant_limits(db, job.tenant_id)
         await db.execute(
             text(
@@ -188,8 +220,17 @@ async def _begin(ctx: WorkerContext, job: Job) -> tuple[VersionInfo, document_li
 
 
 async def _set_version(ctx: WorkerContext, job: Job, status: str, error_code: str | None) -> None:
-    """Failed or back to queued. Only a version that is still queued or processing is touched."""
+    """
+    Failed or back to queued. Only a version that is still queued or processing is touched, and only
+    by the worker that still owns the job: anyone else gets JobStopped("job_lost") and writes nothing.
+    """
     async with ctx.tenant_sessions.for_job(job) as db:
+        # Lock order is version row first, then job row (as in the delete and retry routes)
+        await db.execute(
+            text("SELECT 1 FROM app.document_versions WHERE tenant_id = :t AND id = :v FOR UPDATE"),
+            {"t": job.tenant_id, "v": job.version_id},
+        )
+        await stage_module.lock_job_ownership(db, job)
         await db.execute(
             text(
                 f"UPDATE app.document_versions SET status = :s, stage = NULL, error_code = :c, updated_at = now() "
@@ -239,7 +280,19 @@ async def ingest_document_version(job: Job, stages: IngestStages, ctx: WorkerCon
                 job, delay_seconds=busy_delay_seconds(ctx.rng, cfg), error_code=None, refund_attempt=True
             )
             return JobOutcome.BUSY
-        info, limits = await _begin(ctx, job)
+        except Exception as exc:
+            # Redis unavailable (SlotManager fails closed with a 503): like a busy slot, not a failed attempt
+            if errors.classify(exc).code != "redis_unavailable":
+                raise
+            return await _on_backend_down(ctx, job, "redis_unavailable")
+        try:
+            info, limits = await _begin(ctx, job)
+        except errors.JobStopped:
+            raise
+        except Exception as exc:
+            if errors.classify(exc).code != "db_unavailable":
+                raise
+            return await _on_backend_down(ctx, job, "db_unavailable")
         return await _supervise(ctx, job, lease, stages, info, limits)
     except errors.JobStopped as stop:
         return await _on_stopped(ctx, job, stop.reason)
@@ -304,13 +357,23 @@ async def _run_stages(
 async def _heartbeat(ctx: WorkerContext, job: Job, lease: SlotLease) -> str:
     """Renew the job lease and both slots until something is lost. Returns why it ended."""
     cfg = ctx.config
+    redis_failures = 0
     while True:
-        await asyncio.sleep(cfg.heartbeat_seconds)
+        await ctx.sleep(cfg.heartbeat_seconds)
         try:
-            if not await ctx.slots.renew(lease, cfg.lease_seconds, max_total_seconds=cfg.max_job_seconds):
-                return "slot_lease_lost"
+            renewed = await ctx.slots.renew_lease(lease, cfg.lease_seconds, max_total_seconds=cfg.max_job_seconds)
         except SlotBackendUnavailable:
-            return "redis_unavailable"
+            # A slow or failed Redis call says nothing about the lease: try again at the next tick,
+            # and give up only when Redis stays unavailable
+            redis_failures += 1
+            if redis_failures >= HEARTBEAT_MAX_BACKEND_FAILURES:
+                return STOP_REDIS_UNAVAILABLE
+        else:
+            redis_failures = 0
+            if renewed is RenewResult.LEASE_LOST:
+                return STOP_SLOT_LEASE_LOST
+            if renewed is RenewResult.MAX_LIFETIME:
+                return STOP_MAX_LIFETIME
         try:
             if not await ctx.queue.heartbeat(job):
                 return "job_lost"
@@ -323,21 +386,52 @@ async def _heartbeat(ctx: WorkerContext, job: Job, lease: SlotLease) -> str:
 
 async def _on_stopped(ctx: WorkerContext, job: Job, reason: str) -> JobOutcome:
     logger.warning("ingest_job_stopped job=%s reason=%s", job.id, reason)
-    if reason in ("cancelled", "job_lost"):
-        # Not this worker's job any more (or its version was deleted). Both updates are guarded, so a
-        # frozen job or one reclaimed by another worker is left exactly as it is.
-        await ctx.queue.fail(job, "cancelled")
-        return JobOutcome.CANCELLED
-    return await _requeue_transient(ctx, job, reason, JobOutcome.STOPPED)
+    try:
+        if reason in ("cancelled", "job_lost"):
+            # Not this worker's job any more (or its version was deleted). Both updates are guarded, so a
+            # frozen job or one reclaimed by another worker is left exactly as it is.
+            await ctx.queue.fail(job, "cancelled")
+            return JobOutcome.CANCELLED
+        if reason == STOP_MAX_LIFETIME:
+            # The job ran as long as it may: permanent, a retry would run into the same cap
+            return await _fail_for_good(ctx, job, errors.JOB_TIME_LIMIT_CODE)
+        return await _requeue_transient(ctx, job, reason, JobOutcome.STOPPED)
+    except errors.JobStopped as lost:
+        return _lost_while_ending(job, lost)
 
 
 async def _on_error(ctx: WorkerContext, job: Job, err: errors.IngestError) -> JobOutcome:
-    if err.permanent:
-        await _set_version(ctx, job, "failed", err.code)
-        await ctx.queue.fail(job, err.code)
-        logger.info("ingest_job_failed job=%s code=%s", job.id, err.code)
-        return JobOutcome.FAILED
-    return await _requeue_transient(ctx, job, err.code, JobOutcome.RETRY)
+    try:
+        if err.permanent:
+            return await _fail_for_good(ctx, job, err.code)
+        return await _requeue_transient(ctx, job, err.code, JobOutcome.RETRY)
+    except errors.JobStopped as lost:
+        return _lost_while_ending(job, lost)
+
+
+def _lost_while_ending(job: Job, lost: errors.JobStopped) -> JobOutcome:
+    """The job stopped being this worker's while it was being ended: another worker owns it, write nothing."""
+    logger.warning("ingest_job_lost_while_ending job=%s reason=%s", job.id, lost.reason)
+    return JobOutcome.CANCELLED
+
+
+async def _fail_for_good(ctx: WorkerContext, job: Job, code: str) -> JobOutcome:
+    await _set_version(ctx, job, "failed", code)
+    await ctx.queue.fail(job, code)
+    logger.info("ingest_job_failed job=%s code=%s", job.id, code)
+    return JobOutcome.FAILED
+
+
+async def _on_backend_down(ctx: WorkerContext, job: Job, code: str) -> JobOutcome:
+    """
+    Redis or the database was unavailable when the job started. The version is untouched (still queued) and
+    the attempt is handed back: a few minutes of outage must not fail versions with processing_failed. The
+    job waits like a busy slot (15-45 s with jitter) and the cause is kept in last_error_code.
+    """
+    delay = busy_delay_seconds(ctx.rng, ctx.config)
+    await ctx.queue.retry(job, delay_seconds=delay, error_code=code, refund_attempt=True)
+    logger.warning("ingest_job_backend_down job=%s code=%s", job.id, code)
+    return JobOutcome.BACKEND_DOWN
 
 
 async def _requeue_transient(ctx: WorkerContext, job: Job, code: str, outcome: JobOutcome) -> JobOutcome:
@@ -355,8 +449,11 @@ async def _requeue_transient(ctx: WorkerContext, job: Job, code: str, outcome: J
 
 async def _release_for_shutdown(ctx: WorkerContext, job: Job) -> None:
     """SIGTERM: hand the job straight back (due now, attempt refunded) so another worker takes it."""
-    await _set_version(ctx, job, "queued", None)
-    await ctx.queue.retry(job, delay_seconds=0.0, error_code=None, refund_attempt=True)
+    try:
+        await _set_version(ctx, job, "queued", None)
+        await ctx.queue.retry(job, delay_seconds=0.0, error_code=None, refund_attempt=True)
+    except errors.JobStopped:
+        logger.warning("ingest_job_lost_at_shutdown job=%s", job.id)  # another worker owns it: leave it
 
 
 # ── The poll loop ────────────────────────────────────────────────────────────

@@ -98,7 +98,7 @@ class StageContext:
     results: dict[str, Any] = field(default_factory=dict)
 
     def session(self) -> AbstractAsyncContextManager[AsyncSession]:
-        """One tenant transaction. Raises JobStopped when the version is no longer queued/processing."""
+        """One tenant transaction. Raises JobStopped when the version is no longer queued/processing or the job is not this worker's."""
         return self._session()
 
 
@@ -200,6 +200,33 @@ def make_validate_stage(store: document_store.PrivateObjectStore, parse: ParseSe
 
 # ── Tenant transaction used by the worker ────────────────────────────────────
 
+# The job row of a version, locked FOR SHARE, only while it is still THIS worker's: running, with this
+# worker's id and this claim's attempt number (the same guard as the queue's own statements).
+OWNERSHIP_SQL = """
+SELECT 1 FROM app.ingest_jobs
+WHERE tenant_id = :t AND version_id = :v AND status = 'running' AND worker_id = :w AND attempts = :a
+FOR SHARE
+"""
+
+
+async def lock_job_ownership(db: AsyncSession, job: "Job") -> None:
+    """
+    Raise JobStopped("job_lost") unless the job row is still this worker's, and lock the row for the rest
+    of the transaction. The lock closes the gap between check and write: while it is held no other worker
+    can reclaim the job (the claim uses FOR UPDATE SKIP LOCKED, so it skips the row) and the sweeper and
+    the delete route wait. A worker whose lease expired and whose job was reclaimed finds its claim
+    (worker id, attempts) gone and writes nothing. Every write of version, chunk or job state by the worker
+    calls this first, inside the SAME transaction as the write. Lock order everywhere: version row, then job row.
+    """
+    owned = (
+        await db.execute(
+            text(OWNERSHIP_SQL),
+            {"t": job.tenant_id, "v": job.version_id, "w": job.worker_id, "a": job.attempts},
+        )
+    ).first()
+    if owned is None:
+        raise errors.JobStopped("job_lost")
+
 
 @asynccontextmanager
 async def active_version_session(
@@ -207,9 +234,10 @@ async def active_version_session(
 ) -> AsyncIterator[AsyncSession]:
     """
     One transaction for a job: the tenant is set from the claimed row first, then the version row is
-    locked FOR SHARE and must still be queued or processing. A deleted or archived version (backlog
-    B40) raises JobStopped("cancelled") before anything is written, and the share lock makes a
-    concurrent delete wait until this transaction ends.
+    locked FOR SHARE and must still be queued or processing, and the job row must still be this worker's.
+    A deleted or archived version (backlog B40) raises JobStopped("cancelled") and a lost job
+    (reclaimed after a lease expiry, or frozen) raises JobStopped("job_lost"), both before anything is
+    written. The share locks make a concurrent delete or reclaim wait until this transaction ends.
     """
     async with tenant_sessions.for_job(job) as db:
         status = (
@@ -223,4 +251,5 @@ async def active_version_session(
         ).scalar_one_or_none()
         if status not in ("queued", "processing"):
             raise errors.JobStopped("cancelled")
+        await lock_job_ownership(db, job)
         yield db

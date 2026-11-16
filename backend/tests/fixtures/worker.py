@@ -14,6 +14,7 @@ Fixtures for the ingestion worker tests (step 5b-2):
   - `queued_version(...)`: a queued version with its job and a stored file (realistic world data).
 """
 
+import asyncio
 import hashlib
 import os
 import random
@@ -25,17 +26,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest_asyncio
+from fastapi import HTTPException
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis_client
-from app.core.slots import SlotManager
+from app.core.slots import DEFAULT_UNAVAILABLE_MESSAGE, SlotLease, SlotLimit, SlotManager
 from app.db.models.document import Chunk, DocumentVersion
 from app.services import document_store
 from app.workers import ingest, stages
-from app.workers.db import WorkerDatabases
-from app.workers.queue import JobQueue
+from app.workers.db import TenantRef, TenantSessions, WorkerDatabases
+from app.workers.queue import Job, JobQueue
 from tests.fixtures.academic_world import WorldTenant
 from tests.fixtures.documents import MadeDocument, make_document
 
@@ -45,8 +48,8 @@ PARSE = stages.ParseSettings(timeout_seconds=20.0, max_output_bytes=1024 * 1024,
 FAST = ingest.IngestSettings(
     global_concurrency=2,
     tenant_concurrency=1,
-    lease_seconds=5.0,
-    heartbeat_seconds=0.2,
+    lease_seconds=300.0,
+    heartbeat_seconds=3600.0,  # tests that are about the heartbeat inject a manual tick (ManualTicker)
     max_job_seconds=60.0,
     max_attempts=3,
     retry_base_seconds=30.0,
@@ -132,7 +135,9 @@ def make_context(
     config: ingest.IngestSettings = FAST,
     seed: int = 7,
     clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> ingest.WorkerContext:
+    extra: dict[str, Any] = {} if sleep is None else {"sleep": sleep}
     return ingest.WorkerContext(
         queue=make_queue(dbs, config, clock=clock),
         tenant_sessions=dbs.tenant_sessions,
@@ -142,6 +147,7 @@ def make_context(
         rng=random.Random(seed),
         worker_id=f"test-worker-{uuid.uuid4().hex[:8]}",
         clock=clock,
+        **extra,
     )
 
 
@@ -259,3 +265,72 @@ def raise_once(exc_factory: Callable[[], BaseException]) -> StageHook:
             raise exc_factory()
 
     return hook
+
+
+# ── Deterministic time and outages ───────────────────────────────────────────
+
+
+class ManualTicker:
+    """
+    Replaces the heartbeat's wait between two renewals (`WorkerContext.sleep`): the heartbeat parks
+    until the test calls `beat()`, which lets exactly one renewal round run and returns when the
+    heartbeat is parked again. No wall-clock time is involved.
+    """
+
+    def __init__(self) -> None:
+        self._parked = asyncio.Event()
+        self._go = asyncio.Event()
+        self.beats = 0
+
+    async def sleep(self, _seconds: float) -> None:
+        self._go.clear()
+        self._parked.set()
+        await self._go.wait()
+
+    async def beat(self, *, timeout: float = 30.0) -> None:
+        """
+        One renewal round. When the round ends the job (the heartbeat stops it), the stage that is
+        waiting in beat() is cancelled by the worker, which is how a test sees the stop. The timeout
+        is only a safety net against a hung test.
+        """
+        await asyncio.wait_for(self._parked.wait(), timeout)
+        self._parked.clear()
+        self._go.set()
+        await asyncio.wait_for(self._parked.wait(), timeout)
+        self.beats += 1
+
+
+class OutageSlots(SlotManager):
+    """A SlotManager whose acquire fails closed (503, as outside development) for the first `failures` calls."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.refused = 0
+
+    async def acquire(
+        self, limits: "list[SlotLimit] | tuple[SlotLimit, ...]", *, unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE
+    ) -> SlotLease:
+        if self.failures > 0:
+            self.failures -= 1
+            self.refused += 1
+            raise HTTPException(
+                status_code=503, detail={"code": "service_unavailable", "message": unavailable_message}
+            )
+        return await super().acquire(limits, unavailable_message=unavailable_message)
+
+
+class FlakyTenantSessions:
+    """Tenant sessions that fail like a database outage for the first `failures` opens."""
+
+    def __init__(self, inner: TenantSessions, failures: int) -> None:
+        self.inner = inner
+        self.failures = failures
+        self.refused = 0
+
+    def for_job(self, job: Job | TenantRef) -> Any:
+        if self.failures > 0:
+            self.failures -= 1
+            self.refused += 1
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+        return self.inner.for_job(job)

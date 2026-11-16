@@ -12,6 +12,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -303,3 +304,99 @@ async def test_the_sweeper_works_through_tenant_sessions_and_the_narrow_role_sta
     from tests.security.worker_assertions import assert_every_transaction_sets_tenant_first
 
     assert_every_transaction_sets_tenant_first(tenant_log, at_least=2)
+
+
+# ── Review of 5b, finding 9: the advisory lock never outlives a cancelled sweeper ──────────
+
+
+def _second_pool() -> WorkerDatabases:
+    """A separate pool, so 'another sweeper' really uses other connections (the lock is per session)."""
+    import os
+
+    return WorkerDatabases.from_urls(tenant_url=os.environ["DATABASE_URL"], worker_url=os.environ["WORKER_DATABASE_URL"])
+
+
+async def _another_sweeper_can_take_the_lock(rival_dbs: WorkerDatabases, w_id: uuid.UUID, tmp_path: Path) -> bool:
+    """Polls briefly: a closed connection releases its session lock a moment later."""
+    rival = make_sweeper(rival_dbs, tmp_path, only_tenants={w_id})
+    for _ in range(60):
+        if (await rival.run_once()).ran:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def test_cancelling_a_sweeper_that_holds_the_lock_lets_another_sweeper_take_it(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path, quiet_queue: None
+) -> None:
+    w = academic_world.a
+    store = FlakyStore(document_store.LocalPrivateStore(tmp_path))
+    key = document_store.new_document_key(w.id)
+    await store.put(w.id, key, b"x")
+    await _outbox(raw_db, w.id, key)
+    store.gate = asyncio.Event()  # the first sweeper stops inside its run, holding the lock
+    first = asyncio.create_task(make_sweeper(worker_dbs, store, only_tenants={w.id}).run_once())
+    await asyncio.wait_for(store.entered.wait(), 10)
+
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    assert first.cancelled()
+    rival_dbs = _second_pool()
+    try:
+        assert await _another_sweeper_can_take_the_lock(rival_dbs, w.id, tmp_path), "the lock stayed held"
+    finally:
+        await rival_dbs.dispose()
+
+
+class _CancelledUnlockConnection:
+    """A connection whose unlock statement is cancelled, as when the task is cancelled again during cleanup."""
+
+    def __init__(self, conn: object) -> None:
+        self._conn = conn
+
+    async def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        if "pg_advisory_unlock" in str(statement):
+            raise asyncio.CancelledError()
+        return await self._conn.execute(statement, *args, **kwargs)  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+
+class _EngineWithCancelledUnlock:
+    def __init__(self, engine: object) -> None:
+        self._engine = engine
+
+    def connect(self) -> "_ConnectContext":
+        return _ConnectContext(self._engine.connect())  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._engine, name)
+
+
+class _ConnectContext:
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    async def __aenter__(self) -> _CancelledUnlockConnection:
+        return _CancelledUnlockConnection(await self._inner.__aenter__())  # type: ignore[attr-defined]
+
+    async def __aexit__(self, *exc: object) -> object:
+        return await self._inner.__aexit__(*exc)  # type: ignore[attr-defined]
+
+
+async def test_a_cancelled_unlock_does_not_return_a_connection_that_still_holds_the_lock(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, tmp_path: Path, quiet_queue: None
+) -> None:
+    w = academic_world.a
+    sw = make_sweeper(worker_dbs, tmp_path, only_tenants={w.id})
+    sw.queue.engine = _EngineWithCancelledUnlock(worker_dbs.worker_engine)  # type: ignore[assignment]
+    with pytest.raises(asyncio.CancelledError):  # the cancellation is not swallowed
+        await sw.run_once()
+    rival_dbs = _second_pool()
+    try:
+        assert await _another_sweeper_can_take_the_lock(rival_dbs, w.id, tmp_path), (
+            "the pooled connection still holds pg_try_advisory_lock: other sweepers are locked out"
+        )
+    finally:
+        await rival_dbs.dispose()

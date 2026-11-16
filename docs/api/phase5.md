@@ -184,3 +184,13 @@ The API reads a tenant's limits through the tenant session (`app_tenant` may rea
 | `unknown_limit`, `invalid_limit_value`, `limit_above_ceiling` | 422 | platform limits endpoint |
 
 The frontend error mapper for these codes and for the request-guard codes of section 2 (400 `duplicate_header` / `invalid_content_length`, 411, 415, 429, 503) is backlog item B36.
+
+## 8. Worker error codes (5b-2 review fix)
+
+These are values of `error_code` on a version (`DocumentVersionResponse`, `DocumentStatusResponse`), written by the ingestion worker; they are never an HTTP error body.
+
+| Code | Retryable by the API | Meaning |
+|---|---|---|
+| `job_time_limit_exceeded` | no (`version_not_retryable`) | Processing ran for the maximum job time (`INGEST_MAX_JOB_SECONDS`, default 30 minutes) and was stopped. Permanent: a retry would reach the same cap, so the job is not retried automatically either. Upload a smaller or simpler file. |
+
+Unchanged for comparison: `processing_failed` (the transient attempts ran out: retryable) and `worker_crash` (retryable). An outage of Redis or the database at the moment a job starts no longer uses up attempts: the version stays `queued` and is processed when the service is back.

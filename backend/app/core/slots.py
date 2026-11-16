@@ -16,15 +16,22 @@ Redis is checked on every call. If it cannot be reached we fail CLOSED (503)
 unless ENVIRONMENT is "development", where a per-process in-memory fallback is
 used and a loud error is logged. The 503 text is supplied by the caller.
 
-A long-running holder (the document worker, step 5b) keeps its lease alive with renew():
-it extends only a token that is still live, so an expired lease is never resurrected. renew() is
-for workers, not requests, so it never raises an HTTP error: it returns False when the lease is
-lost (the caller MUST then stop its job) and raises SlotBackendUnavailable when Redis cannot be
-reached. `max_total_seconds` caps the whole life of a lease, so a hung worker whose heartbeat still
-runs cannot hold its slot forever.
+A long-running holder (the document worker, step 5b) keeps its lease alive with renew_lease():
+it extends only a token that is still live, so an expired lease is never resurrected. renew_lease()
+is for workers, not requests, so it never raises an HTTP error: it answers with a RenewResult (renewed,
+lease lost, or maximum lifetime reached; the caller MUST stop its job unless renewed) and raises
+SlotBackendUnavailable when Redis cannot be reached. `max_total_seconds` caps the whole life of a
+lease, so a hung worker whose heartbeat still runs cannot hold its slot forever. renew() is the same
+call reduced to True/False.
+
+A lease records WHICH backend holds its token (`SlotLease.backend`): "redis", or "memory" when it was
+taken from the development fallback. A Redis-held lease is only ever renewed in Redis: if Redis fails
+or is slow, renew raises SlotBackendUnavailable (also in development) instead of looking in memory,
+where the token never was, and reporting a healthy lease as lost.
 """
 
 import asyncio
+import enum
 import logging
 import time
 import uuid
@@ -105,12 +112,26 @@ class SlotLimit:
     ttl_seconds: float
 
 
+BACKEND_REDIS = "redis"
+BACKEND_MEMORY = "memory"  # development only: Redis was unreachable when the lease was taken
+
+
+class RenewResult(enum.Enum):
+    """Why renew_lease did or did not extend a lease."""
+
+    RENEWED = "renewed"
+    LEASE_LOST = "lease_lost"  # the token expired or was released: the slot is no longer the holder's
+    MAX_LIFETIME = "max_lifetime"  # the lease reached max_total_seconds: refused on purpose, not an accident
+
+
 @dataclass(frozen=True)
 class SlotLease:
     token: str
     keys: tuple[str, ...]
     # When the lease was taken, on the holder's own monotonic clock (for renew's maximum lifetime)
     started_at: float = field(default_factory=time.monotonic)
+    # Which backend holds the token. Renewal goes to the same backend, never to the other one.
+    backend: str = BACKEND_REDIS
 
 
 class SlotRejected(Exception):
@@ -124,7 +145,7 @@ class SlotRejected(Exception):
 
 class SlotBackendUnavailable(Exception):
     """
-    Redis could not be reached while renewing a lease, outside development. A domain error on
+    Redis could not be reached (or answered too slowly) while renewing a lease it holds. A domain error on
     purpose: a worker is not serving a request, so there is nobody to send a 503 to. The worker
     decides (retry, or stop the job). Request-path calls (acquire, count) still raise HTTP 503.
     """
@@ -152,6 +173,7 @@ class SlotManager:
     ) -> SlotLease:
         token = uuid.uuid4().hex
         keys = tuple(lim.key for lim in limits)
+        backend = BACKEND_REDIS
         try:
             redis = await redis_client.get_redis()
             args: list[str | int] = [token]
@@ -168,9 +190,10 @@ class SlotManager:
                 "REDIS UNAVAILABLE: using per-process in-memory slot limits (development only): %r", exc
             )
             index, retry_ms = self._mem_acquire(token, limits)
+            backend = BACKEND_MEMORY
         if index:
             raise SlotRejected(index - 1, -(-retry_ms // 1000))
-        return SlotLease(token=token, keys=keys)
+        return SlotLease(token=token, keys=keys, backend=backend)
 
     async def release(self, lease: SlotLease) -> None:
         """Best effort. If this fails the token expires on its own."""
@@ -191,22 +214,38 @@ class SlotManager:
         *,
         max_total_seconds: float | None = None,
     ) -> bool:
+        """renew_lease reduced to True (renewed) or False (anything else). Raises like renew_lease."""
+        return await self.renew_lease(lease, ttl_seconds, max_total_seconds=max_total_seconds) is RenewResult.RENEWED
+
+    async def renew_lease(
+        self,
+        lease: SlotLease,
+        ttl_seconds: float,
+        *,
+        max_total_seconds: float | None = None,
+    ) -> RenewResult:
         """
-        Extend a LIVE lease to `ttl_seconds` from now, atomically on every key of the lease.
-        Returns False when the lease already expired or was released, or when it has reached
-        `max_total_seconds` since it was taken (the extension is then refused and the lease dies at
-        its current expiry). An expired token is never brought back. The caller must stop its work
-        when this returns False: the slot is no longer its own.
-        With `max_total_seconds` the new ttl is also cut to the time left, so the lease can never
-        outlive the cap.
-        Raises SlotBackendUnavailable (not an HTTP error) when Redis is unreachable outside development.
+        Extend a LIVE lease to `ttl_seconds` from now, atomically on every key of the lease, and say
+        what happened:
+          RENEWED       the lease was extended;
+          LEASE_LOST    it already expired or was released (an expired token is never brought back);
+          MAX_LIFETIME  it has reached `max_total_seconds` since it was taken. The extension is
+                        refused and the lease dies at its current expiry.
+        The caller must stop its work unless the answer is RENEWED. With `max_total_seconds` the new ttl
+        is also cut to the time left, so the lease can never outlive the cap.
+        The renewal goes to the backend that holds the lease (`lease.backend`). A Redis-held lease whose
+        Redis call fails or times out raises SlotBackendUnavailable (not an HTTP error) in EVERY
+        environment: the token may well be alive in Redis, so saying "lost" would be a guess.
         """
         if max_total_seconds is not None:
             remaining = max_total_seconds - (time.monotonic() - lease.started_at)
             if remaining <= 0:
                 logger.warning("Slot lease reached its maximum lifetime and is not renewed")
-                return False
+                return RenewResult.MAX_LIFETIME
             ttl_seconds = min(ttl_seconds, remaining)
+        if lease.backend == BACKEND_MEMORY:
+            renewed = self._mem_renew(lease, ttl_seconds)
+            return RenewResult.RENEWED if renewed else RenewResult.LEASE_LOST
         ttl_ms = max(1, int(ttl_seconds * 1000))
         try:
             redis = await redis_client.get_redis()
@@ -214,13 +253,10 @@ class SlotManager:
                 res = await redis.eval(  # type: ignore[no-untyped-call]
                     _RENEW_LUA, len(lease.keys), *lease.keys, lease.token, ttl_ms
                 )
-            return int(res) == 1
         except Exception as exc:
-            if not settings.is_development:
-                logger.error("Redis unavailable for slot renewal: %r", exc)
-                raise SlotBackendUnavailable() from exc
-            logger.error("REDIS UNAVAILABLE: renewing slot in memory (development only): %r", exc)
-            return self._mem_renew(lease, ttl_seconds)
+            logger.error("Redis unavailable for slot renewal: %r", exc)
+            raise SlotBackendUnavailable() from exc
+        return RenewResult.RENEWED if int(res) == 1 else RenewResult.LEASE_LOST
 
     async def count(self, key: str, *, unavailable_message: str = DEFAULT_UNAVAILABLE_MESSAGE) -> int:
         """Number of live tokens for a key."""

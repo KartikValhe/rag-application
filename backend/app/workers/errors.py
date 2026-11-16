@@ -61,6 +61,8 @@ PERMANENT_ERROR_CODES: frozenset[str] = frozenset(
         "quota_pages_exceeded",
         # The stored file is gone, or a stage broke its contract: retrying cannot help
         "processing_failed",
+        # The job ran for INGEST_MAX_JOB_SECONDS: a retry would only run into the same cap again
+        "job_time_limit_exceeded",
     }
 )
 
@@ -72,6 +74,9 @@ TRANSIENT_ERROR_CODES: frozenset[str] = frozenset(
 
 # The code a version gets when the transient attempts run out (design A3).
 EXHAUSTED_ERROR_CODE = "processing_failed"
+
+# The code of a job that reached its maximum lifetime (permanent, see PERMANENT_ERROR_CODES).
+JOB_TIME_LIMIT_CODE = "job_time_limit_exceeded"
 
 
 class IngestError(Exception):

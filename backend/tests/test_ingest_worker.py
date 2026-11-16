@@ -11,7 +11,7 @@ import random
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.slots import SlotBackendUnavailable, SlotLimit, SlotManager
+from app.core.slots import RenewResult, SlotBackendUnavailable, SlotLimit, SlotManager
 from app.workers import errors, ingest, stages
 from app.workers.db import WorkerDatabases
 from tests.fixtures.academic_world import AcademicWorld
@@ -27,6 +27,7 @@ from tests.fixtures.worker import (
     FAST,
     FakeClock,
     FakePipeline,
+    ManualTicker,
     chunk_count,
     job_row,
     make_context,
@@ -225,24 +226,46 @@ def test_retry_delay_is_30_times_2_to_the_attempt_minus_one_plus_jitter() -> Non
 
 async def test_the_heartbeat_keeps_the_job_lease_and_both_slots_alive(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
-    quiet_queue: None, ingest_slots: SlotManager,
+    quiet_queue: None, ingest_slots: SlotManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """
+    No wall-clock time: a fake clock drives the job lease, a manual tick drives the heartbeat, and the slot
+    lease is long. The clock moves past the ORIGINAL job lease; only the heartbeat's renewals keep the job.
+    """
     w = academic_world.a
     made = await queued_version(raw_db, w, tmp_path)
-    config = replace(FAST, lease_seconds=1.0, heartbeat_seconds=0.2)
-    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=config)
+    clock = FakeClock(datetime.now(UTC))
+    ticker = ManualTicker()
+    config = replace(FAST, lease_seconds=300.0)
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=config, clock=clock, sleep=ticker.sleep)
     pipeline = FakePipeline()
     probes: dict[str, object] = {}
+    renewals: list[RenewResult] = []
+    real_renew = ingest_slots.renew_lease
 
-    async def slow(_ctx: stages.StageContext) -> None:
-        await asyncio.sleep(2.5)  # more than twice the lease: only the heartbeat keeps it alive
+    async def spy(*args: object, **kwargs: object) -> RenewResult:
+        result = await real_renew(*args, **kwargs)  # type: ignore[arg-type]
+        renewals.append(result)
+        return result
+
+    monkeypatch.setattr(ingest_slots, "renew_lease", spy)
+
+    async def long_stage(_ctx: stages.StageContext) -> None:
+        probes["first_lease"] = (await job_row(raw_db, made.job.id))["lease_expires_at"]
+        for _ in range(4):
+            clock.advance(100.0)  # 400 s in all: past the original 300 s lease
+            await ticker.beat()
         probes["claimable"] = await ctx.queue.claim("thief")
         probes["global"] = await ingest_slots.count(ingest.GLOBAL_SLOT_KEY)
         probes["tenant"] = await ingest_slots.count(ingest.tenant_slot_key(w.id))
+        probes["last_lease"] = (await job_row(raw_db, made.job.id))["lease_expires_at"]
 
-    pipeline.hooks["parse"] = slow
-    assert await _run(ctx, pipeline) == ingest.JobOutcome.DONE
-    assert probes == {"claimable": None, "global": 1, "tenant": 1}
+    pipeline.hooks["parse"] = long_stage
+    assert await asyncio.wait_for(_run(ctx, pipeline), 60) == ingest.JobOutcome.DONE
+    assert (probes["claimable"], probes["global"], probes["tenant"]) == (None, 1, 1)
+    assert renewals == [RenewResult.RENEWED] * 4
+    assert probes["last_lease"] > probes["first_lease"]  # type: ignore[operator]
+    assert probes["last_lease"] == clock.now() + timedelta(seconds=300.0)  # renewed by the last beat
     assert (await job_row(raw_db, made.job.id))["attempts"] == 1
 
 
@@ -251,7 +274,8 @@ async def test_a_lost_slot_lease_stops_the_job_kills_the_child_and_writes_nothin
     quiet_queue: None, ingest_slots: SlotManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     made = await queued_version(raw_db, academic_world.a, tmp_path)
-    ctx = make_context(worker_dbs, tmp_path, ingest_slots, clock=FakeClock(datetime.now(UTC)))
+    ticker = ManualTicker()
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, clock=FakeClock(datetime.now(UTC)), sleep=ticker.sleep)
     pid_file = tmp_path / "pid.txt"
     pipeline = FakePipeline()
 
@@ -261,16 +285,21 @@ async def test_a_lost_slot_lease_stops_the_job_kills_the_child_and_writes_nothin
             child_args=("sleep",), extra_params={"pid_file": str(pid_file)},
         )
 
+    async def lease_expired(*_a: object, **_k: object) -> RenewResult:
+        return RenewResult.LEASE_LOST  # the slot lease expired or was released
+
+    async def tick_once_the_child_runs() -> None:
+        while not pid_file.exists():  # waits for the real child process to start, nothing else
+            await asyncio.sleep(0.05)
+        await ticker.beat()
+
     pipeline.hooks["parse"] = hang_in_the_sandbox
-    real_renew = ingest_slots.renew
-
-    async def renew_false_once_the_child_runs(lease: object, ttl: float, **kw: object) -> bool:
-        if pid_file.exists():
-            return False  # the lease expired (or reached its maximum lifetime)
-        return await real_renew(lease, ttl, **kw)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(ingest_slots, "renew", renew_false_once_the_child_runs)
-    outcome = await asyncio.wait_for(_run(ctx, pipeline), 30)
+    monkeypatch.setattr(ingest_slots, "renew_lease", lease_expired)
+    kick = asyncio.create_task(tick_once_the_child_runs())
+    try:
+        outcome = await asyncio.wait_for(_run(ctx, pipeline), 30)
+    finally:
+        kick.cancel()
     assert outcome == ingest.JobOutcome.STOPPED
     assert "chunk" not in pipeline.calls and "index" not in pipeline.calls
     assert await _wait_dead(int(pid_file.read_text())), "the hung child kept running after the job was stopped"
@@ -281,27 +310,26 @@ async def test_a_lost_slot_lease_stops_the_job_kills_the_child_and_writes_nothin
     await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 
-async def test_redis_going_away_during_the_heartbeat_stops_the_job(
+async def test_redis_going_away_during_the_heartbeat_stops_the_job_after_three_failed_renewals(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
     quiet_queue: None, ingest_slots: SlotManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     made = await queued_version(raw_db, academic_world.a, tmp_path)
-    ctx = make_context(worker_dbs, tmp_path, ingest_slots)
+    ticker = ManualTicker()
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, sleep=ticker.sleep)
     pipeline = FakePipeline()
-    started = asyncio.Event()
 
     async def hang(_c: stages.StageContext) -> None:
-        started.set()
-        await asyncio.sleep(60)
+        for _ in range(10):  # the third failed renewal stops the job and cancels this stage
+            await ticker.beat()
 
-    async def broken_renew(*_a: object, **_k: object) -> bool:
-        if started.is_set():
-            raise SlotBackendUnavailable()
-        return True
+    async def broken_renew(*_a: object, **_k: object) -> RenewResult:
+        raise SlotBackendUnavailable()
 
     pipeline.hooks["parse"] = hang
-    monkeypatch.setattr(ingest_slots, "renew", broken_renew)
+    monkeypatch.setattr(ingest_slots, "renew_lease", broken_renew)
     assert await asyncio.wait_for(_run(ctx, pipeline), 30) == ingest.JobOutcome.STOPPED
+    assert ticker.beats == ingest.HEARTBEAT_MAX_BACKEND_FAILURES - 1  # two failures were tolerated
     assert "chunk" not in pipeline.calls
     row = await job_row(raw_db, made.job.id)
     assert (row["status"], row["last_error_code"]) == ("queued", "redis_unavailable")
@@ -314,14 +342,15 @@ async def test_a_job_cancelled_by_a_document_delete_stops_and_writes_no_results(
 ) -> None:
     """Backlog B40: DELETE /documents marks the job failed (frozen) and archives the version."""
     made = await queued_version(raw_db, academic_world.a, tmp_path)
-    ctx = make_context(worker_dbs, tmp_path, ingest_slots)
+    ticker = ManualTicker()
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, sleep=ticker.sleep)
     pipeline = FakePipeline()
 
     async def delete_then_wait(_c: stages.StageContext) -> None:
         await raw_db.execute(text("UPDATE app.ingest_jobs SET status = 'failed', last_error_code = 'document_deleted' WHERE id = :j"), {"j": made.job.id})
         await raw_db.execute(text("UPDATE app.document_versions SET status = 'archived' WHERE id = :v"), {"v": made.version.id})
         await raw_db.commit()
-        await asyncio.sleep(30)
+        await ticker.beat()  # the heartbeat finds its job row frozen and stops the stage
 
     pipeline.hooks["parse"] = delete_then_wait
     assert await asyncio.wait_for(_run(ctx, pipeline), 30) == ingest.JobOutcome.CANCELLED
@@ -462,15 +491,36 @@ async def test_a_worker_killed_mid_job_leaves_a_state_the_sweeper_and_next_worke
 
 
 async def test_the_poll_loop_sleeps_between_empty_polls_and_stops_at_once_when_asked(
-    worker_dbs: WorkerDatabases, tmp_path: Path, quiet_queue: None, ingest_slots: SlotManager
+    worker_dbs: WorkerDatabases, tmp_path: Path, quiet_queue: None, ingest_slots: SlotManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Real progress, not just 'still running': one claim, one idle sleep of about 5 s, then a prompt stop."""
     ctx = make_context(worker_dbs, tmp_path, ingest_slots)
+    claims: list[str] = []
+    sleeps: list[float] = []
+    parked = asyncio.Event()
+
+    async def empty_claim(worker_id: str) -> None:
+        claims.append(worker_id)
+
+    async def recording_sleep(stop: asyncio.Event, seconds: float) -> None:
+        sleeps.append(seconds)
+        parked.set()
+        await stop.wait()  # an idle sleep that only the stop interrupts
+
+    ctx.queue.claim = empty_claim  # type: ignore[method-assign]
+    monkeypatch.setattr(ingest, "_sleep_or_stop", recording_sleep)
     stop = asyncio.Event()
     task = asyncio.create_task(ingest.run_worker(ctx, FakePipeline().stages(), stop))
-    await asyncio.sleep(0.3)
-    assert not task.done()  # sleeping (poll_seconds=5), not spinning or exiting
+    await asyncio.wait_for(parked.wait(), 10)
+    for _ in range(200):  # a loop that spins would claim again on every turn
+        await asyncio.sleep(0)
+    assert len(claims) == 1 and len(sleeps) == 1, (claims, sleeps)
+    assert 4.0 <= sleeps[0] <= 6.0  # WORKER_POLL_SECONDS (5) with +-20% jitter
+    assert not task.done()
     stop.set()
-    await asyncio.wait_for(task, 2.0)  # the stop interrupts the sleep
+    await asyncio.wait_for(task, 5.0)  # the stop ends the loop at once
+    assert len(claims) == 1  # and it did not claim once more on its way out
 
 
 async def test_sigterm_lets_a_job_that_finishes_within_the_grace_period_complete(
