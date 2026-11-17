@@ -129,6 +129,23 @@ def test_truncated_pdf_is_corrupt_or_still_readable_but_never_crashes() -> None:
     assert fails(pdf[:40], "pdf") == "corrupt_pdf"
 
 
+@pytest.mark.parametrize("how", ["xref_offset", "xref_table", "mid_stream", "tail_garbage"])
+def test_a_damaged_pdf_gets_an_answer_whatever_pdfium_makes_of_it(how: str) -> None:
+    """A damaged cross-reference table or a file cut inside a content stream (not just a 40-byte header):
+    PDFium repairs what it can; the child must answer with text or a gate error, never raise."""
+    from tests.test_parse_stage import _damage
+
+    pdf = _damage(make_text_pdf(["Unit 1 Algebra: linear equations in one variable."] * 6), how)
+    result = run(pdf, "pdf")
+    # Measured on the pinned pypdfium2 5.15.2: PDFium rebuilds a damaged xref and ignores trailing garbage (all
+    # six pages come back); a file cut inside a content stream is refused as corrupt_pdf
+    if how == "mid_stream":
+        assert result == {"success": False, "error_code": "corrupt_pdf"}
+    else:
+        assert result["success"] is True
+        assert validate_parsed_document(result["document"], expected_kind="pdf").page_count == 6
+
+
 @pytest.mark.parametrize(("w", "h"), [(ex.MAX_PAGE_POINTS + 1, 792), (612, ex.MAX_PAGE_POINTS + 1)])
 def test_huge_page_dimensions_are_refused(w: float, h: float) -> None:
     assert fails(make_text_pdf(["text on a huge page"], width=w, height=h), "pdf") == "pdf_too_complex"
@@ -239,6 +256,12 @@ def test_every_pdfium_handle_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ok(make_text_pdf(["page one has text enough", None, "page three has text enough"]), "pdf")
     fails(make_text_pdf(["fine page text enough", "too big"], width=612, height=ex.MAX_PAGE_POINTS + 10), "pdf")
+    # The text_too_large exit from INSIDE an open textpage (review of 5b-3): the page has more characters than
+    # the per-page cap, and the error is raised between get_textpage() and the end of its try block
+    textpages_before = sum(isinstance(o, pdfium.PdfTextPage) for o in opened)
+    over = b"BT /F1 1 Tf 0 0 Td " + b"(abcdefghij) Tj " * 60_000 + b"ET\n"  # 600,000 characters on one page
+    assert fails(make_text_pdf(["Some text on page one."], extra_content=over), "pdf") == "text_too_large"
+    assert sum(isinstance(o, pdfium.PdfTextPage) for o in opened) == textpages_before + 1, "no textpage was open at the exit"
     assert len(opened) >= 5
     assert all(id(o) in closed for o in opened), "a PDFium handle was left open"
 

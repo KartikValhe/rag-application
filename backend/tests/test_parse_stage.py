@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from tests.security.parse_assertions import (
     assert_corrupt_child_output_is_rejected,
     assert_hidden_text_not_extracted,
     assert_page_bomb_is_refused,
+    assert_parent_refuses_inflated_page_count,
 )
 
 PARSE = stages.ParseSettings(timeout_seconds=60.0, max_output_bytes=20 * 1024 * 1024, memory_limit_mb=1024, cpu_seconds=120)
@@ -165,31 +167,67 @@ async def test_a_corrupt_child_answer_is_rejected_by_the_parent(store_root: Path
 
 
 async def test_the_parent_rechecks_the_page_count_the_child_reports(store_root: Path) -> None:
-    """A child claiming a valid PDF of 500 pages is refused against the tenant's cap of 200."""
-    doc = {
-        "file_kind": "pdf", "page_count": 500,
-        "pages": [{"n": 1, "blocks": [{"t": "para", "level": None, "text": "x"}]}],
-        "stats": {"chars": 1, "blocks": 1, "hidden_text_chars": 0, "script_guess": "latn"},
-    }
-    from app.services.parsed_document import validate_parsed_document
-
-    parsed = validate_parsed_document(doc)
-    with pytest.raises(errors.PermanentIngestError) as exc:
-        stages.check_page_limits(parsed, default_limits())
-    assert exc.value.code == "too_many_pages"
-    pptx = parsed.model_copy(update={"file_kind": "pptx", "page_count": 101})
-    with pytest.raises(errors.PermanentIngestError) as exc:
-        stages.check_page_limits(pptx, default_limits())
-    assert exc.value.code == "too_many_slides"
-    stages.check_page_limits(parsed.model_copy(update={"page_count": 200}), default_limits())
+    """A compromised child claims a valid-looking PDF of 500 pages (one short page of text) for a short
+    file: the PARENT's own check against the tenant's cap of 200 refuses it. Driven through
+    run_parse_child, so deleting the check_page_limits call fails this test (meta-test in
+    tests/security/test_prove_it_fails_review5b3.py)."""
+    await assert_parent_refuses_inflated_page_count(
+        lambda variant, kind: stages.run_parse_child(
+            b"short file", file_kind=kind, limits=default_limits(), parse=PARSE,
+            child_module="tests._parse_children", child_args=(f"corrupt-{variant}",),
+        )
+    )
 
 
-def test_the_new_codes_are_permanent_worker_codes() -> None:
-    for code in ("parse_output_invalid", "parse_output_too_large", "text_too_large", "scanned_pdf", "unreadable_text",
-                 "no_text_found", "too_many_pages", "too_many_slides", "corrupt_pdf", "password_protected_pdf",
-                 "parse_timeout", "quota_pages_exceeded"):
-        assert errors.PermanentIngestError(code).code == code
-    assert errors.TransientIngestError("worker_crash").code == "worker_crash"
+@pytest.mark.parametrize(("variant", "kind", "pages"), [("pdf_page_count_200", "pdf", 200), ("pptx_page_count_100", "pptx", 100)])
+async def test_a_page_count_exactly_at_the_cap_is_accepted(store_root: Path, variant: str, kind: str, pages: int) -> None:
+    outcome = await stages.run_parse_child(
+        b"short file", file_kind=kind, limits=default_limits(), parse=PARSE,
+        child_module="tests._parse_children", child_args=(f"corrupt-{variant}",),
+    )
+    assert outcome.document.page_count == pages
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "parse_output_invalid", "parse_output_too_large", "text_too_large", "scanned_pdf", "unreadable_text", "no_text_found",
+        "too_many_pages", "too_many_slides", "corrupt_pdf", "password_protected_pdf", "parse_timeout", "parse_failed",
+        "quota_pages_exceeded", "xml_too_complex", "pdf_too_complex",
+    ],
+)
+async def test_a_parse_error_code_is_permanent_through_the_worker_and_never_retried(
+    code: str, worker_dbs: Any, academic_world: Any, raw_db: AsyncSession, tmp_path: Path, quiet_queue: None, ingest_slots: Any,
+) -> None:
+    """Behaviour, not a constant: a stage that raises this code fails the version with it after ONE attempt,
+    and the job is never claimed again."""
+    from tests.fixtures.worker import (
+        FakeClock,
+        FakePipeline,
+        job_row,
+        make_context,
+        queued_version,
+        version_row,
+    )
+    from tests.security.worker_assertions import assert_no_slots_held
+
+    made = await queued_version(raw_db, academic_world.a, tmp_path)
+    clock = FakeClock(datetime.now(UTC))
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=CONFIG, clock=clock)
+    pipeline = FakePipeline()
+
+    async def boom(_ctx: stages.StageContext) -> None:
+        raise errors.PermanentIngestError(code)
+
+    pipeline.hooks["parse"] = boom
+    assert await ingest.run_one(ctx, pipeline.stages()) == ingest.JobOutcome.FAILED
+    v = await version_row(raw_db, made.version.id)
+    assert (v.status, v.error_code) == ("failed", code)
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"], row["last_error_code"]) == ("failed", 1, code)
+    clock.advance(86_400)
+    assert await ctx.queue.claim("again") is None
+    await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 
 async def test_timeout_is_permanent_and_crash_is_transient(store_root: Path, tmp_path: Path) -> None:
@@ -211,15 +249,30 @@ async def test_timeout_is_permanent_and_crash_is_transient(store_root: Path, tmp
 # ── Hostile files through the real stage and the sandbox ─────────────────────
 
 
+async def baseline_seconds(store_root: Path) -> float:
+    """What one trivial parse costs on this machine (process start, imports, the sandbox round trip)."""
+    started = time.monotonic()
+    await parse(store_root, b"Unit 1: Algebra", "txt")
+    return time.monotonic() - started
+
+
+def generous(baseline: float, *, factor: float = 60.0, floor: float = 15.0) -> float:
+    """A wall-clock bound that follows the machine: `factor` times a trivial parse, never below `floor` s.
+    These tests catch a hang or a quadratic blow-up (minutes), not a slow disk."""
+    return max(floor, baseline * factor)
+
+
 async def test_huge_page_dimensions(store_root: Path) -> None:
     assert await code_of(store_root, make_text_pdf([TEXT], width=1e6, height=1e6), "pdf") == "pdf_too_complex"
 
 
+@pytest.mark.machine_dependent
 async def test_a_huge_content_stream_without_text(store_root: Path) -> None:
     ops = b"0 0 m 100 100 l S\n" * 400_000  # 7 MB of drawing operators on one page
+    bound = generous(await baseline_seconds(store_root))
     started = time.monotonic()
     assert await code_of(store_root, make_text_pdf([None], extra_content=ops), "pdf") == "scanned_pdf"
-    assert time.monotonic() - started < 45
+    assert time.monotonic() - started < bound
 
 
 async def test_a_huge_text_content_stream_hits_the_per_page_cap(store_root: Path) -> None:
@@ -257,14 +310,16 @@ async def test_a_tenant_with_raised_limits_accepts_what_the_default_rejects(stor
     assert (await parse(store_root, pdf, "pdf", limits=raised)).page_count == 201
 
 
+@pytest.mark.machine_dependent
 async def test_a_docx_with_a_2_mb_single_paragraph(store_root: Path) -> None:
+    bound = generous(await baseline_seconds(store_root), factor=120.0)
     started = time.monotonic()
     two_mb = _random_words(2 * 1024 * 1024)  # random words: repeated text would trip the zip-bomb ratio
     assert await code_of(store_root, docx_bytes(lambda d: d.add_paragraph(two_mb)), "docx") == "text_too_large"
     almost = two_mb[:1_900_000]
     doc = await parse(store_root, docx_bytes(lambda d: d.add_paragraph(almost)), "docx")
     assert doc.stats.chars >= 1_899_000 and doc.stats.blocks >= 190
-    assert time.monotonic() - started < 60
+    assert time.monotonic() - started < bound
 
 
 _RNG = random.Random(5)  # one stream for the module: two calls give different (but reproducible) text
@@ -297,12 +352,14 @@ def _many_shapes_pptx(count: int) -> bytes:
     return rewrite_zip_member(base, "ppt/slides/slide1.xml", lambda _old: slide)
 
 
+@pytest.mark.machine_dependent
 async def test_a_pptx_with_5000_shapes(store_root: Path) -> None:
+    bound = generous(await baseline_seconds(store_root), factor=120.0)
     started = time.monotonic()
     doc = await parse(store_root, _many_shapes_pptx(5000), "pptx")
     assert doc.stats.blocks == 5000
     assert [b.text for b in doc.pages[0].blocks[:3]] == ["shape 0", "shape 1", "shape 2"]  # reading order kept
-    assert time.monotonic() - started < 60
+    assert time.monotonic() - started < bound
 
 
 async def test_hidden_docx_text_is_counted_not_extracted(store_root: Path) -> None:
@@ -390,6 +447,139 @@ def _slide_with(p: Any, lines: list[str]) -> None:
         slide.shapes.add_textbox(Inches(1), Inches(1 + i), Inches(6), Inches(1)).text_frame.text = line
 
 
+# ── An unexpected error in the child: permanent, one attempt (review of 5b-3, finding 1) ─────────────
+
+
+def _outline_docx(value: str) -> bytes:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    def build(d: Any) -> None:
+        p = d.add_paragraph("A paragraph with a hostile outline level")
+        el = OxmlElement("w:outlineLvl")
+        el.set(qn("w:val"), value)
+        p._p.get_or_add_pPr().append(el)
+
+    return docx_bytes(build)
+
+
+@pytest.mark.parametrize("value", ["²", "1" * 5000], ids=["superscript-digit", "5000-digits"])
+async def test_a_hostile_attribute_is_a_permanent_parse_failed_through_the_real_sandbox(store_root: Path, value: str) -> None:
+    assert await code_of(store_root, _outline_docx(value), "docx") == "parse_failed"
+
+
+async def test_an_exception_in_the_real_child_is_answered_as_parse_failed_without_its_text() -> None:
+    with pytest.raises(errors.PermanentIngestError) as exc:
+        await stages.parse_in_sandbox(
+            b"Unit 1", file_kind="txt", limits=default_limits(), parse=PARSE,
+            child_module="tests._parse_children", child_args=("raise_value_error",),
+        )
+    assert exc.value.code == "parse_failed"
+    assert "CANARY" not in repr(exc.value) and "secret" not in repr(exc.value)
+
+
+async def test_a_hostile_file_fails_after_one_attempt_through_the_real_worker(
+    worker_dbs: Any, academic_world: Any, raw_db: AsyncSession, tmp_path: Path, quiet_queue: None, ingest_slots: Any,
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from tests.fixtures.worker import (
+        FakeClock,
+        FakePipeline,
+        job_row,
+        make_context,
+        queued_version,
+        version_row,
+    )
+
+    made = await queued_version(raw_db, academic_world.a, tmp_path, subject="Math", data=_outline_docx("²"))
+    clock = FakeClock(datetime.now(UTC))
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=CONFIG, clock=clock)
+    real = stages.make_parse_stage(ctx.store, PARSE)
+
+    async def parse_as_docx(sctx: stages.StageContext) -> None:
+        sctx.version = dc_replace(sctx.version, file_kind="docx")  # the fixture stores every version as txt
+        await real(sctx)
+
+    st = dc_replace(FakePipeline().stages(), validate=_no_op, parse=parse_as_docx)
+    assert await ingest.run_one(ctx, st) == ingest.JobOutcome.FAILED
+    v = await version_row(raw_db, made.version.id)
+    assert (v.status, v.error_code) == ("failed", "parse_failed")
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"], row["last_error_code"]) == ("failed", 1, "parse_failed")
+    clock.advance(86_400)
+    assert await ctx.queue.claim("again") is None  # no retry, however long it waits
+
+
+@pytest.mark.parametrize("mode", ["die", "silent"], ids=["killed-by-a-signal", "no-answer"])
+async def test_a_child_that_dies_stays_transient_but_has_a_smaller_attempt_budget(
+    mode: str, worker_dbs: Any, academic_world: Any, raw_db: AsyncSession, tmp_path: Path, quiet_queue: None, ingest_slots: Any,
+) -> None:
+    """A genuine crash (a signal, SIGXCPU, an OOM kill, no answer at all) may be a one-off, so it is retried;
+    but it counts against INGEST_MAX_CRASH_ATTEMPTS (2), not the 3 attempts of an outage, so a file that
+    kills its parser cannot loop. The user can still retry by hand (rate limited)."""
+    from dataclasses import replace as dc_replace
+
+    from tests.fixtures.worker import (
+        FakeClock,
+        FakePipeline,
+        job_row,
+        make_context,
+        queued_version,
+        version_row,
+    )
+
+    made = await queued_version(raw_db, academic_world.a, tmp_path)
+    clock = FakeClock(datetime.now(UTC))
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=CONFIG, clock=clock)
+    parse_stage = stages.make_parse_stage(ctx.store, PARSE, child_module="tests._parse_children", child_args=(mode,))
+    st = dc_replace(FakePipeline().stages(), validate=_no_op, parse=parse_stage)
+
+    assert await ingest.run_one(ctx, st) == ingest.JobOutcome.RETRY
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"], row["last_error_code"]) == ("queued", 1, "worker_crash")
+    assert (await version_row(raw_db, made.version.id)).status == "queued"
+
+    clock.advance(1000)
+    assert await ingest.run_one(ctx, st) == ingest.JobOutcome.FAILED  # the second crash exhausts the budget
+    v = await version_row(raw_db, made.version.id)
+    assert (v.status, v.error_code) == ("failed", "processing_failed")
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"]) == ("failed", 2)
+
+
+# ── Damaged PDFs: always an answer, never a crash (a crash would be a transient worker_crash) ────────
+
+
+def _damage(pdf: bytes, how: str) -> bytes:
+    if how == "xref_offset":  # the startxref offset points into the middle of nowhere
+        i = pdf.rindex(b"startxref")
+        return pdf[: i + 10] + b"7" + pdf[i + 11 :]
+    if how == "xref_table":  # the cross-reference table is overwritten with garbage
+        i = pdf.index(b"xref\n")
+        return pdf[: i + 5] + b"\xde\xad\xbe\xef" * 40 + pdf[i + 5 + 160 :]
+    if how == "mid_stream":  # cut in the middle of a content stream
+        return pdf[: int(len(pdf) * 0.55)]
+    if how == "tail_garbage":
+        return pdf + b"\x00\xff" * 5000
+    raise AssertionError(how)
+
+
+@pytest.mark.parametrize("how", ["xref_offset", "xref_table", "mid_stream", "tail_garbage"])
+async def test_a_damaged_pdf_is_answered_and_never_crashes_the_child(store_root: Path, how: str) -> None:
+    pdf = _damage(make_text_pdf([TEXT] * 6), how)
+    try:
+        outcome: Any = await parse(store_root, pdf, "pdf")
+    except errors.PermanentIngestError as exc:
+        outcome = exc
+    except errors.TransientIngestError as exc:  # a crash of the child
+        raise AssertionError(f"{how}: the child crashed ({exc.code})") from None
+    if isinstance(outcome, errors.PermanentIngestError):
+        assert outcome.code in ("corrupt_pdf", "scanned_pdf", "no_text_found", "parse_failed", "pdf_too_complex"), outcome.code
+    else:
+        assert 1 <= outcome.page_count <= 6  # PDFium repaired it: whatever pages it found, within the cap
+
+
 # ── Linux resource limits (CI; skipped on Windows) ───────────────────────────
 
 LINUX = sys.platform.startswith("linux")
@@ -421,13 +611,16 @@ async def _parse_with_peak(data: bytes, kind: str, settings: stages.ParseSetting
 
 
 @pytest.mark.skipif(not LINUX, reason="RLIMIT_AS exists on Linux only")
-async def test_a_memory_limit_below_what_the_parser_needs_is_a_crash_not_a_success(store_root: Path) -> None:
+async def test_a_memory_limit_below_what_the_parser_needs_is_never_a_success(store_root: Path) -> None:
     """Measured in 5b-3 (python:3.12, x86_64): the parser needs about 50 MiB of address space; at 32 MiB
-    the child dies with MemoryError. A crash is transient (worker_crash), never a half-parsed success."""
+    the child hits MemoryError. Since the review of 5b-3 a MemoryError the child can still ANSWER is a
+    permanent parse_failed (the file needs more memory than the limit: a retry cannot help); one that kills
+    the child before it can answer (during start-up) is still a transient worker_crash with the smaller
+    attempt budget. Either way, never a half-parsed success. (Not run on Windows: RLIMIT_AS is Linux only.)"""
     tiny = stages.ParseSettings(timeout_seconds=60.0, max_output_bytes=20 * 1024 * 1024, memory_limit_mb=32, cpu_seconds=60)
-    with pytest.raises(errors.TransientIngestError) as exc:
+    with pytest.raises(errors.IngestError) as exc:
         await stages.parse_in_sandbox(make_text_pdf([TEXT] * 50), file_kind="pdf", limits=default_limits(), parse=tiny)
-    assert exc.value.code == "worker_crash"
+    assert (exc.value.permanent, exc.value.code) in ((True, "parse_failed"), (False, "worker_crash"))
 
 
 # ── Timing per format (generous bounds; the numbers are printed) ─────────────
@@ -444,14 +637,16 @@ def _timing_files() -> dict[str, bytes]:
     }
 
 
+@pytest.mark.machine_dependent
 @pytest.mark.parametrize("kind", ["pdf", "docx", "pptx", "txt", "md"])
 async def test_parse_time_per_format(store_root: Path, kind: str, capsys: pytest.CaptureFixture[str]) -> None:
     data = _timing_files()[kind]
+    bound = generous(await baseline_seconds(store_root))
     started = time.monotonic()
     doc = await parse(store_root, data, kind)
     seconds = time.monotonic() - started
     assert doc.stats.chars > 20_000
-    assert seconds < 30, f"{kind} took {seconds:.1f} s"
+    assert seconds < bound, f"{kind} took {seconds:.1f} s (bound {bound:.0f} s)"
     with capsys.disabled():
         print(f"\n[timing] {kind}: {len(data) // 1024} KiB, {doc.page_count} pages, {doc.stats.chars} chars, {seconds:.2f} s")
 

@@ -119,7 +119,7 @@ class ProfileRules:
     pdf_pages: int  # default page cap for the byte scan
     pdf_pages_code: str  # error code when the page cap is exceeded
     pptx_slides: int | None  # default slide cap (None: not checked)
-    parse_all_ppt_parts: bool  # parse every XML part under ppt/ with defusedxml (fail closed)
+    scan_all_pptx_parts: bool  # a presentation: scan every part (the timetable import never loads one)
     default_max_bytes: int
 
 
@@ -135,7 +135,7 @@ PROFILE_RULES: dict[UploadProfile, ProfileRules] = {
         pdf_pages=MAX_PDF_PAGES,
         pdf_pages_code="pdf_too_complex",
         pptx_slides=None,
-        parse_all_ppt_parts=False,
+        scan_all_pptx_parts=False,
         default_max_bytes=MAX_UPLOAD_SIZE,
     ),
     UploadProfile.DOCUMENT: ProfileRules(
@@ -147,7 +147,7 @@ PROFILE_RULES: dict[UploadProfile, ProfileRules] = {
         pdf_pages=DOC_MAX_PDF_PAGES,
         pdf_pages_code="too_many_pages",
         pptx_slides=DOC_MAX_PPTX_SLIDES,
-        parse_all_ppt_parts=True,
+        scan_all_pptx_parts=True,
         default_max_bytes=DOC_UPLOAD_CEILING_BYTES,
     ),
 }
@@ -577,6 +577,67 @@ def _check_content_type(_name: tuple[str | None, str], attrs: Any) -> None:
         raise _reject_macro()
 
 
+# ── Which package parts are scanned as XML ───────────────────────────────────
+
+# Parts that are binary media or fonts by their extension. They are NOT parsed as XML, unless the
+# package declares an XML content type for the very part (see _part_needs_xml_scan). Macro and OLE
+# blobs (vbaProject.bin, embeddings, nested archives) are refused in _check_members whatever the
+# extension, so ".bin" here only covers harmless binaries such as printer settings.
+BINARY_MEDIA_EXTENSIONS = frozenset(
+    {
+        "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "tif", "tiff", "webp", "ico", "wdp", "jxr", "heic",
+        "wmf", "emf", "bin",
+        "odttf", "ttf", "otf", "eot", "fntdata",
+        "mp3", "m4a", "wav", "wma", "mp4", "m4v", "mov", "wmv", "avi", "mpg", "mpeg",
+    }
+)
+
+
+def _extension(key: str) -> str:
+    name = key.rsplit("/", 1)[-1]
+    return name.rsplit(".", 1)[-1] if "." in name else ""
+
+
+def _is_xml_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    base = content_type.split(";", 1)[0].strip().lower()
+    return base.endswith("/xml") or base.endswith("+xml")
+
+
+def _part_needs_xml_scan(key: str, declared: str | None) -> bool:
+    """
+    True when the part must be streamed through defusedxml. The libraries parse a part when the package
+    DECLARES an XML content type for it (an Override by part name, else a Default by extension),
+    whatever its file name says, so that is checked first; a ".xml" name is always scanned; and every
+    other part is scanned too, unless its extension is a known binary media or font type. A part that
+    is not XML at all then fails closed as invalid_xml, which a genuine package does not have.
+    """
+    if _is_xml_content_type(declared) or _extension(key) == "xml":
+        return True
+    return _extension(key) not in BINARY_MEDIA_EXTENSIONS
+
+
+class _ContentTypes:
+    """The Default (by extension) and Override (by part name) entries of [Content_Types].xml."""
+
+    def __init__(self) -> None:
+        self.defaults: dict[str, str] = {}
+        self.overrides: dict[str, str] = {}
+
+    def on_element(self, name: tuple[str | None, str], attrs: Any) -> None:
+        _check_content_type(name, attrs)
+        content_type = (attrs.get((None, "ContentType")) or "").lower()
+        if name[1] == "Default":
+            extension = (attrs.get((None, "Extension")) or "").lower().lstrip(".")
+            if extension:
+                self.defaults.setdefault(extension, content_type)
+        elif name[1] == "Override":
+            part = _name_key((attrs.get((None, "PartName")) or "").lstrip("/"))
+            if part:
+                self.overrides.setdefault(part, content_type)
+
+
 def _sniff_openxml_format(
     data: bytes, filename: str, profile: UploadProfile, max_slides: int | None
 ) -> tuple[str, int | None]:
@@ -595,7 +656,8 @@ def _sniff_openxml_format(
 
             if "[content_types].xml" not in members:
                 raise UploadSecurityError(code="invalid_openxml_format", message="File is not a valid Office document.")
-            _scan_xml(zf, members["[content_types].xml"], _check_content_type)
+            content_types = _ContentTypes()
+            _scan_xml(zf, members["[content_types].xml"], content_types.on_element)
 
             # Relationship parts must parse and must not point outside the package
             for key, info in members.items():
@@ -629,15 +691,25 @@ def _sniff_openxml_format(
             main_part = OPENXML_MAIN_PARTS[kind]
             _scan_xml(zf, members[main_part], count_slide_ids if kind == "pptx" else None)
 
-            # Every other XML part of word/ and xl/ must parse (fail closed). For the document profile
-            # EVERY .xml part does, wherever it lives (ppt/, docProps/, customXml/ ...): python-docx
-            # and python-pptx load those parts in the parser child (step 5b-3 found docProps/core.xml
-            # reaching the library unchecked). The timetable importer refuses pptx later anyway.
-            prefixes = ("word/", "xl/")
-            for key, info in members.items():
-                if info.is_dir() or not key.endswith(".xml") or key in (main_part, "[content_types].xml"):
+            # EVERY other part that the libraries could load as XML must parse (fail closed), wherever it
+            # lives and whatever its name is (review of 5b-3, finding 2): python-docx, python-pptx and
+            # openpyxl pick a part by the relationship that points at it and by the content type that
+            # [Content_Types].xml declares for it, not by a ".xml" file name. See _part_needs_xml_scan.
+            # The relationship parts and the content types were scanned above. Only a PRESENTATION in the
+            # timetable profile keeps the old, narrower scan: the timetable importer refuses it later
+            # (unsupported_format, backlog B4) and never loads its parts. DOCX and XLSX are scanned in full
+            # by both profiles, because both load them with the same libraries.
+            if kind == "pptx" and not rules.scan_all_pptx_parts:
+                members_to_scan: dict[str, zipfile.ZipInfo] = {
+                    k: i for k, i in members.items() if k.endswith(".xml") and k.startswith(("word/", "xl/"))
+                }
+            else:
+                members_to_scan = members
+            for key, info in members_to_scan.items():
+                if info.is_dir() or key.endswith(".rels") or key in (main_part, "[content_types].xml"):
                     continue
-                if rules.parse_all_ppt_parts or key.startswith(prefixes):
+                declared = content_types.overrides.get(key) or content_types.defaults.get(_extension(key))
+                if _part_needs_xml_scan(key, declared):
                     _scan_xml(zf, info)
 
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""

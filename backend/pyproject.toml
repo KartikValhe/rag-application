@@ -29,17 +29,23 @@ dependencies = [
     "jinja2>=3.1.4",
     # File parsing & upload safety
     "openpyxl>=3.1.5",
-    # Document parser (step 5b-3), pinned exactly: they parse untrusted files in the sandbox child.
-    # Licences and wheels (Windows x64, Linux x86_64 and aarch64, Python 3.12) recorded in
-    # docs/phase5-design.md section 0d and the 5b-3 record.
+    # Libraries that parse UNTRUSTED files, pinned exactly (review of 5b-3). The document parser's full set
+    # is the `parser` extra below; these four stay in the base because the API image still runs them in
+    # sandboxed CHILDREN or needs them itself, and the same versions must be installed everywhere:
+    #   python-docx + lxml  the timetable DOCX import (timetable_parse_child, started by the API)
+    #   pypdfium2           PDFium, which pdfplumber (timetable PDF import) loads
+    #   pillow              branding image validation in the API process (services/storage.py)
+    # The API PROCESS itself imports none of python-docx, lxml, pypdfium2 or python-pptx
+    # (tests/test_review_5b3_deps.py). Licences and wheels: docs/phase5-design.md section 0d.
+    # pip-audit cannot see PDFium CVEs (README.md): review the pypdfium2 pin on every release.
     "python-docx==1.2.0",
-    "python-pptx==1.0.2",
+    "lxml==6.1.3",
     "pypdfium2==5.15.2",
     "pdfplumber>=0.11.0",
     "defusedxml>=0.7.1",
     # Utilities
     "python-multipart>=0.0.12",
-    "pillow>=10.0.0",
+    "pillow==13.0.0",
     "httpx>=0.28.0",
     "orjson>=3.10.0",
     "structlog>=24.4.0",
@@ -47,7 +53,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Everything the sandboxed DOCUMENT parser (app/services/document_parse_child.py) loads, pinned exactly. The
+# worker image installs it; the API image does not need python-pptx (the others are also in the base above,
+# with the same pins). pip-audit does not see PDFium CVEs: review the pypdfium2 pin on each release.
+parser = [
+    "pypdfium2==5.15.2",
+    "python-docx==1.2.0",
+    "python-pptx==1.0.2",
+    "lxml==6.1.3",
+    "pillow==13.0.0",
+]
 dev = [
+    "rag-platform-backend[parser]",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
@@ -103,6 +120,9 @@ testpaths = ["tests"]
 # The test-only child module (tests._tt_children) must be importable when the plain `pytest` script is used.
 pythonpath = ["."]
 addopts = "-v --tb=short"
+markers = [
+    "machine_dependent: wall-clock bounds; generous and relative to a baseline, but they can still fail on a very slow or loaded machine",
+]
 
 [tool.coverage.run]
 source = ["app"]

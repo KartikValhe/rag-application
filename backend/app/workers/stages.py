@@ -24,6 +24,9 @@ sandbox, backlog B37) and `make_parse_stage` (5b-3, real text extraction in the 
 answer is untrusted and validated in this process against app/services/parsed_document.py).
 """
 
+import asyncio
+import logging
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -38,6 +41,8 @@ from app.services import document_store
 from app.services.document_limits import DocumentLimits
 from app.services.parsed_document import (
     DEFAULT_MAX_TEXT_CHARS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_STRUCTURE,
     ParsedDocument,
     ParsedDocumentError,
     validate_parsed_document,
@@ -49,7 +54,12 @@ if TYPE_CHECKING:
     from app.workers.ingest import IngestSettings
     from app.workers.queue import Job
 
+logger = logging.getLogger(__name__)
+
 DOCUMENT_PARSE_CHILD = "app.services.document_parse_child"
+# What a legitimate answer of the document child can never exceed (parsed_document.py explains the numbers)
+JSON_LIMITS = sandbox.JsonLimits(max_structure=MAX_JSON_STRUCTURE, max_depth=MAX_JSON_DEPTH)
+_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 SOFT_DEADLINE_SHARE = 0.8  # share of the wall clock the child may use before it gives up on its own
 
 # The ingest stage names written to document_versions.stage while each stage runs.
@@ -192,16 +202,24 @@ async def _run_document_child(
             limits=parse.limits(),
             log_event="document_child_abnormal_exit",
         )
-        result = sandbox.parse_child_json(raw)
+        # In a thread: the strict parse of a 12 MB answer takes a moment and must not stall the heartbeat
+        result = await asyncio.to_thread(sandbox.parse_child_json_strict, raw, limits=JSON_LIMITS)
     except sandbox.SandboxTimeout:
         raise errors.PermanentIngestError("parse_timeout") from None
     except sandbox.SandboxOutputTooLarge:
         raise errors.PermanentIngestError("parse_output_too_large") from None
+    except sandbox.SandboxOutputInvalid:
+        raise errors.PermanentIngestError("parse_output_invalid") from None
     except sandbox.SandboxCrash:
         raise errors.TransientIngestError("worker_crash") from None
     if result.get("success") is not True:
         # The child's own text is ignored: only a known code is kept (anything else is parse_failed)
-        raise errors.PermanentIngestError(str(result.get("error_code", "parse_failed")))
+        code = str(result.get("error_code", "parse_failed"))
+        error_type = result.get("error_type")
+        if code == "parse_failed" and isinstance(error_type, str) and _CLASS_NAME.fullmatch(error_type):
+            # The only thing logged about an unexpected exception in the child: its class name
+            logger.warning("document_child_unexpected_error error_type=%s", error_type)
+        raise errors.PermanentIngestError(code)
     return result
 
 

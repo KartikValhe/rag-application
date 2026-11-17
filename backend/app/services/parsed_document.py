@@ -50,6 +50,21 @@ DEFAULT_MAX_TEXT_CHARS = 2_000_000  # DOC_MAX_TEXT_CHARS
 MAX_HEADING_LEVEL = 9
 MAX_HIDDEN_TEXT_CHARS = 2**40  # a plausible upper bound for a counter, not a content limit
 
+# Limits of the child's RAW answer (sandbox.parse_child_json_strict). The answer is
+#   {"success", "document": {file_kind, page_count, pages: [{n, blocks: [{t, level, text}]}], stats}, peak}
+# written as compact UTF-8 JSON, so the real maxima follow from the caps above:
+#   bytes      text: at most 4 per character (a character outside the BMP; a quote or backslash is 2)
+#              block: the longest `{"t":"slide_title","level":null,"text":""},` is 44; 48 leaves room
+#              page:  `{"n":2000,"blocks":[]},` is far below 64; plus 64 KiB for the envelope and stats
+#   structure  commas + braces + brackets outside strings: a block costs 4 (its brace, two commas, one
+#              comma between blocks), a page 6; plus 1024 for the envelope
+#   depth      envelope > document > pages > page > blocks > block is 6; 8 leaves room
+# 2,000,000 characters in 100,000 blocks give 12.4 MB: MAX_ANSWER_BYTES is 12,993,536 (12.4 MiB).
+# DOC_PARSE_MAX_OUTPUT_BYTES (a setting) defaults to 14 MiB, above this.
+MAX_ANSWER_BYTES = 4 * DEFAULT_MAX_TEXT_CHARS + 48 * MAX_BLOCKS_TOTAL + 64 * MAX_PAGES + 64 * 1024
+MAX_JSON_STRUCTURE = 4 * MAX_BLOCKS_TOTAL + 6 * MAX_PAGES + 1024
+MAX_JSON_DEPTH = 8
+
 ERROR_MESSAGES: dict[str, str] = {
     "parse_output_invalid": "The document parser returned a result that could not be accepted.",
     "parse_output_too_large": "The document parser returned more content than is allowed.",
@@ -118,23 +133,42 @@ class ParsedDocument(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "ParsedDocument":
-        previous = 0
-        for page in self.pages:
-            if page.n <= previous or page.n > self.page_count:  # strictly increasing, inside the document
-                raise ValueError("pages")
-            previous = page.n
-        if self.file_kind not in PAGED_KINDS and (self.page_count != 1 or self.pages[0].n != 1):
-            raise ValueError("flow format")
-        chars = sum(len(b.text) for p in self.pages for b in p.blocks)
-        blocks = sum(len(p.blocks) for p in self.pages)
-        if self.stats.chars != chars or self.stats.blocks != blocks:
-            raise ValueError("stats")
+        _check_consistency(self)
         return self
+
+
+def _check_consistency(document: ParsedDocument) -> None:
+    """One rule of the validator: the parts agree with each other (page order, flow formats, stats)."""
+    previous = 0
+    for page in document.pages:
+        if page.n <= previous or page.n > document.page_count:  # strictly increasing, inside the document
+            raise ValueError("pages")
+        previous = page.n
+    if document.file_kind not in PAGED_KINDS and (document.page_count != 1 or document.pages[0].n != 1):
+        raise ValueError("flow format")
+    chars = sum(len(b.text) for p in document.pages for b in p.blocks)
+    blocks = sum(len(p.blocks) for p in document.pages)
+    if document.stats.chars != chars or document.stats.blocks != blocks:
+        raise ValueError("stats")
+
+
+def _build_model(payload: dict[str, Any]) -> ParsedDocument:
+    """One rule of the validator: strict types, no extra keys, field ranges (pydantic)."""
+    try:
+        return ParsedDocument.model_validate(payload)
+    except ValidationError:
+        _fail("parse_output_invalid")  # the pydantic error quotes the input: it is dropped here
+
+
+def _check_expected_kind(document: ParsedDocument, expected_kind: str | None) -> None:
+    """One rule of the validator: the file kind is the one the worker stored for the version."""
+    if expected_kind is not None and document.file_kind != expected_kind:
+        _fail("parse_output_invalid")
 
 
 def _check_caps(payload: dict[str, Any], max_pages: int, max_text_chars: int) -> None:
     """The caps, on the raw payload and before any model exists. Malformed parts are skipped here."""
-    pages = payload.get("pages")
+    pages = payload.get("pages") if isinstance(payload, dict) else None
     if not isinstance(pages, list):
         return
     if len(pages) > min(max_pages, MAX_PAGES):
@@ -180,10 +214,6 @@ def validate_parsed_document(
     if not isinstance(payload, dict):
         _fail("parse_output_invalid")
     _check_caps(payload, max_pages, max(0, min(max_text_chars, DEFAULT_MAX_TEXT_CHARS)))
-    try:
-        document = ParsedDocument.model_validate(payload)
-    except ValidationError:
-        _fail("parse_output_invalid")  # the pydantic error quotes the input: it is dropped here
-    if expected_kind is not None and document.file_kind != expected_kind:
-        _fail("parse_output_invalid")
+    document = _build_model(payload)
+    _check_expected_kind(document, expected_kind)
     return document

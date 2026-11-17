@@ -97,7 +97,11 @@ class Settings(BaseSettings):
     INGEST_LEASE_SECONDS: int = 120  # job lease and slot TTL; a dead worker's job is free after this
     INGEST_HEARTBEAT_SECONDS: int = 30  # how often the lease and both slots are renewed
     INGEST_MAX_JOB_SECONDS: int = 1800  # hard cap on one attempt (slot max lifetime)
-    INGEST_MAX_ATTEMPTS: int = 3
+    INGEST_MAX_ATTEMPTS: int = 3  # attempts for an outage (database, Redis, storage)
+    # A crashed parser child (a signal, SIGXCPU, an OOM kill, no answer) is transient but counts against this
+    # smaller budget, so a file that kills its parser cannot loop through all INGEST_MAX_ATTEMPTS attempts.
+    # The version then fails with processing_failed, which the user may retry by hand (rate limited).
+    INGEST_MAX_CRASH_ATTEMPTS: int = 2
     INGEST_RETRY_BASE_SECONDS: int = 30  # transient retry: base * 2^(attempt-1) + jitter
     INGEST_RETRY_JITTER_SECONDS: int = 15
     INGEST_BUSY_MIN_SECONDS: int = 15  # a busy slot sends the job back for 15-45 s (attempt refunded)
@@ -110,7 +114,10 @@ class Settings(BaseSettings):
     DOC_TOMBSTONE_RETENTION_DAYS: int = 30
     # Sandboxed document parser (app/services/document_parse_child.py). Memory and CPU: Linux only.
     DOC_PARSE_TIMEOUT_SECONDS: int = 120
-    DOC_PARSE_MAX_OUTPUT_BYTES: int = 20 * 1024 * 1024
+    # The child's JSON answer, as UTF-8. The real maximum (2,000,000 characters of 4 bytes in 100,000 blocks)
+    # is parsed_document.MAX_ANSWER_BYTES = 12.4 MiB; 14 MiB leaves a margin. Raise it only with
+    # DOC_MAX_TEXT_CHARS (the 2,000,000 character cap is also a hard ceiling in the parent).
+    DOC_PARSE_MAX_OUTPUT_BYTES: int = 14 * 1024 * 1024
     DOC_PARSE_MEMORY_LIMIT_MB: int = 1024  # 768 on 2 GB hosts
     DOC_PARSE_CPU_SECONDS: int = 120
     DOC_MAX_TEXT_CHARS: int = 2_000_000  # extracted characters per version (text_too_large); hard ceiling too

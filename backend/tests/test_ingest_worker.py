@@ -173,14 +173,12 @@ async def test_an_unknown_permanent_code_is_never_stored_as_such() -> None:
 @pytest.mark.parametrize(
     "make_exc,code",
     [
-        (lambda: errors.TransientIngestError("worker_crash"), "worker_crash"),
-        (lambda: RuntimeError("a stage bug with CANARY text"), "worker_crash"),
         (lambda: OperationalError("SELECT 1", {}, Exception("connection lost")), "db_unavailable"),
         (lambda: SlotBackendUnavailable(), "redis_unavailable"),
         (lambda: OSError("disk gone"), "storage_unavailable"),
     ],
 )
-async def test_transient_errors_requeue_with_exponential_backoff_then_fail_with_processing_failed(
+async def test_outage_errors_requeue_with_exponential_backoff_and_get_the_full_attempt_budget(
     make_exc: object, code: str, worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession,
     tmp_path: Path, quiet_queue: None, ingest_slots: SlotManager,
 ) -> None:
@@ -210,6 +208,38 @@ async def test_transient_errors_requeue_with_exponential_backoff_then_fail_with_
     assert (v.status, v.error_code) == ("failed", "processing_failed")
     row = await job_row(raw_db, made.job.id)
     assert (row["status"], row["attempts"], row["last_error_code"]) == ("failed", 3, "processing_failed")
+    await assert_no_slots_held(ingest_slots, academic_world.a.id)
+
+
+@pytest.mark.parametrize(
+    "make_exc",
+    [lambda: errors.TransientIngestError("worker_crash"), lambda: RuntimeError("a stage bug with CANARY text")],
+    ids=["child-crash", "stage-bug"],
+)
+async def test_a_crash_requeues_once_and_then_fails_with_processing_failed_on_the_smaller_budget(
+    make_exc: object, worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession,
+    tmp_path: Path, quiet_queue: None, ingest_slots: SlotManager,
+) -> None:
+    """worker_crash (a dead child, or any stage bug) is transient but counts against
+    INGEST_MAX_CRASH_ATTEMPTS = 2, so a file that kills its parser cannot loop through all 3 attempts."""
+    made = await queued_version(raw_db, academic_world.a, tmp_path)
+    clock = FakeClock(datetime.now(UTC))
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, clock=clock, seed=11)
+    pipeline = FakePipeline()
+
+    async def boom(_ctx: stages.StageContext) -> None:
+        raise make_exc()  # type: ignore[operator]
+
+    pipeline.hooks["chunk"] = boom
+    assert await _run(ctx, pipeline) == ingest.JobOutcome.RETRY
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"], row["last_error_code"]) == ("queued", 1, "worker_crash")
+    clock.advance(1000)
+    assert await _run(ctx, pipeline) == ingest.JobOutcome.FAILED
+    v = await version_row(raw_db, made.version.id)
+    assert (v.status, v.error_code) == ("failed", "processing_failed")
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["attempts"], row["last_error_code"]) == ("failed", 2, "processing_failed")
     await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 

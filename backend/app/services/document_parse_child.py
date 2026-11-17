@@ -15,6 +15,13 @@ signal on Linux, applied by sandbox_child.run before this code runs). Then, by m
       {"success": true, "document": {...ParsedDocument...}, "peak_memory_kb": 51234}
   A failure in either mode:
       {"success": false, "error_code": "pdf_active_content"}
+  An exception nobody expected (a library refusing a hostile attribute, a recursion or memory error that
+  still leaves the process able to answer) is the FILE's fault, never the worker's: the child answers
+      {"success": false, "error_code": "parse_failed", "error_type": "ValueError"}
+  which the worker treats as PERMANENT (one attempt, no retry). Only the exception CLASS NAME is
+  reported, for the server log; its text (paths, document content) never leaves the child. A genuine
+  crash (a signal, SIGXCPU, an OOM kill, no answer at all) cannot answer: the worker sees worker_crash,
+  which is transient but has the smaller attempt budget INGEST_MAX_CRASH_ATTEMPTS.
 
 Parameters (one JSON line before the bytes, sandbox_child.read_request):
   {"mode": "parse", "file_kind": "pdf", "max_file_bytes": ..., "max_pdf_pages": ...,
@@ -86,7 +93,19 @@ def peak_memory_kb() -> int | None:
         return None
 
 
+def _unexpected_failure(exc: BaseException) -> dict[str, Any]:
+    """The permanent answer for an exception that is not a gate or validation error."""
+    return {"success": False, "error_code": "parse_failed", "error_type": type(exc).__name__}
+
+
 def handle(params: dict[str, Any], data: bytes) -> dict[str, Any]:
+    try:
+        return _handle(params, data)
+    except Exception as exc:  # RecursionError and MemoryError are Exceptions too
+        return _unexpected_failure(exc)
+
+
+def _handle(params: dict[str, Any], data: bytes) -> dict[str, Any]:
     from app.core import upload_security
     from app.core.upload_security import UploadProfile, UploadSecurityError
 

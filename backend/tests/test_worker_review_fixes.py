@@ -328,7 +328,8 @@ async def test_a_real_stage_failure_still_counts_its_attempt(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
     quiet_queue: None, ingest_slots: SlotManager,
 ) -> None:
-    """The refund is only for an unavailable backend at the start: a crashing stage still uses attempts."""
+    """The refund is only for an unavailable backend at the start: a crashing stage still uses attempts. A
+    crash (worker_crash) has the smaller budget since the review of 5b-3 (INGEST_MAX_CRASH_ATTEMPTS = 2)."""
     made = await queued_version(raw_db, academic_world.a, tmp_path)
     clock = FakeClock(datetime.now(UTC))
     ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=QUIET, clock=clock)
@@ -338,11 +339,11 @@ async def test_a_real_stage_failure_still_counts_its_attempt(
         raise RuntimeError("a stage bug")
 
     pipeline.hooks["chunk"] = crash
-    for expected in (ingest.JobOutcome.RETRY, ingest.JobOutcome.RETRY, ingest.JobOutcome.FAILED):
+    for expected in (ingest.JobOutcome.RETRY, ingest.JobOutcome.FAILED):
         assert await _run(ctx, pipeline) == expected
         clock.advance(500.0)
     row = await job_row(raw_db, made.job.id)
-    assert (row["status"], row["attempts"]) == ("failed", 3)
+    assert (row["status"], row["attempts"]) == ("failed", 2)
     assert (await version_row(raw_db, made.version.id)).error_code == "processing_failed"
 
 

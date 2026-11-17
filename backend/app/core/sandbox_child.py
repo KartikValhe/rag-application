@@ -14,6 +14,10 @@ The child side of the sandbox (app/core/sandbox.py). A child module calls `run(h
   - the framed request: one JSON line of parameters, then the raw input bytes, read from stdin;
   - a stdout guard: anything the libraries print goes to stderr, so stdout carries exactly one JSON
     document, the handler's result;
+  - an answer written as UTF-8 (ensure_ascii off, compact separators): Unicode escapes (backslash-u) cost 6 bytes
+    for a Devanagari character and 12 for one outside the BMP and blow the output cap on a legitimate
+    document. A lone surrogate cannot be encoded as UTF-8: such an answer is written escaped instead, so
+    the parent can refuse it permanently rather than the child dying with exit 1;
   - crash reporting without content: an uncaught exception writes only
     `child_error_type=<ClassName>` to stderr and exits 1. The exception text (which may hold paths
     or document content) never leaves the child.
@@ -28,7 +32,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, TextIO
 
 PR_SET_PDEATHSIG = 1
 PR_SET_DUMPABLE = 4
@@ -116,6 +120,21 @@ def read_request(stream: BinaryIO) -> tuple[dict[str, Any], bytes]:
     return params, stream.read()
 
 
+def encode_answer(result: dict[str, Any]) -> bytes:
+    """The one JSON answer as UTF-8 bytes (compact, no backslash-u escapes for text)."""
+    try:
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate: escaped, the parent refuses it
+        return json.dumps(result, separators=(",", ":")).encode("ascii")
+
+
+def write_answer(result: dict[str, Any], out: TextIO) -> None:
+    """Write the answer as bytes to the real stdout (its text layer is bypassed: no newline translation)."""
+    out.flush()
+    out.buffer.write(encode_answer(result))
+    out.buffer.flush()
+
+
 def run(handler: Handler) -> None:
     """The whole child bootstrap. Exits 0 after writing the result, 1 on any uncaught error."""
     try:
@@ -126,8 +145,7 @@ def run(handler: Handler) -> None:
         sys.stdout = sys.stderr  # library prints must never corrupt the JSON result
         params, data = read_request(sys.stdin.buffer)
         result = handler(params, data)
-        real_stdout.write(json.dumps(result))
-        real_stdout.flush()
+        write_answer(result, real_stdout)
     except BaseException as exc:
         # Only the class name is reported, for the parent's server-side log
         sys.stderr.write(f"child_error_type={type(exc).__name__}\n")

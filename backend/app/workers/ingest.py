@@ -118,6 +118,8 @@ class IngestSettings:
     poll_seconds: float
     shutdown_grace_seconds: float
     parse: ParseSettings
+    # worker_crash (a dead parser child, or a bug in a stage) is retried, but only this many attempts in all
+    max_crash_attempts: int = 2
 
     @classmethod
     def from_settings(cls, s: "Settings") -> "IngestSettings":
@@ -141,6 +143,7 @@ class IngestSettings:
                 cpu_seconds=s.DOC_PARSE_CPU_SECONDS,
                 max_text_chars=s.DOC_MAX_TEXT_CHARS,
             ),
+            max_crash_attempts=s.INGEST_MAX_CRASH_ATTEMPTS,
         )
 
 
@@ -437,7 +440,13 @@ async def _on_backend_down(ctx: WorkerContext, job: Job, code: str) -> JobOutcom
 
 
 async def _requeue_transient(ctx: WorkerContext, job: Job, code: str, outcome: JobOutcome) -> JobOutcome:
-    if job.attempts >= ctx.config.max_attempts:
+    # An outage may last a while and says nothing about the file: it gets the full budget. A crash may be
+    # the file killing its parser: it gets the smaller one. Both count the job's attempts (an earlier outage
+    # retry also counts towards the crash budget, which is the conservative direction).
+    budget = ctx.config.max_attempts
+    if code == errors.CRASH_CODE:
+        budget = min(budget, ctx.config.max_crash_attempts)
+    if job.attempts >= budget:
         await _set_version(ctx, job, "failed", errors.EXHAUSTED_ERROR_CODE)
         await ctx.queue.fail(job, errors.EXHAUSTED_ERROR_CODE)
         logger.info("ingest_job_exhausted job=%s last_code=%s", job.id, code)

@@ -10,8 +10,11 @@ inside app.services.document_parse_child, after the upload validation has been r
         corrupt_pdf, a password is password_protected_pdf.
   DOCX  python-docx (package loading) + lxml walk of the body: paragraphs, headings by outline level
         (paragraph, then style chain) or the built-in style ids Heading1-9 / Title, never by the
-        (localized) style name; tables as table_row; hidden runs (w:vanish, also through a style) and
-        tracked deletions are NOT extracted but their characters are counted; images, text boxes,
+        (localized) style name; tables as table_row (only the cell's own paragraphs and nested tables:
+        text boxes and mc:Fallback copies are skipped); hidden runs are NOT extracted but their
+        characters are counted in stats.hidden_text_chars: w:vanish (on the run, its character style, its
+        paragraph style or the document defaults), w:specVanish, tracked deletions, runs of 1 pt or less
+        and white runs (FFFFFF) outside a shaded paragraph, cell or table style; images, text boxes,
         headers, footers, footnotes and comments are not read.
   PPTX  python-pptx: slide = page; the title placeholder is slide_title; text frames in reading order
         (top to bottom in 0.25 inch bands, then left to right); groups walked; tables as table_row;
@@ -19,7 +22,10 @@ inside app.services.document_parse_child, after the upload validation has been r
   TXT   paragraphs split on blank lines. MD: the same, plus ATX headings (# to ######).
 
 Every text goes through document_text.clean_text and is split into blocks of at most MAX_BLOCK_CHARS
-(at a sentence end, else a space). The quality gates (document_gates) run at the end.
+(at a sentence end, else a space, else a hard cut that never splits a conjunct). A single text longer
+than the whole text cap is refused on its RAW length, before it is cleaned or split. The quality gates
+(document_gates) run at the end. Numeric attributes of DOCX are read strictly (_strict_small_int): an
+attribute that is not 1-2 ASCII digits makes the file a permanent parse_failed.
 Failures raise GateError with a stable code; nothing of the content is ever put in an error.
 This module must never import app.core.config.
 """
@@ -50,31 +56,91 @@ _LANG_SCAN_LIMIT = 500  # language attributes looked at per file
 _SENTENCE_ENDS = (". ", "? ", "! ", "। ", "॥ ")
 _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r?\n[ \t]*){2,}")
 _PDF_LANG_RE = re.compile(rb"/Lang\s{0,8}\(\s{0,4}([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]{1,8}){0,3}\s{0,4}\)")
-_MD_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+_MD_MAX_HEADING_LINE = 1024  # a longer line is never a heading (and is never run through a pattern)
 _MD_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
 
 
+_JOINERS = "\u200c\u200d"  # ZWNJ, ZWJ
+_VIRAMA = "\u094d"
+
+
+def _md_heading(line: str) -> tuple[int, str] | None:
+    """(level, text) of an ATX heading line ("# Title", up to 3 spaces of indent, 1-6 hashes, an optional
+    closing run of hashes), else None. Hand-written and linear: the regular expression it replaces was
+    quadratic on '# a' + a million spaces + 'b', inside C code that the soft deadline cannot interrupt."""
+    if len(line) > _MD_MAX_HEADING_LINE:
+        return None
+    n = len(line)
+    i = 0
+    while i < n and i < 3 and line[i] == " ":
+        i += 1
+    j = i
+    while j < n and line[j] == "#":
+        j += 1
+    level = j - i
+    if not 1 <= level <= 6:
+        return None
+    if j < n and line[j] not in " \t":
+        return None
+    text = line[j:].strip(" \t")
+    k = len(text)
+    while k > 0 and text[k - 1] == "#":
+        k -= 1
+    if 0 < k < len(text) and text[k - 1] in " \t":
+        text = text[:k].rstrip(" \t")  # the closing sequence ("# Title ##")
+    return level, text
+
+
+def _unsafe_cut(text: str, cut: int) -> bool:
+    """True when cutting `text` into text[:cut] and text[cut:] would split a conjunct: the second piece
+    would start with a joiner or a combining mark, or the first would end with a joiner or a virama.
+    (A piece that starts with a joiner is not clean text: the parent would refuse the whole document.)"""
+    after = text[cut]
+    before = text[cut - 1]
+    return (
+        after in _JOINERS
+        or unicodedata.category(after).startswith("M")
+        or before in _JOINERS
+        or before == _VIRAMA
+    )
+
+
 def split_text(text: str, limit: int = MAX_BLOCK_CHARS) -> list[str]:
-    """Pieces of at most `limit` characters: cut after a sentence end, else at a space, else hard."""
+    """
+    Pieces of at most `limit` characters: cut after a sentence end, else at a space, else hard. A hard cut
+    is moved backwards until it does not split a conjunct (_unsafe_cut); only when there is no safe cut at
+    all (a text made of nothing but marks and joiners) it cuts at the limit and drops the joiners that
+    would start the next piece. Linear: the text is walked with an index and never re-sliced.
+    """
     pieces: list[str] = []
-    while len(text) > limit:
-        low = limit // 2
-        cut = max(text.rfind(end, low, limit + 1) for end in _SENTENCE_ENDS)
+    n = len(text)
+    start = 0
+    while n - start > limit:
+        low = start + limit // 2
+        high = start + limit + 1
+        cut = max(text.rfind(end, low, high) for end in _SENTENCE_ENDS)
         if cut != -1:
-            pieces.append(text[: cut + 1])
-            text = text[cut + 2 :]
+            pieces.append(text[start : cut + 1])
+            start = cut + 2
             continue
-        space = text.rfind(" ", low, limit + 1)
+        space = text.rfind(" ", low, high)
         if space != -1:
-            pieces.append(text[:space])
-            text = text[space + 1 :]
+            pieces.append(text[start:space])
+            start = space + 1
             continue
-        cut = limit
-        while cut > low and unicodedata.category(text[cut]).startswith("M"):
-            cut -= 1  # never start a piece with a combining mark
-        pieces.append(text[:cut])
-        text = text[cut:]
-    pieces.append(text)
+        cut = start + limit
+        while cut > start + 1 and _unsafe_cut(text, cut):
+            cut -= 1
+        if _unsafe_cut(text, cut):
+            cut = start + limit  # no safe cut anywhere in this stretch
+            pieces.append(text[start:cut])
+            start = cut
+            while start < n and text[start] in _JOINERS:
+                start += 1
+            continue
+        pieces.append(text[start:cut])
+        start = cut
+    pieces.append(text[start:])
     return [p.strip(" ") for p in pieces if p.strip(" ")]
 
 
@@ -114,6 +180,10 @@ class Collector:
         """Clean `raw`, split it and add the blocks. Returns the non-space characters added."""
         self.check_time()
         assert self._blocks is not None, "begin_page first"
+        if len(raw) > self.max_text_chars:
+            # Cleaning only shortens a text, so nothing this long can fit under the cap: refuse it on its
+            # RAW length, before clean_text and split_text spend any time or memory on it
+            raise GateError("text_too_large")
         text = clean_text(raw)
         if not text:
             return 0
@@ -199,6 +269,8 @@ def _pdf_page_text(pdf: Any, index: int, pdfium: Any) -> str:
             # Bound the work on one page before its text is materialized
             if chars > MAX_PAGE_RAW_CHARS:
                 raise GateError("text_too_large")
+            # get_text_range decodes UTF-16, so characters outside the BMP (surrogate pairs) survive on the
+            # pinned pypdfium2 (tests/test_review_5b3_child.py pins it); count_chars counts UTF-16 units
             return str(textpage.get_text_range()) if chars > 0 else ""
         finally:
             textpage.close()
@@ -224,12 +296,64 @@ def _on(el: Any) -> bool | None:
     return el.get(W + "val", "true").lower() not in ("0", "false", "off")
 
 
+def _strict_small_int(value: str | None) -> int | None:
+    """An outline level and the like: None when the attribute is absent or empty, the number when it is
+    one or two ASCII digits, else GateError("parse_failed") (a permanent error). str.isdigit() alone is
+    not enough: it accepts superscripts ("\u00b2", which int() then refuses with a ValueError), Arabic-Indic
+    and full-width digits, and a 5000-digit value that int() refuses as well."""
+    if not value:
+        return None
+    if value.isascii() and value.isdigit() and len(value) <= 2:
+        return int(value)
+    raise GateError("parse_failed")
+
+
+def _half_points(value: str | None) -> int | None:
+    """A w:sz value (half points): up to 4 ASCII digits, else ignored (a size nobody can hide behind)."""
+    if value and value.isascii() and value.isdigit() and len(value) <= 4:
+        return int(value)
+    return None
+
+
+TINY_HALF_POINTS = 2  # 1 pt: a run at this size or smaller is hidden text
+WHITE = "ffffff"
+
+
+def _is_filled(shd: Any) -> bool:
+    """A w:shd (shading) that paints a background other than white or automatic."""
+    if shd is None:
+        return False
+    return (shd.get(W + "fill") or "auto").lower() not in ("auto", WHITE, "")
+
+
+def _rpr_facts(rpr: Any) -> tuple[bool | None, int | None, bool | None]:
+    """(vanish, size in half points, white) of one w:rPr; None for what it does not say. w:specVanish
+    counts as vanish."""
+    if rpr is None:
+        return None, None, None
+    vanish = _on(rpr.find(W + "vanish"))
+    spec = _on(rpr.find(W + "specVanish"))
+    if spec:
+        vanish = True
+    size_el = rpr.find(W + "sz")
+    size = _half_points(size_el.get(W + "val")) if size_el is not None else None
+    color = rpr.find(W + "color")
+    white = (color.get(W + "val") or "").lower() == WHITE if color is not None and color.get(W + "val") else None
+    return vanish, size, white
+
+
 class _Styles:
     def __init__(self, styles_el: Any) -> None:
         self.based: dict[str, str] = {}
         self.outline: dict[str, int] = {}
         self.vanish: dict[str, bool] = {}
+        self.size: dict[str, int] = {}
+        self.white: dict[str, bool] = {}
         self.default_paragraph: str | None = None
+        # w:docDefaults: what a run is when no style and no run property says otherwise
+        self.default_vanish, self.default_size, self.default_white = _rpr_facts(
+            styles_el.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+        )
         for st in styles_el.iterchildren(W + "style"):
             sid = st.get(W + "styleId")
             if not sid:
@@ -240,11 +364,16 @@ class _Styles:
             if based is not None and based.get(W + "val"):
                 self.based[sid] = str(based.get(W + "val"))
             outline = st.find(f"{W}pPr/{W}outlineLvl")
-            if outline is not None and (outline.get(W + "val") or "").isdigit():
-                self.outline[sid] = int(outline.get(W + "val"))
-            vanish = _on(st.find(f"{W}rPr/{W}vanish"))
+            level = _strict_small_int(outline.get(W + "val")) if outline is not None else None
+            if level is not None:
+                self.outline[sid] = level
+            vanish, size, white = _rpr_facts(st.find(f"{W}rPr"))
             if vanish is not None:
                 self.vanish[sid] = vanish
+            if size is not None:
+                self.size[sid] = size
+            if white is not None:
+                self.white[sid] = white
 
     def resolve(self, sid: str | None, table: dict[str, Any]) -> Any:
         seen = 0
@@ -265,10 +394,8 @@ def _heading_level(p: Any, styles: _Styles) -> int | None:
         style_id = pstyle.get(W + "val") if pstyle is not None else None
         direct = ppr.find(W + "outlineLvl")
     style_id = style_id or styles.default_paragraph
-    level: int | None = None
-    if direct is not None and (direct.get(W + "val") or "").isdigit():
-        level = int(direct.get(W + "val"))
-    else:
+    level = _strict_small_int(direct.get(W + "val")) if direct is not None else None
+    if level is None:
         level = styles.resolve(style_id, styles.outline)
     if level is not None:
         return level + 1 if 0 <= level < MAX_HEADING_LEVEL else None  # 9 means body text
@@ -281,22 +408,65 @@ def _heading_level(p: Any, styles: _Styles) -> int | None:
     return None
 
 
-def run_is_hidden(rpr: Any, styles: _Styles, para_hidden: bool) -> bool:
-    """w:vanish on the run, else on its character style chain, else on the paragraph's style chain."""
-    hidden = _on(rpr.find(W + "vanish")) if rpr is not None else None
-    if hidden is None and rpr is not None:
+class _RunDefaults:
+    """What a run of one paragraph is before its own properties: from the paragraph's style chain, else
+    the document defaults. `shaded` is True where white text is a header, not a trick."""
+
+    __slots__ = ("shaded", "size", "vanish", "white")
+
+    def __init__(self, vanish: bool, size: int | None, white: bool, shaded: bool) -> None:
+        self.vanish = vanish
+        self.size = size
+        self.white = white
+        self.shaded = shaded
+
+
+def _resolved(styles: _Styles, style_id: str | None, table: dict[str, Any], default: Any) -> Any:
+    value = styles.resolve(style_id, table)
+    return default if value is None else value
+
+
+def run_is_hidden(rpr: Any, styles: _Styles, defaults: _RunDefaults) -> bool:
+    """
+    True when a run is not visible to a reader: w:vanish or w:specVanish (on the run, else on its
+    character style chain, else the paragraph's style chain, else the document defaults); a size of 1 pt
+    or less; or white text (FFFFFF) where nothing behind it is shaded (the run's own shading or
+    highlight, the paragraph's, the cell's, or any table style: white on a dark fill is a header).
+    """
+    vanish, size, white = _rpr_facts(rpr)
+    shaded = defaults.shaded
+    if rpr is not None:
         rstyle = rpr.find(W + "rStyle")
-        if rstyle is not None:
-            hidden = styles.resolve(rstyle.get(W + "val"), styles.vanish)
-    return para_hidden if hidden is None else bool(hidden)
+        rstyle_id = rstyle.get(W + "val") if rstyle is not None else None
+        if rstyle_id:
+            if vanish is None:
+                vanish = styles.resolve(rstyle_id, styles.vanish)
+            if size is None:
+                size = styles.resolve(rstyle_id, styles.size)
+            if white is None:
+                white = styles.resolve(rstyle_id, styles.white)
+        highlight = rpr.find(W + "highlight")
+        shaded = shaded or _is_filled(rpr.find(W + "shd")) or (
+            highlight is not None and (highlight.get(W + "val") or "none").lower() != "none"
+        )
+    vanish = defaults.vanish if vanish is None else vanish
+    size = defaults.size if size is None else size
+    white = defaults.white if white is None else white
+    return bool(vanish) or (size is not None and size <= TINY_HALF_POINTS) or (bool(white) and not shaded)
 
 
-def _paragraph_text(p: Any, styles: _Styles) -> tuple[str, int]:
-    """Visible text of one paragraph and the number of hidden characters in it."""
+def _paragraph_text(p: Any, styles: _Styles, shaded: bool = False) -> tuple[str, int]:
+    """Visible text of one paragraph and the number of hidden characters in it. `shaded`: the paragraph
+    sits in a shaded cell or table."""
     ppr = p.find(W + "pPr")
     pstyle = ppr.find(W + "pStyle") if ppr is not None else None
     para_style = (pstyle.get(W + "val") if pstyle is not None else None) or styles.default_paragraph
-    para_hidden = bool(styles.resolve(para_style, styles.vanish))
+    defaults = _RunDefaults(
+        vanish=bool(_resolved(styles, para_style, styles.vanish, styles.default_vanish)),
+        size=_resolved(styles, para_style, styles.size, styles.default_size),
+        white=bool(_resolved(styles, para_style, styles.white, styles.default_white)),
+        shaded=shaded or (ppr is not None and _is_filled(ppr.find(W + "shd"))),
+    )
     visible: list[str] = []
     hidden = 0
     stack = list(reversed(list(p)))
@@ -304,7 +474,7 @@ def _paragraph_text(p: Any, styles: _Styles) -> tuple[str, int]:
         el = stack.pop()
         tag = el.tag
         if tag == W + "r":
-            run_hidden = run_is_hidden(el.find(W + "rPr"), styles, para_hidden)
+            run_hidden = run_is_hidden(el.find(W + "rPr"), styles, defaults)
             for part in el:
                 ptag = part.tag
                 if ptag == W + "t":
@@ -346,6 +516,40 @@ def _open_package(opener: Any, data: bytes) -> Any:
         raise GateError("parse_failed") from None  # validation passed, the library still refused
 
 
+_BLOCK_WRAPPERS = frozenset(W + tag for tag in ("sdt", "sdtContent", "customXml"))
+
+
+def _table_is_shaded(tbl: Any) -> bool:
+    """A table whose shading is not on its runs: a table style (which may shade rows) or its own w:shd."""
+    props = tbl.find(W + "tblPr")
+    return props is not None and (props.find(W + "tblStyle") is not None or _is_filled(props.find(W + "shd")))
+
+
+def _cell_paragraphs(tc: Any, shaded: bool) -> Iterator[tuple[Any, bool]]:
+    """
+    The paragraphs of one table cell in document order, each with its `shaded` flag: the cell's DIRECT w:p
+    children, the paragraphs of nested tables and of content controls. NOT tc.iter(): that also descends
+    into text boxes (w:txbxContent inside a drawing) and reads both the mc:Choice and the mc:Fallback
+    copy of each, which doubled their text (review of 5b-3, finding 9).
+    """
+    stack: list[tuple[Any, bool]] = [(child, shaded) for child in reversed(list(tc))]
+    while stack:
+        el, is_shaded = stack.pop()
+        tag = el.tag
+        if tag == W + "p":
+            yield el, is_shaded
+        elif tag == W + "tbl":
+            table_shaded = is_shaded or _table_is_shaded(el)
+            flat: list[tuple[Any, bool]] = []
+            for tr in el.iterchildren(W + "tr"):
+                for inner in tr.iterchildren(W + "tc"):
+                    cell_shaded = table_shaded or _is_filled(inner.find(f"{W}tcPr/{W}shd"))
+                    flat.extend((child, cell_shaded) for child in inner)
+            stack.extend(reversed(flat))
+        elif tag in _BLOCK_WRAPPERS:
+            stack.extend((child, is_shaded) for child in reversed(list(el)))
+
+
 def extract_docx(data: bytes, *, collector: Collector) -> bool:
     """Returns the Hindi/Marathi metadata hint."""
     import docx
@@ -364,12 +568,14 @@ def extract_docx(data: bytes, *, collector: Collector) -> bool:
             level = _heading_level(el, styles)
             collector.add("heading" if level else "para", text, level)
         elif tag == W + "tbl":
+            table_shaded = _table_is_shaded(el)
             for tr in el.iterchildren(W + "tr"):
                 cells: list[str] = []
                 for tc in tr.iterchildren(W + "tc"):
                     parts: list[str] = []
-                    for cp in tc.iter(W + "p"):
-                        text, hidden = _paragraph_text(cp, styles)
+                    cell_shaded = table_shaded or _is_filled(tc.find(f"{W}tcPr/{W}shd"))
+                    for cp, cp_shaded in _cell_paragraphs(tc, cell_shaded):
+                        text, hidden = _paragraph_text(cp, styles, cp_shaded)
                         collector.hidden_text_chars += hidden
                         parts.append(text)
                     cell = clean_text(" ".join(parts))
@@ -390,8 +596,12 @@ def _walk_shapes(shapes: Any, depth: int = 0) -> Iterator[Any]:
 
     for shape in shapes:
         if isinstance(shape, GroupShape):
-            if depth < MAX_SHAPE_DEPTH:
-                yield from _walk_shapes(shape.shapes, depth + 1)
+            if depth >= MAX_SHAPE_DEPTH:
+                # Text in a group nested deeper than the walker goes would be dropped without a trace. Real
+                # slides nest a handful of groups; a deeper chain is a refused file (documented limit,
+                # review of 5b-3): groups nested up to MAX_SHAPE_DEPTH levels are read.
+                raise GateError("xml_too_complex")
+            yield from _walk_shapes(shape.shapes, depth + 1)
         else:
             yield shape
 
@@ -471,28 +681,36 @@ def extract_plain(data: bytes, kind: str, *, collector: Collector) -> None:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     collector.begin_page(1)
     paragraph: list[str] = []
+    pending = 0  # characters waiting in `paragraph`
 
     def flush() -> None:
+        nonlocal pending
         if paragraph:
             collector.add("para", " ".join(paragraph))
             paragraph.clear()
+        pending = 0
 
     in_fence = False
-    for line in text.split("\n"):
+    for number, line in enumerate(text.split("\n")):
+        if number % 4096 == 0:
+            collector.check_time()  # a file of millions of short lines must meet the soft deadline too
         stripped = line.strip()
         if kind == "md":
             if _MD_FENCE_RE.match(line):
                 flush()
                 in_fence = not in_fence
                 continue
-            heading = None if in_fence else _MD_HEADING_RE.match(line)
+            heading = None if in_fence else _md_heading(line)
             if heading:
                 flush()
-                collector.add("heading", heading.group(2) or "", len(heading.group(1)))
+                collector.add("heading", heading[1], heading[0])
                 continue
         if not stripped:
             flush()
             continue
+        pending += len(stripped) + (1 if paragraph else 0)  # the joining space
+        if pending > collector.max_text_chars:
+            raise GateError("text_too_large")  # one paragraph over the whole cap: never join it
         paragraph.append(stripped)
     flush()
     collector.end_page()

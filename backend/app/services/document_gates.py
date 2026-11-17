@@ -13,13 +13,18 @@ scanned_pdf
 unreadable_text (garbled legacy-font Devanagari, Kruti Dev / DevLys style)
     1. Private Use Area: more than 30 % of the letters (alphabetic characters plus U+E000-U+F8FF) are
        private-use code points. Fonts that draw Devanagari from private-use slots produce these.
+       The Symbol-font range U+F000-U+F0FF is EXCLUDED from both counts: Word bullets (U+F0B7), Greek
+       letters and operators of Symbol-font equations live there, and a bullet- or equation-heavy file
+       is not garbled (review of 5b-3, finding 11). The price: a legacy font that happens to use that
+       range is not caught by this check.
     2. Latin-1 mojibake: more than 30 % of the non-space characters are "suspect" Latin-1 Supplement
        characters (U+00A1-U+00FF without the ones normal in English and maths: § © ® ° ± ² ³ µ ¶ · ¹
        « » ¿ ¡ × ÷), AND the text is Devanagari-targeted: the file's metadata names Hindi or Marathi
        (PDF /Lang, DOCX w:lang, PPTX a:rPr lang) or the text holds at least one Devanagari character.
        English text with accents stays around 5 % (tested).
     Known limit: legacy fonts whose codes are plain ASCII ("Hkkjr dk lafo/kku") look like Latin text
-    and are NOT detected; that needs a word-list or n-gram check (backlog B50).
+    and are NOT detected by this gate (neither of the two checks above sees them); that needs a
+    word-list or n-gram check (backlog B50).
 
 no_text_found, text_too_large, too_many_pages, too_many_slides are applied by the extractors.
 """

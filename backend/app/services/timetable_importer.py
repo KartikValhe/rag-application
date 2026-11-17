@@ -21,10 +21,6 @@ import logging
 import re
 from typing import Any
 
-import openpyxl
-import pdfplumber
-from docx import Document
-
 from app.core.upload_security import (
     UploadSecurityError,
     clean_plain_text,
@@ -32,6 +28,31 @@ from app.core.upload_security import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _import_openpyxl() -> Any:
+    """
+    openpyxl imports lxml (native code) as soon as it finds it installed, and offers no switch that stops
+    that import. The API process uses openpyxl only to WRITE the import templates and must not load native
+    parser libraries (review of 5b-3, finding 12; tests/test_review_5b3_deps.py), so lxml is made
+    unimportable for the duration of this one import: openpyxl then falls back to the standard library's
+    XML (with defusedxml, which it also finds). Entries are restored afterwards, so python-docx in the
+    sandboxed timetable child still gets lxml.
+    """
+    import importlib
+    import sys
+
+    had_lxml = "lxml" in sys.modules
+    if not had_lxml:
+        sys.modules["lxml"] = None  # type: ignore[assignment]  # `from lxml.etree import ...` now raises ImportError
+    try:
+        return importlib.import_module("openpyxl")
+    finally:
+        if not had_lxml:
+            sys.modules.pop("lxml", None)
+
+
+openpyxl: Any = _import_openpyxl()
 
 # ─── Synonyms and Dictionaries ────────────────────────────────────────────────
 
@@ -229,6 +250,10 @@ def parse_raw_xlsx(data: bytes) -> tuple[list[list[Any]], set[tuple[int, int]]]:
 
 def parse_raw_docx(data: bytes) -> list[list[str]]:
     """Extract table rows from DOCX document, capped at 5 tables and 500 rows."""
+    from docx import (
+        Document,  # lazy: the API process never imports python-docx or lxml (review of 5b-3)
+    )
+
     doc = Document(io.BytesIO(data))
     rows: list[list[str]] = []
     for table in doc.tables[:5]:
@@ -247,6 +272,8 @@ def parse_raw_pdf(data: bytes) -> list[list[str]]:
     Rejects scanned/raster-only PDFs (< 30 characters) and password-protected PDFs.
     Capped at 20 pages and 500 total rows.
     """
+    import pdfplumber  # lazy: pdfplumber loads PDFium; only the sandboxed child needs it
+
     rows: list[list[str]] = []
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:

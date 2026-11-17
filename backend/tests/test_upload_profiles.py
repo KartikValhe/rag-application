@@ -250,9 +250,9 @@ def test_ratio_cap_50_for_timetable_100_for_documents() -> None:
 
 
 def test_member_count_cap_for_documents() -> None:
-    many = make_zip({CT: CT_XML, "word/document.xml": EMPTY_XML, **{f"word/media/{i}.txt": b"a" for i in range(1000)}})
+    many = make_zip({CT: CT_XML, "word/document.xml": EMPTY_XML, **{f"word/media/{i}.png": b"a" for i in range(1000)}})
     assert reject(many, "a.docx") == "zip_bomb_detected"
-    ok = make_zip({CT: CT_XML, "word/document.xml": EMPTY_XML, **{f"word/media/{i}.txt": b"a" for i in range(500)}})
+    ok = make_zip({CT: CT_XML, "word/document.xml": EMPTY_XML, **{f"word/media/{i}.png": b"a" for i in range(500)}})
     assert validate_upload(ok, "a.docx", DOC) == "docx"
     assert reject(ok, "a.docx", TT) == "zip_bomb_detected"  # timetable cap is 200
 

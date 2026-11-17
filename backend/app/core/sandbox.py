@@ -17,6 +17,9 @@ Shared by the timetable import (services/timetable_parser_runner.py) and the doc
   `taskkill /T` on Windows);
 - kills the child as well when the calling task is cancelled (a stopped job must not leave a parser
   running);
+- parses the child's answer in two ways: `parse_child_json` (timetable import: lenient) and
+  `parse_child_json_strict` (document parser): the child is untrusted, so the strict one bounds the answer
+  BEFORE anything is built (see its docstring);
 - logs an abnormal exit with the exit code, the signal name and the exception CLASS name only
   (a strict marker line from sandbox_child), never stderr text, paths or content.
 
@@ -97,6 +100,13 @@ class SandboxCrash(SandboxError):
     """The child exited without a usable result (crash, kill, garbage on stdout)."""
 
     code = "worker_crash"
+
+
+class SandboxOutputInvalid(SandboxError):
+    """The child answered, but not with JSON the parent accepts (syntax, duplicate keys, NaN, nesting ...).
+    A hostile or broken answer is the FILE's problem and does not get better by trying again: permanent."""
+
+    code = "parse_output_invalid"
 
 
 # ── Environment ──────────────────────────────────────────────────────────────
@@ -387,14 +397,135 @@ async def run_child(
         raise
 
 
+def _decode(raw: bytes) -> str:
+    """Strict UTF-8 (the child writes UTF-8). json.loads(bytes) would also guess UTF-16 and UTF-32."""
+    return raw.decode("utf-8")
+
+
 def parse_child_json(raw: bytes) -> dict[str, Any]:
-    """The child's one JSON object, or SandboxCrash (empty or unreadable output)."""
+    """The child's one JSON object, or SandboxCrash (empty or unreadable output). Lenient: used by the
+    timetable import, whose child is bounded by its byte cap alone."""
     if not raw:
         raise SandboxCrash()
     try:
-        result = json.loads(raw)
-    except ValueError:
+        result = json.loads(_decode(raw))
+    except (ValueError, RecursionError):  # also UnicodeDecodeError; a deeply nested answer
         raise SandboxCrash() from None
     if not isinstance(result, dict):
         raise SandboxCrash()
+    return result
+
+
+# ── The strict parser for the document child ─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class JsonLimits:
+    """What a legitimate answer can never exceed (the caller derives both from its contract)."""
+
+    max_structure: int  # commas + opening braces + opening brackets, outside strings
+    max_depth: int  # nesting of objects and arrays
+
+
+_MAX_INT_DIGITS = 18  # the answer holds small counters only
+# One JSON string, skipped with possessive quantifiers (Python 3.11+): linear, no backtracking stack
+_STRING_RE = re.compile(rb'"(?:[^"\\]++|\\.)*+"', re.DOTALL)
+_BAD_STRING_RE = re.compile("[\x00\ud800-\udfff]")  # NUL and lone surrogates
+
+
+def _check_structure(raw: bytes, limits: JsonLimits) -> None:
+    """Phase 1, on the raw bytes and before anything is decoded or built: count the structural tokens. The
+    strings are cut out first (one C-speed regex pass), so a comma inside a text does not count and the
+    count is exact for a valid answer. A hostile `[{},{},{}, ...]` of 12 MB would otherwise cost
+    hundreds of MB as Python objects."""
+    bare = _STRING_RE.sub(b'""', raw)
+    if bare.count(b",") + bare.count(b"{") + bare.count(b"[") > limits.max_structure:
+        raise SandboxOutputTooLarge()
+
+
+def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate key")  # {"success": false, "success": true} is ambiguous
+        out[key] = value
+    return out
+
+
+def _reject_constant(_name: str) -> Any:
+    raise ValueError("NaN or Infinity")
+
+
+def _reject_float(_text: str) -> Any:
+    raise ValueError("float")  # the answer has none
+
+
+def _parse_int(text: str) -> int:
+    if len(text) > _MAX_INT_DIGITS:
+        raise ValueError("integer too long")
+    return int(text)
+
+
+def _depth_ok(depth: int, limits: JsonLimits) -> bool:
+    return depth <= limits.max_depth
+
+
+def _string_ok(value: str) -> bool:
+    return _BAD_STRING_RE.search(value) is None
+
+
+def _check_tree(root: object, limits: JsonLimits) -> None:
+    """Phase 3, on the parsed value with an explicit stack: nesting depth, and no NUL or lone surrogate in
+    any string or key. Bounded by phase 1, so the walk is bounded too."""
+    stack: list[tuple[object, int]] = [(root, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            if not _depth_ok(depth, limits):
+                raise SandboxOutputInvalid()
+            for key, value in item.items():
+                if not _string_ok(key):
+                    raise SandboxOutputInvalid()
+                stack.append((value, depth + 1))
+        elif isinstance(item, list):
+            if not _depth_ok(depth, limits):
+                raise SandboxOutputInvalid()
+            stack.extend((value, depth + 1) for value in item)
+        elif isinstance(item, str) and not _string_ok(item):
+            raise SandboxOutputInvalid()
+
+
+def parse_child_json_strict(raw: bytes, *, limits: JsonLimits) -> dict[str, Any]:
+    """
+    The document child's one JSON object. The child is untrusted (a parser exploit makes it write anything),
+    so this is a two-phase parse, every phase bounded:
+
+      1. `_check_structure` on the raw bytes: the number of structural tokens is capped
+         (SandboxOutputTooLarge, parse_output_too_large) before a single object exists;
+      2. strict UTF-8, then json.loads with hooks: duplicate keys, NaN and Infinity, floats and integers of
+         more than 18 digits are refused; nesting beyond the interpreter's recursion limit raises
+         RecursionError, and any ValueError (syntax, huge ints, bad UTF-8, a BOM, trailing text) is mapped;
+         both become SandboxOutputInvalid (parse_output_invalid);
+      3. `_check_tree` on the result: nesting depth and no NUL or lone surrogate anywhere.
+
+    Empty output is still a crash (the child never answered). The byte cap was applied while reading.
+    """
+    if not raw:
+        raise SandboxCrash()
+    try:
+        _check_structure(raw, limits)
+        result = json.loads(
+            _decode(raw),
+            object_pairs_hook=_pairs_hook,
+            parse_constant=_reject_constant,
+            parse_float=_reject_float,
+            parse_int=_parse_int,
+        )
+    except SandboxError:
+        raise
+    except (ValueError, RecursionError):
+        raise SandboxOutputInvalid() from None
+    if not isinstance(result, dict):
+        raise SandboxOutputInvalid()
+    _check_tree(result, limits)
     return result

@@ -235,6 +235,12 @@ The document ingestion worker parses untrusted files in a child process (`app/co
 
 **Windows and macOS have none of these protections** (no non-dumpable flag, no rlimits, no parent-death signal, no container). Use them for development only.
 
+### Parser dependencies, and what `pip-audit` cannot see
+
+The libraries that parse untrusted files are **pinned to exact versions** in `backend/pyproject.toml`: `pypdfium2`, `python-docx`, `lxml`, `Pillow` (base dependencies, because the API image also runs the timetable import children and validates branding images) and `python-pptx` (document parser only). The `parser` extra lists the full set the sandboxed document parser needs (`pip install ".[parser]"`; `".[dev]"` includes it). The API **process** never imports `pypdfium2`, `python-docx`, `python-pptx` or `lxml` (`tests/test_review_5b3_deps.py` imports the app with them blocked, and again without the blocker).
+
+**`pip-audit` cannot see PDFium CVEs.** `pypdfium2` wheels bundle a compiled PDFium; the PyPI advisory database that `pip-audit` reads does not list PDFium's own vulnerabilities (they are published as Chromium/PDFium security fixes). A clean `pip-audit` therefore says nothing about the bundled PDFium. **Review the pinned `pypdfium2` version on each release**: check which PDFium build the wheel contains and whether a newer wheel carries security fixes, then bump the pin together with the test run.
+
 ### Document parser benchmark (manual, real files never committed)
 
 `python -m app.scripts.bench_parse <folder>` (from `backend/`) parses every PDF, DOCX, PPTX, TXT and MD file in a folder exactly as the worker does (same sandboxed child, same parent-side checks) and prints per file: format, pages, characters, script guess, gate result, seconds and peak memory. It needs no database, Redis or settings. Put real syllabus files in `backend/tests/fixtures/real_corpus/`: that folder is in `.gitignore`, and **real documents are never committed** (they may hold personal or copyrighted content). It is not a test and does not run in CI.

@@ -7,8 +7,10 @@ Error classification for the ingestion worker (design A3, "Failures, retries and
   scanned_pdf, parse_timeout, too_many_pages, quotas ...). The version becomes `failed` with the
   code, the job `failed`. No retry.
 - TransientIngestError: an outage (database, Redis, storage) or a crashed child (worker_crash). The
-  job goes back to `queued` with exponential backoff, up to INGEST_MAX_ATTEMPTS, then the version
-  fails with `processing_failed` (which the API lets a user retry).
+  job goes back to `queued` with exponential backoff, up to INGEST_MAX_ATTEMPTS (a crash: the smaller
+  INGEST_MAX_CRASH_ATTEMPTS), then the version fails with `processing_failed` (which the API lets a
+  user retry). An exception the document child catches itself is NOT a crash: it answers parse_failed,
+  which is permanent.
 
 Codes are stable strings; no exception text, path or document content is ever stored or logged.
 """
@@ -72,6 +74,10 @@ PERMANENT_ERROR_CODES: frozenset[str] = frozenset(
 TRANSIENT_ERROR_CODES: frozenset[str] = frozenset(
     {"worker_crash", "db_unavailable", "redis_unavailable", "storage_unavailable", "slot_lease_lost"}
 )
+
+# The transient code of a dead parser child or a stage bug: its attempt budget is smaller
+# (INGEST_MAX_CRASH_ATTEMPTS, see ingest._requeue_transient).
+CRASH_CODE = "worker_crash"
 
 # The code a version gets when the transient attempts run out (design A3).
 EXHAUSTED_ERROR_CODE = "processing_failed"
