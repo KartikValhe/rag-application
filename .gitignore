@@ -23,6 +23,8 @@ uploads/
 backend/uploads/
 document_store/
 backend/document_store/
+# Real syllabus files for app.scripts.bench_parse: never committed
+backend/tests/fixtures/real_corpus/
 
 # Node / Frontend
 frontend/node_modules/

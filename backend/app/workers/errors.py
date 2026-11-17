@@ -52,6 +52,7 @@ PERMANENT_ERROR_CODES: frozenset[str] = frozenset(
         "parse_timeout",
         "parse_failed",
         "parse_output_too_large",
+        "parse_output_invalid",  # the parent refused the child's answer (5b-3)
         "text_too_large",
         "no_text_found",
         "unreadable_text",

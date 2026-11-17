@@ -198,3 +198,28 @@ These are values of `error_code` on a version (`DocumentVersionResponse`, `Docum
 | `job_time_limit_exceeded` | no (`version_not_retryable`) | Processing ran for the maximum job time (`INGEST_MAX_JOB_SECONDS`, default 30 minutes) and was stopped. Permanent: a retry would reach the same cap, so the job is not retried automatically either. Upload a smaller or simpler file. |
 
 Unchanged for comparison: `processing_failed` (the transient attempts ran out: retryable) and `worker_crash` (retryable). An outage of Redis or the database at the moment a job starts no longer uses up attempts: the version stays `queued` and is processed when the service is back.
+
+## 9. Parser error codes and quality gates (5b-3)
+
+Values of `error_code` on a version (`DocumentVersionResponse`, `DocumentStatusResponse`) written by the ingestion worker's parse stage; never an HTTP error body. Every code is **permanent** (the version is `failed`, `POST .../retry` answers `409 version_not_retryable`) and has one fixed message; no file name, path, library text or document content ever appears. Upload a corrected file as a new version instead.
+
+| Code | Message (fixed) | When |
+|---|---|---|
+| `scanned_pdf` | The PDF looks scanned: it has almost no selectable text. | Fewer than 20 non-space characters on 80 % or more of ALL pages (empty pages count). There is no OCR in v1. |
+| `unreadable_text` | The text uses a font that cannot be read (garbled characters). | (1) More than 30 % of the letters are Private Use Area code points (U+E000-U+F8FF), or (2) more than 30 % of the non-space characters are "suspect" Latin-1 characters (U+00A1-U+00FF without § © ® ° ± ² ³ µ ¶ · ¹ « » ¿ ¡ × ÷) **and** the file is Devanagari-targeted (PDF `/Lang`, DOCX `w:lang` or PPTX `lang` naming `hi` or `mr`, or at least one Devanagari character in the text). Exactly 30 % passes. |
+| `no_text_found` | No text was found in the document. | Nothing is left after cleaning (DOCX, PPTX, TXT, MD; a PDF without text is `scanned_pdf`). |
+| `text_too_large` | The document contains more text than can be processed. | More than `DOC_MAX_TEXT_CHARS` (2,000,000) characters after cleaning, more than 500,000 characters on one PDF page, more than 100,000 blocks, or more than 50,000 blocks on one page. Exactly at the limit passes. |
+| `too_many_pages` | The PDF has too many pages to process. | The page count **the parser sees** is above the tenant's `max_pdf_pages` (also when the upload scan could not count the pages, backlog B33). |
+| `too_many_slides` | The presentation has too many slides to process. | The slide count the parser sees is above the tenant's `max_pptx_slides`. |
+| `corrupt_pdf` | The PDF document could not be read. | PDFium cannot open the file or a page. |
+| `password_protected_pdf` | The PDF is password protected. Remove the password and upload it again. | The PDF needs a password. |
+| `pdf_too_complex` | The PDF is too large or complex to process. | Also: a page wider or taller than 14,400 points (200 inches). |
+| `parse_timeout` | Processing the document took too long. | The child's own soft deadline (80 % of `DOC_PARSE_TIMEOUT_SECONDS`) or the wall clock. |
+| `parse_failed` | The document could not be processed. | The library refused a file that passed validation, or the child sent an unknown code. |
+| `parse_output_invalid` | The document could not be processed. | **New.** The parent refused the child's answer: it broke the contract (types, extra keys, page order, control characters, statistics that do not match). Seen only with a broken or compromised parser. |
+| `parse_output_too_large` | The document could not be processed. | The child's answer was over the output size or a hard cap (pages, blocks, characters per block). |
+| `quota_pages_exceeded` | Your organisation has reached its page limit. | The parsed page count would take the tenant over `max_pages` (check function and hook exist since 5b-3; enforced from 5c). |
+
+The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_mismatch`, `corrupt_archive` ...) can also appear here, because the parse stage re-runs the upload validation first. **Change in 5b-3:** for documents every `.xml` part of a DOCX or PPTX (also `docProps/` and `customXml/`) must parse with defusedxml; a `DOCTYPE` with entities anywhere gives `xml_entity_expansion_forbidden`.
+
+**What the parser extracts** (for the frontend's "why is this text missing" help): PDF text per page; DOCX body paragraphs, headings and tables (not headers, footers, footnotes, comments, text boxes or images; hidden text and tracked deletions are skipped but counted); PPTX slide titles, text boxes, tables and speaker notes (hidden slides included); TXT and MD paragraphs and `#` headings.

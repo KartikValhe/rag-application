@@ -29,7 +29,12 @@ dependencies = [
     "jinja2>=3.1.4",
     # File parsing & upload safety
     "openpyxl>=3.1.5",
-    "python-docx>=1.1.2",
+    # Document parser (step 5b-3), pinned exactly: they parse untrusted files in the sandbox child.
+    # Licences and wheels (Windows x64, Linux x86_64 and aarch64, Python 3.12) recorded in
+    # docs/phase5-design.md section 0d and the 5b-3 record.
+    "python-docx==1.2.0",
+    "python-pptx==1.0.2",
+    "pypdfium2==5.15.2",
     "pdfplumber>=0.11.0",
     "defusedxml>=0.7.1",
     # Utilities
@@ -70,7 +75,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 # Third-party libraries that lack official PEP 561 py.typed markers or type stub packages.
-# These libraries (openpyxl, python-docx, pdfplumber, defusedxml) do not ship type definitions,
+# These libraries (openpyxl, python-docx, python-pptx, pypdfium2, pdfplumber, defusedxml) do not ship type definitions,
 # so we instruct mypy to ignore missing imports for them while maintaining strict type
 # checking across all internal application code.
 [[tool.mypy.overrides]]
@@ -81,6 +86,10 @@ module = [
     "openpyxl.*",
     "docx",
     "docx.*",
+    "pptx",
+    "pptx.*",
+    "pypdfium2",
+    "pypdfium2.*",
     "pdfplumber",
     "pdfplumber.*",
 ]

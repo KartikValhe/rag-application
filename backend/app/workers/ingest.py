@@ -139,6 +139,7 @@ class IngestSettings:
                 max_output_bytes=s.DOC_PARSE_MAX_OUTPUT_BYTES,
                 memory_limit_mb=s.DOC_PARSE_MEMORY_LIMIT_MB,
                 cpu_seconds=s.DOC_PARSE_CPU_SECONDS,
+                max_text_chars=s.DOC_MAX_TEXT_CHARS,
             ),
         )
 

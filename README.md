@@ -235,6 +235,10 @@ The document ingestion worker parses untrusted files in a child process (`app/co
 
 **Windows and macOS have none of these protections** (no non-dumpable flag, no rlimits, no parent-death signal, no container). Use them for development only.
 
+### Document parser benchmark (manual, real files never committed)
+
+`python -m app.scripts.bench_parse <folder>` (from `backend/`) parses every PDF, DOCX, PPTX, TXT and MD file in a folder exactly as the worker does (same sandboxed child, same parent-side checks) and prints per file: format, pages, characters, script guess, gate result, seconds and peak memory. It needs no database, Redis or settings. Put real syllabus files in `backend/tests/fixtures/real_corpus/`: that folder is in `.gitignore`, and **real documents are never committed** (they may hold personal or copyrighted content). It is not a test and does not run in CI.
+
 ---
 
 ---

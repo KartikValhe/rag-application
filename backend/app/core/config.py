@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     DOC_PARSE_MAX_OUTPUT_BYTES: int = 20 * 1024 * 1024
     DOC_PARSE_MEMORY_LIMIT_MB: int = 1024  # 768 on 2 GB hosts
     DOC_PARSE_CPU_SECONDS: int = 120
+    DOC_MAX_TEXT_CHARS: int = 2_000_000  # extracted characters per version (text_too_large); hard ceiling too
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property

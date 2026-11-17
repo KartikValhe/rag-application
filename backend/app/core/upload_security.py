@@ -629,11 +629,15 @@ def _sniff_openxml_format(
             main_part = OPENXML_MAIN_PARTS[kind]
             _scan_xml(zf, members[main_part], count_slide_ids if kind == "pptx" else None)
 
-            # Every other XML part of word/ and xl/ must parse (fail closed). ppt/ parts are parsed
-            # for the document profile only: the timetable importer refuses pptx later anyway.
-            prefixes = ("word/", "xl/") + (("ppt/",) if rules.parse_all_ppt_parts else ())
+            # Every other XML part of word/ and xl/ must parse (fail closed). For the document profile
+            # EVERY .xml part does, wherever it lives (ppt/, docProps/, customXml/ ...): python-docx
+            # and python-pptx load those parts in the parser child (step 5b-3 found docProps/core.xml
+            # reaching the library unchecked). The timetable importer refuses pptx later anyway.
+            prefixes = ("word/", "xl/")
             for key, info in members.items():
-                if key.startswith(prefixes) and key.endswith(".xml") and key != main_part and not info.is_dir():
+                if info.is_dir() or not key.endswith(".xml") or key in (main_part, "[content_types].xml"):
+                    continue
+                if rules.parse_all_ppt_parts or key.startswith(prefixes):
                     _scan_xml(zf, info)
 
             ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
