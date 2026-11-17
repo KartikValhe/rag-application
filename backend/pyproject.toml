@@ -63,8 +63,21 @@ parser = [
     "lxml==6.1.3",
     "pillow==13.0.0",
 ]
+# The embedding layer (app/ml): ONNX Runtime plus the Rust tokenizer, numpy only. No torch, no transformers,
+# no huggingface_hub of our own (tokenizers 0.23.3 lists huggingface-hub as an install requirement, but
+# nothing here imports it: tests/test_ml_embedder.py). The worker image installs it, and so does the API image
+# when it embeds queries (design A5); the base dependencies above do NOT need it. Wheels for Python 3.12 on
+# Windows x64, Linux x86_64 and Linux aarch64 are verified in docs/phase5-design.md section 0d (numpy: 5c-1).
+ml = [
+    "onnxruntime==1.32.0",
+    "tokenizers==0.23.3",
+    "numpy==2.5.5",
+]
 dev = [
     "rag-platform-backend[parser]",
+    "rag-platform-backend[ml]",
+    # Builds the tiny synthetic test model (tests/fixtures/ml.py); never needed at runtime.
+    "onnx==1.23.2",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
@@ -109,6 +122,11 @@ module = [
     "pypdfium2.*",
     "pdfplumber",
     "pdfplumber.*",
+    # The embedding layer's libraries are imported lazily; only these ship no usable type information.
+    "onnxruntime",
+    "onnxruntime.*",
+    "tokenizers",
+    "tokenizers.*",
 ]
 ignore_missing_imports = true
 
@@ -121,6 +139,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-v --tb=short"
 markers = [
+    "real_model: needs the real embedding model files on disk; skipped unless RUN_REAL_MODEL=1",
     "machine_dependent: wall-clock bounds; generous and relative to a baseline, but they can still fail on a very slow or loaded machine",
 ]
 

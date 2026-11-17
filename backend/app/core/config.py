@@ -8,7 +8,7 @@ Nothing in this codebase ever reads os.environ directly — always use `settings
 from functools import lru_cache
 
 import email_validator
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Permit local development domains (.local, .localhost, .internal) in EmailStr validation
@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     DOC_PARSE_MEMORY_LIMIT_MB: int = 1024  # 768 on 2 GB hosts
     DOC_PARSE_CPU_SECONDS: int = 120
     DOC_MAX_TEXT_CHARS: int = 2_000_000  # extracted characters per version (text_too_large); hard ceiling too
+
+    # ── Embedding model (app/ml, step 5c-1) ─────────────────────────────────
+    # Local, verified model files only: nothing is ever downloaded at runtime (python -m app.scripts.fetch_model
+    # is the one operator command that does). Empty means "not configured": the embedder refuses to load.
+    EMBEDDING_MODEL_DIR: str = ""  # holds <dir>/<model name>/<files of models.lock.json>
+    EMBEDDING_MODEL_ID: str = "e5-small"  # a name from app/ml/models.lock.json (or its repo@revision key)
+    EMBEDDING_BATCH_SIZE: int = Field(default=16, ge=1, le=256)  # texts per model run (8 on 2 GB hosts)
+    EMBEDDING_THREADS: int = Field(default=1, ge=1, le=64)  # onnxruntime intra-op threads
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property

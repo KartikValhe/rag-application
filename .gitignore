@@ -23,6 +23,8 @@ uploads/
 backend/uploads/
 document_store/
 backend/document_store/
+# Embedding model files (hundreds of MB, fetched by python -m app.scripts.fetch_model): never committed
+backend/models/
 # Real syllabus files for app.scripts.bench_parse: never committed
 backend/tests/fixtures/real_corpus/
 

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "models": {
+    "e5-small": {
+      "repo": "intfloat/multilingual-e5-small",
+      "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+      "embedder": "OnnxE5Embedder",
+      "model_file": "onnx/model.onnx",
+      "tokenizer_file": "onnx/tokenizer.json",
+      "files": [
+        {
+          "path": "onnx/model.onnx",
+          "sha256": "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
+          "size": 470268510
+        },
+        {
+          "path": "onnx/tokenizer.json",
+          "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+          "size": 17082730
+        }
+      ],
+      "dim": 384,
+      "max_tokens": 512,
+      "pooling": "mean",
+      "pad_token": "<pad>",
+      "prefixes": {"query": "query: ", "passage": "passage: "},
+      "license": "MIT",
+      "status": "pinned",
+      "notes": "revision, sha256 and size copied from docs/phase5-design.md section 0d (Hugging Face tree API, 2026-11-15); NOT yet recomputed from a download: the first `fetch_model e5-small` run recomputes them. The ONNX output tensor name and the vector parity against the reference (check_onnx_parity) are UNVERIFIED until that run."
+    },
+    "bge-m3": {
+      "repo": "BAAI/bge-m3",
+      "revision": null,
+      "embedder": "OnnxBgeM3Embedder",
+      "model_file": null,
+      "tokenizer_file": null,
+      "files": [],
+      "dim": 1024,
+      "max_tokens": 8192,
+      "pooling": "cls",
+      "pad_token": "<pad>",
+      "prefixes": {"query": "", "passage": ""},
+      "license": "MIT",
+      "status": "UNVERIFIED",
+      "notes": "upgrade path only. Design 0d records no commit SHA, ONNX file layout, file sizes or sha256 for bge-m3, so none are guessed: the revision and files stay empty and the loader refuses this entry. To pin it: download the ONNX export you choose by hand into <dir>/bge-m3/, run `python -m app.scripts.fetch_model bge-m3 --print-hashes --file <path> ...`, review the output, and fill the entry in by hand."
+    }
+  }
+}

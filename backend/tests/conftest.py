@@ -40,6 +40,12 @@ from app.main import app
 from app.services.rbac import seed_tenant_system_roles
 from tests.fixtures.academic_world import academic_world  # noqa: F401  (pytest fixture)
 from tests.fixtures.documents import document_store_root  # noqa: F401  (pytest fixture)
+from tests.fixtures.ml import (  # noqa: F401  (pytest fixtures)
+    synthetic_bge,
+    synthetic_bge_template,
+    synthetic_e5,
+    synthetic_e5_template,
+)
 from tests.fixtures.worker import ingest_slots, quiet_queue, worker_dbs  # noqa: F401  (pytest fixtures)
 
 # ── Database setup ────────────────────────────────────────────────────────────
@@ -89,6 +95,44 @@ def _check_migration_head() -> None:
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     _check_migration_head()
+
+
+REAL_MODEL_SKIP_REASON = (
+    "real_model: needs the real e5-small files (python -m app.scripts.fetch_model e5-small, then set "
+    "EMBEDDING_MODEL_DIR); run with RUN_REAL_MODEL=1"
+)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Tests marked `real_model` need the real embedding files: skipped unless RUN_REAL_MODEL=1."""
+    if os.environ.get("RUN_REAL_MODEL") == "1":
+        return
+    skip = pytest.mark.skip(reason=REAL_MODEL_SKIP_REASON)
+    for item in items:
+        if "real_model" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture
+def block_sockets(monkeypatch: pytest.MonkeyPatch):
+    """Fail any attempt to open a network connection or resolve a host name (used by the ML tests: the
+    embedders, the loader and the fake never touch the network). The event loop's own socketpair and
+    local files are not affected; only connect, DNS and datagram sends are."""
+    import socket
+
+    class NetworkBlocked(AssertionError):
+        pass
+
+    def refuse(*_a: object, **_k: object):
+        raise NetworkBlocked("a test tried to open a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    monkeypatch.setattr(socket.socket, "sendto", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket, "gethostbyname", refuse)
+    yield NetworkBlocked
 
 
 @pytest.fixture(scope="session", autouse=True)

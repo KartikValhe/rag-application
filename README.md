@@ -241,6 +241,35 @@ The libraries that parse untrusted files are **pinned to exact versions** in `ba
 
 **`pip-audit` cannot see PDFium CVEs.** `pypdfium2` wheels bundle a compiled PDFium; the PyPI advisory database that `pip-audit` reads does not list PDFium's own vulnerabilities (they are published as Chromium/PDFium security fixes). A clean `pip-audit` therefore says nothing about the bundled PDFium. **Review the pinned `pypdfium2` version on each release**: check which PDFium build the wheel contains and whether a newer wheel carries security fixes, then bump the pin together with the test run.
 
+### Embedding model (operator steps; step 5c-1)
+
+The embedder (`backend/app/ml/`, design A1) runs **multilingual-e5-small** locally through ONNX Runtime: no torch, no `transformers`, no `huggingface_hub`, and no student or document text leaves the system. The model files are **never downloaded by the API, the worker or the tests**. Exactly one operator command downloads them, and everything else reads verified local files.
+
+The pinned model (repository, commit, file names, sizes and sha256) is in `backend/app/ml/models.lock.json`; `app/ml/model_keys.py` keeps the key stored in the database. Install the libraries with the `ml` extra (`pip install ".[ml]"`; `".[dev]"` includes it; the API image needs it only because the API embeds queries lazily).
+
+```bash
+# 1. Download and verify (from backend/). About 490 MB. Run it on a build or admin machine, not at runtime.
+python -m app.scripts.fetch_model e5-small --out ./models
+#    -> ./models/e5-small/onnx/model.onnx and ./models/e5-small/onnx/tokenizer.json
+#    HTTPS only, redirects only to huggingface.co and its CDN hosts, size and sha256 checked against the lock file,
+#    the file is moved into place only when it matches; on a mismatch the download is deleted and the command exits non-zero.
+
+# 2. Point the app at the directory (settings, see .env.example)
+#    EMBEDDING_MODEL_DIR=./models      EMBEDDING_MODEL_ID=e5-small
+#    EMBEDDING_BATCH_SIZE=16           EMBEDDING_THREADS=1
+
+# 3. Optional manual checks (not tests, not in CI)
+python -m app.scripts.check_onnx_parity     # cosine > 0.999 against a reference on 50 en/hi/mr sentences
+python -m app.scripts.bench_embed           # texts/s, tokens/s and peak RSS for batch sizes 1, 8, 16, 32
+RUN_REAL_MODEL=1 pytest tests/test_ml_real_model.py   # model-quality checks on the real files (skipped by default)
+```
+
+- **At start-up** the loader re-verifies the size and sha256 of every file (a second or two for 470 MB), refuses an extra file, a symlink or an entry marked `UNVERIFIED`, and then loads only the ONNX protobuf and `tokenizer.json`. A missing or changed file stops the service with a clear message. It never opens a network connection.
+- **Memory:** about 0.5 GB resident per process for e5-small (fp32), plus activations that grow with `EMBEDDING_BATCH_SIZE` (design C3; **UNVERIFIED** until `bench_embed` runs). The API loads the model lazily on the first query, once per process, so run few API workers (`WEB_CONCURRENCY` 1-2). Use `EMBEDDING_BATCH_SIZE=8` on a 2 GB worker.
+- **Production images bake the verified files in** (`COPY` the directory from a build stage that ran `fetch_model`) and run with **no outbound network** for this purpose; keep the directory read-only for the service user. Nothing in the image build or at runtime may call Hugging Face except that one build step.
+- **A new or changed model** (for example `bge-m3`, still `UNVERIFIED` in the lock file) is first reviewed with `python -m app.scripts.fetch_model <name> --print-hashes [--file PATH ...]`, which prints the size and sha256 of the files you already have and writes nothing, and then pinned in the lock file by hand in a reviewed change.
+- `fetch_model` has no proxy support (`trust_env` is off on purpose, so a `~/.netrc` or proxy variable cannot add credentials). If a redirect to a host outside the allow-list is refused, the host is printed: review it before adding it to `ALLOWED_HOST_SUFFIXES`.
+
 ### Document parser benchmark (manual, real files never committed)
 
 `python -m app.scripts.bench_parse <folder>` (from `backend/`) parses every PDF, DOCX, PPTX, TXT and MD file in a folder exactly as the worker does (same sandboxed child, same parent-side checks) and prints per file: format, pages, characters, script guess, gate result, seconds and peak memory. It needs no database, Redis or settings. Put real syllabus files in `backend/tests/fixtures/real_corpus/`: that folder is in `.gitignore`, and **real documents are never committed** (they may hold personal or copyrighted content). It is not a test and does not run in CI.

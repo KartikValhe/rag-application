@@ -1,0 +1,52 @@
+# 50 neutral sentences for python -m app.scripts.check_onnx_parity (17 English, 17 Hindi, 16 Marathi).
+# Written for this project; not copied from any source. Format: <language>|<sentence>. Lines starting with # are ignored.
+en|The library opens at nine in the morning and closes at six in the evening.
+en|Water boils at a lower temperature on top of a high mountain.
+en|The teacher asked the students to read the second chapter before the next class.
+en|A triangle has three sides and the sum of its angles is one hundred and eighty degrees.
+en|Plants make their food using sunlight, water and carbon dioxide.
+en|The final examination will be held in the first week of March.
+en|Please submit your assignment through the school portal by Friday.
+en|The river flows from the northern hills to the sea in the south.
+en|Force is equal to mass multiplied by acceleration.
+en|The syllabus for this term includes four units and two practical sessions.
+en|Photosynthesis takes place mainly in the leaves of a plant.
+en|The museum is closed on the first Monday of every month.
+en|Every student must carry an identity card while inside the campus.
+en|The ancient city was built near a river so that farmers could grow crops.
+en|A fraction with the same numerator and denominator is equal to one.
+en|The class will visit the science exhibition on Wednesday afternoon.
+en|Honey does not spoil easily when it is stored in a clean, dry container.
+hi|पुस्तकालय सुबह नौ बजे खुलता है और शाम छह बजे बंद हो जाता है।
+hi|ऊँचे पहाड़ की चोटी पर पानी कम तापमान पर उबलता है।
+hi|शिक्षक ने विद्यार्थियों से अगली कक्षा से पहले दूसरा अध्याय पढ़ने को कहा।
+hi|त्रिभुज की तीन भुजाएँ होती हैं और उसके कोणों का योग एक सौ अस्सी अंश होता है।
+hi|पौधे सूर्य के प्रकाश, पानी और कार्बन डाइऑक्साइड से अपना भोजन बनाते हैं।
+hi|अंतिम परीक्षा मार्च के पहले सप्ताह में होगी।
+hi|कृपया अपना गृहकार्य शुक्रवार तक विद्यालय के पोर्टल पर जमा करें।
+hi|नदी उत्तर की पहाड़ियों से निकलकर दक्षिण में समुद्र तक बहती है।
+hi|बल द्रव्यमान और त्वरण के गुणनफल के बराबर होता है।
+hi|इस सत्र के पाठ्यक्रम में चार इकाइयाँ और दो प्रायोगिक कक्षाएँ शामिल हैं।
+hi|प्रकाश संश्लेषण मुख्य रूप से पौधे की पत्तियों में होता है।
+hi|संग्रहालय हर महीने के पहले सोमवार को बंद रहता है।
+hi|परिसर के अंदर हर विद्यार्थी को पहचान पत्र साथ रखना होगा।
+hi|प्राचीन नगर नदी के पास बसाया गया था ताकि किसान फसल उगा सकें।
+hi|जिस भिन्न का अंश और हर समान हो, उसका मान एक होता है।
+hi|कक्षा बुधवार दोपहर को विज्ञान प्रदर्शनी देखने जाएगी।
+hi|साफ और सूखे डिब्बे में रखने पर शहद जल्दी खराब नहीं होता।
+mr|ग्रंथालय सकाळी नऊ वाजता उघडते आणि संध्याकाळी सहा वाजता बंद होते.
+mr|उंच डोंगराच्या शिखरावर पाणी कमी तापमानाला उकळते.
+mr|शिक्षिकेने विद्यार्थ्यांना पुढच्या तासापूर्वी दुसरा धडा वाचायला सांगितले.
+mr|त्रिकोणाला तीन बाजू असतात आणि त्याच्या कोनांची बेरीज एकशे ऐंशी अंश असते.
+mr|झाडे सूर्यप्रकाश, पाणी आणि कार्बन डायऑक्साइड वापरून स्वतःचे अन्न तयार करतात.
+mr|अंतिम परीक्षा मार्चच्या पहिल्या आठवड्यात होणार आहे.
+mr|कृपया तुमचा गृहपाठ शुक्रवारपर्यंत शाळेच्या पोर्टलवर जमा करा.
+mr|नदी उत्तरेकडील टेकड्यांमधून वाहत दक्षिणेतील समुद्राला मिळते.
+mr|बल हे वस्तुमान आणि त्वरण यांच्या गुणाकाराइतके असते.
+mr|या सत्राच्या अभ्यासक्रमात चार घटक आणि दोन प्रात्यक्षिके आहेत.
+mr|प्रकाशसंश्लेषण मुख्यतः झाडाच्या पानांमध्ये होते.
+mr|संग्रहालय दर महिन्याच्या पहिल्या सोमवारी बंद असते.
+mr|परिसरात असताना प्रत्येक विद्यार्थ्याने ओळखपत्र जवळ ठेवले पाहिजे.
+mr|प्राचीन शहर नदीजवळ वसवले गेले, म्हणजे शेतकऱ्यांना पिके घेता येतील.
+mr|ज्या अपूर्णांकाचा अंश आणि छेद सारखा असतो, त्याची किंमत एक असते.
+mr|वर्ग बुधवारी दुपारी विज्ञान प्रदर्शन पाहायला जाणार आहे.
