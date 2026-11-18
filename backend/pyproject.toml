@@ -137,8 +137,16 @@ asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 # The test-only child module (tests._tt_children) must be importable when the plain `pytest` script is used.
 pythonpath = ["."]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers"
 markers = [
+    # Tiers. One reviewed table, tests/tier_map.py, assigns them (a test file without an entry fails collection).
+    "fast: needs no Postgres, Redis or child process; runs with docker stopped (enforced by an autouse fixture)",
+    "db: needs Postgres and/or Redis (the test infrastructure from docker compose)",
+    "subprocess: starts child processes (the sandboxed parsers, python -m checks)",
+    "security: tenant isolation, authorization, hostile-input and sandbox tests; part of the gate tier",
+    "slow: the file takes 30 s or more on a developer machine",
+    "linux: added automatically to tests skipped off Linux (skipif reason names Linux or POSIX); they run in CI",
+    "touched: added by --touched-tests (run_tests gate --touched) to the tests of the changed modules",
     "real_model: needs the real embedding model files on disk; skipped unless RUN_REAL_MODEL=1",
     "machine_dependent: wall-clock bounds; generous and relative to a baseline, but they can still fail on a very slow or loaded machine",
 ]

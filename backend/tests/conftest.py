@@ -11,6 +11,7 @@ TEST_DATABASE_URL and TEST_REDIS_URL env vars (fall back to .env).
 import os
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -47,22 +48,22 @@ from tests.fixtures.ml import (  # noqa: F401  (pytest fixtures)
     synthetic_e5_template,
 )
 from tests.fixtures.worker import ingest_slots, quiet_queue, worker_dbs  # noqa: F401  (pytest fixtures)
+from tests.tier_map import apply_tiers, fast_tier_violation_patches
 
 # ── Database setup ────────────────────────────────────────────────────────────
 
 # A direct-connection engine for test setup (bypasses RLS so fixtures can
 # insert rows in any tenant).
-_test_engine = create_async_engine(
-    os.environ["MIGRATION_DATABASE_URL"],
-    connect_args={"statement_cache_size": 0},
-)
+# The default asyncpg statement cache is ON here on purpose: this is a direct test connection, and the cache
+# removes a prepare round trip per statement (about 17x faster tenant fixtures on Windows). Production engines
+# under app/ keep statement_cache_size=0 for the pooler; tests/test_engine_config.py guards that.
+_test_engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"])
 _TestSession = async_sessionmaker(_test_engine, expire_on_commit=False, autoflush=False)
 
 
 def _check_migration_head() -> None:
     """Abort the session unless the test DB is at the Alembic head."""
     import asyncio
-    from pathlib import Path
 
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -72,9 +73,7 @@ def _check_migration_head() -> None:
     head = ScriptDirectory.from_config(cfg).get_current_head()
 
     async def current() -> str | None:
-        engine = create_async_engine(
-            os.environ["MIGRATION_DATABASE_URL"], connect_args={"statement_cache_size": 0}
-        )
+        engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"])
         try:
             async with engine.connect() as conn:
                 res = await conn.execute(text("SELECT version_num FROM app.alembic_version"))
@@ -93,7 +92,22 @@ def _check_migration_head() -> None:
         )
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--touched-tests",
+        default="",
+        help="comma-separated test files (relative to tests/) that get the 'touched' marker; used by "
+        "`python -m app.scripts.run_tests gate --touched`",
+    )
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """The database must be at the migration head, but only when something selected needs it: a run of
+    only `fast` tests (no Postgres, Redis or child process) works with docker stopped."""
+    if session.config.option.collectonly:
+        return
+    if all(item.get_closest_marker("fast") is not None for item in session.items):
+        return
     _check_migration_head()
 
 
@@ -104,13 +118,26 @@ REAL_MODEL_SKIP_REASON = (
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Tests marked `real_model` need the real embedding files: skipped unless RUN_REAL_MODEL=1."""
+    """Apply the tiers from tests/tier_map.py (a test file without an entry fails collection), then skip
+    the tests marked `real_model` (they need the real embedding files) unless RUN_REAL_MODEL=1."""
+    touched = frozenset(t.strip() for t in str(config.getoption("--touched-tests")).split(",") if t.strip())
+    apply_tiers(items, Path(__file__).resolve().parent, touched)
     if os.environ.get("RUN_REAL_MODEL") == "1":
         return
     skip = pytest.mark.skip(reason=REAL_MODEL_SKIP_REASON)
     for item in items:
         if "real_model" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _fast_tier_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test in the `fast` tier must not use Postgres, Redis or a child process: make it fail loudly if
+    it does, so a file cannot sit in the wrong tier unnoticed (see tests/tier_map.py)."""
+    if request.node.get_closest_marker("fast") is None:
+        return
+    for target, name, replacement in fast_tier_violation_patches():
+        monkeypatch.setattr(target, name, replacement)
 
 
 @pytest.fixture

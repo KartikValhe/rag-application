@@ -49,7 +49,7 @@ from tests.test_worker_tenant_guard import _claimed, switch_function  # noqa: F4
 
 @pytest.fixture(autouse=True)
 async def _test_database_only() -> None:
-    engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"], connect_args={"statement_cache_size": 0})
+    engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"])
     try:
         async with engine.connect() as conn:
             name = (await conn.execute(text("SELECT current_database()"))).scalar_one()

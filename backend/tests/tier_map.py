@@ -1,0 +1,232 @@
+"""
+tests/tier_map.py
+─────────────────
+The ONE reviewed table that assigns every test file to its tiers. conftest.py applies it in a collection
+hook, so no test file needs markers of its own and a new test file cannot silently stay unclassified: a
+file with no entry here makes collection fail with a message that says what to do.
+
+Markers (all registered in pyproject.toml; `--strict-markers` is on):
+
+  fast        needs no Postgres, no Redis and no child process. Runs anywhere, also with docker stopped.
+              Enforced: a `fast` test that opens a database or Redis connection or starts a process fails
+              (see `fast_tier_violation_patches` and the autouse fixture in conftest.py), so a test file
+              cannot drift into the wrong tier unnoticed.
+  db          needs Postgres and/or Redis (the dockerised test infrastructure).
+  subprocess  starts child processes (the sandboxed parsers, `python -m ...` checks).
+  security    tenant isolation, authorization, hostile-input and sandbox tests. Part of the gate tier.
+  slow        the file takes 30 s or more on a developer machine (measured 2026-11-18, Windows).
+  linux       added automatically to tests that are skipped off Linux (a `skipif` whose reason names
+              Linux or POSIX). Their skips are unchanged: they run in CI, not on Windows.
+
+Tiers as the runner (`python -m app.scripts.run_tests`) selects them:
+
+  fast  = -m fast
+  gate  = -m "fast or security"   (plus, with --touched, the test files of the changed modules)
+  full  = everything
+
+Rules for editing this table: exactly one of `fast`, or one or both of `db`/`subprocess`, per file. When in
+doubt, use `db`: a wrongly slow tier costs time, a wrongly `fast` file fails loudly.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+TIER_MARKERS = ("fast", "db", "subprocess", "security", "slow", "linux")
+INFRA_MARKERS = ("db", "subprocess")
+
+# Keys are paths relative to the tests directory, with forward slashes.
+TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
+    # ── security/ : the "prove it fails" meta-tests (each one breaks a defence on purpose and checks the
+    #    assertion helper notices). Most need the database; two are pure.
+    "security/test_prove_it_fails_documents.py": ("db", "security"),
+    "security/test_prove_it_fails_parse.py": ("db", "subprocess", "security"),
+    "security/test_prove_it_fails_preauth.py": ("db", "security"),
+    "security/test_prove_it_fails_review2.py": ("fast", "security"),
+    "security/test_prove_it_fails_review4.py": ("db", "security"),
+    "security/test_prove_it_fails_review5b3.py": ("db", "subprocess", "security"),
+    "security/test_prove_it_fails_uploads.py": ("fast", "security"),
+    "security/test_prove_it_fails_worker.py": ("db", "security"),
+    # ── tests that need no infrastructure ──
+    "test_body_limit_routes.py": ("fast", "security"),
+    "test_document_extract.py": ("fast",),
+    "test_document_text.py": ("fast",),
+    "test_ml_fetch_model.py": ("fast",),
+    "test_ml_loader_async.py": ("fast",),
+    "test_ml_real_model.py": ("fast",),  # skipped unless RUN_REAL_MODEL=1 (needs the real model files)
+    "test_ml_scripts.py": ("fast",),
+    "test_parsed_document.py": ("fast",),
+    "test_review_5b3_text.py": ("fast",),
+    "test_review_5b3_upload_scan.py": ("fast", "security"),
+    "test_run_tests.py": ("fast",),
+    "test_schedule.py": ("fast",),
+    "test_test_db_guard.py": ("fast", "security"),
+    "test_tiers.py": ("fast",),
+    "test_upload_profiles.py": ("fast",),
+    "test_upload_review_followups.py": ("fast", "security"),
+    # ── tests that start child processes (no database) ──
+    "test_document_parse_child.py": ("subprocess",),
+    "test_ml_embedder.py": ("subprocess",),
+    "test_ml_loader.py": ("subprocess",),
+    "test_review_5b3_child.py": ("subprocess", "security"),
+    "test_review_5b3_deps.py": ("subprocess", "security"),
+    "test_review_5b3_parent.py": ("subprocess", "security"),
+    "test_sandbox.py": ("subprocess", "security", "slow"),
+    "test_sandbox_isolation.py": ("subprocess", "security"),
+    "test_timetable_hardening.py": ("subprocess", "security"),
+    "test_timetable_real_child.py": ("subprocess",),
+    # ── tests that need both the database and child processes ──
+    "test_ingest_worker.py": ("db", "subprocess", "slow"),
+    "test_parse_stage.py": ("db", "subprocess", "slow"),
+    "test_timetable_import.py": ("db", "subprocess"),
+    "test_upload_redos.py": ("db", "subprocess", "security"),
+    # ── tests that need Postgres and/or Redis ──
+    "test_academic_world.py": ("db",),
+    "test_admin.py": ("db",),
+    "test_auth.py": ("db",),
+    "test_authz_rbac.py": ("db", "security"),
+    "test_batch_c.py": ("db",),
+    "test_branding.py": ("db",),
+    "test_document_limits.py": ("db",),
+    "test_document_permissions.py": ("db", "security"),
+    "test_document_retry_limits.py": ("db",),
+    "test_document_route_matrix.py": ("db", "security", "slow"),
+    "test_document_routes.py": ("db", "slow"),
+    "test_document_scope.py": ("db", "security"),
+    "test_document_store.py": ("db",),
+    "test_document_upload.py": ("db", "slow"),
+    "test_engine_config.py": ("db", "security"),
+    "test_ingest_sweeper.py": ("db",),
+    "test_isolation.py": ("db", "security"),
+    "test_phase2_endpoints.py": ("db",),
+    "test_phase5_hardening.py": ("db", "security"),
+    "test_phase5_schema.py": ("db",),
+    "test_platform.py": ("db",),
+    "test_security_headers_layer.py": ("db", "security"),
+    "test_security_review.py": ("db", "security", "slow"),
+    "test_slots_renew.py": ("db",),
+    "test_teacher_class_scope.py": ("db", "security"),
+    "test_tenants_rls.py": ("db", "security"),
+    "test_throttle.py": ("db", "security"),
+    "test_timetable_conflicts.py": ("db",),
+    "test_timetable_endpoints.py": ("db", "slow"),
+    "test_timetable_lifecycle.py": ("db", "slow"),
+    "test_upload_cleanup.py": ("db",),
+    "test_upload_hardening.py": ("db", "security"),
+    "test_upload_preauth.py": ("db", "security"),
+    "test_worker_fair_claim.py": ("db",),
+    "test_worker_queue.py": ("db",),
+    "test_worker_review_fixes.py": ("db", "slow"),
+    "test_worker_tenant_guard.py": ("db", "security"),
+}
+
+UNMAPPED_HELP = (
+    "Every test file needs a tier. Add the file to TEST_FILE_TIERS in tests/tier_map.py: "
+    "'fast' if it needs no Postgres, Redis or child process, otherwise 'db' and/or 'subprocess'; add "
+    "'security' for isolation, authorization, hostile-input or sandbox tests, and 'slow' if it takes "
+    "30 s or more."
+)
+
+
+def discover_test_files(tests_root: Path) -> list[str]:
+    """All test files under the tests directory, as paths relative to it (forward slashes)."""
+    return sorted(p.relative_to(tests_root).as_posix() for p in tests_root.rglob("test_*.py"))
+
+
+def table_problems(
+    files: Iterable[str], table: dict[str, tuple[str, ...]] | None = None
+) -> list[str]:
+    """Everything wrong with the table: unmapped files, stale entries, bad or contradictory markers."""
+    table = TEST_FILE_TIERS if table is None else table
+    on_disk = set(files)
+    problems: list[str] = []
+    for rel in sorted(on_disk - set(table)):
+        problems.append(f"{rel}: test file has no entry in TEST_FILE_TIERS")
+    for rel in sorted(set(table) - on_disk):
+        problems.append(f"{rel}: entry in TEST_FILE_TIERS but no such test file")
+    for rel, markers in sorted(table.items()):
+        unknown = [m for m in markers if m not in TIER_MARKERS or m == "linux"]
+        if unknown:
+            problems.append(f"{rel}: unknown or automatic marker(s) {unknown}")
+        if len(set(markers)) != len(markers):
+            problems.append(f"{rel}: duplicate marker")
+        infra = [m for m in markers if m in INFRA_MARKERS]
+        if "fast" in markers and infra:
+            problems.append(f"{rel}: 'fast' cannot be combined with {infra}")
+        if "fast" not in markers and not infra:
+            problems.append(f"{rel}: needs 'fast' or at least one of {list(INFRA_MARKERS)}")
+    return problems
+
+
+def _is_linux_only(item: Any) -> bool:
+    """True for a test that is skipped off Linux: a skipif whose reason names Linux or POSIX."""
+    for mark in item.iter_markers("skipif"):
+        reason = str(mark.kwargs.get("reason", "")).lower()
+        if "linux" in reason or "posix" in reason:
+            return True
+    return False
+
+
+def apply_tiers(
+    items: Sequence[Any], tests_root: Path, touched: frozenset[str] = frozenset()
+) -> None:
+    """Add the tier markers to every collected item, or fail collection if any file has no entry."""
+    unmapped: set[str] = set()
+    for item in items:
+        path = Path(str(item.path))
+        try:
+            rel = path.resolve().relative_to(tests_root.resolve()).as_posix()
+        except ValueError:
+            rel = path.name
+        markers = TEST_FILE_TIERS.get(rel)
+        if markers is None:
+            unmapped.add(rel)
+            continue
+        for name in markers:
+            item.add_marker(getattr(pytest.mark, name))
+        if rel in touched:
+            item.add_marker(pytest.mark.touched)
+        if _is_linux_only(item):
+            item.add_marker(pytest.mark.linux)
+    if unmapped:
+        listing = "\n".join(f"  tests/{rel}" for rel in sorted(unmapped))
+        raise pytest.UsageError(f"Test file(s) without a tier:\n{listing}\n{UNMAPPED_HELP}")
+
+
+def fast_tier_violation_patches() -> list[tuple[Any, str, Any]]:
+    """(object, attribute, replacement) triples that make a `fast` test fail loudly when it opens a
+    database or Redis connection or starts a child process. Applied by the autouse fixture in conftest."""
+    import asyncio.base_events
+    import subprocess
+
+    import asyncpg
+    import asyncpg.connection
+    import redis.asyncio.connection as redis_async_connection
+    import redis.connection as redis_connection
+
+    class FastTierViolation(AssertionError):
+        pass
+
+    def refuse(kind: str) -> Any:
+        def _refuse(*_args: object, **_kwargs: object) -> Any:
+            raise FastTierViolation(
+                f"a test marked 'fast' tried to use {kind}. Change its entry in tests/tier_map.py "
+                f"(db / subprocess), or remove the {kind} use from the test."
+            )
+
+        return _refuse
+
+    return [
+        (subprocess.Popen, "__init__", refuse("a child process")),
+        (asyncio.base_events.BaseEventLoop, "subprocess_exec", refuse("a child process")),
+        (asyncio.base_events.BaseEventLoop, "subprocess_shell", refuse("a child process")),
+        (asyncpg, "connect", refuse("a Postgres connection")),
+        (asyncpg, "create_pool", refuse("a Postgres connection")),
+        (asyncpg.connection, "connect", refuse("a Postgres connection")),
+        (redis_async_connection.AbstractConnection, "connect", refuse("a Redis connection")),
+        (redis_connection.AbstractConnection, "connect", refuse("a Redis connection")),
+    ]

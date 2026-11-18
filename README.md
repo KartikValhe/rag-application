@@ -322,14 +322,22 @@ python -m app.scripts.prepare_test_db --reset    # drop and recreate the test DB
 
 > **Warning:** `--reset` drops the test database. pytest stops with a one-line instruction when the test DB is not at the migration head. The Playwright e2e suite and manual use keep the dev database (`ragplatform`); only pytest uses the test database. CI already uses `ragplatform_test`, which the guard accepts.
 
-Run backend test suite:
-```bash
-# Run Phase 2 & RBAC security test suite:
-pytest backend/tests/test_phase2_endpoints.py backend/tests/test_authz_rbac.py -v
+### Backend test tiers
 
-# Run all backend tests:
-pytest backend/tests/ -v
+Every backend test file belongs to a tier (one reviewed table: `backend/tests/tier_map.py`; a new test file without an entry fails collection). One command runs a tier, never two runs at once, and prints pytest's summary line as its last line:
+
+```bash
+cd backend
+python -m app.scripts.run_tests fast   # no Postgres, Redis or child process; works with docker stopped (about 40 s)
+python -m app.scripts.run_tests gate   # fast + security (tenant isolation, authorization, hostile input, sandbox) (about 6 min)
+python -m app.scripts.run_tests gate --touched   # ... plus the tests of the modules changed in the working tree
+python -m app.scripts.run_tests full   # everything (about 17 min): CI, or on request
+python -m app.scripts.run_tests full tests/test_isolation.py -k worker   # any pytest arguments are passed on
 ```
+
+Markers: `fast`, `db` (Postgres and/or Redis), `subprocess`, `security`, `slow` (a file of 30 s or more), `linux` (tests skipped off Linux; they run in CI). Timings are from a Windows developer machine with docker on localhost. `real_model` tests need the real model files and `RUN_REAL_MODEL=1`; they are skipped by default.
+
+Plain `pytest` still works and runs everything (this is what CI does). Run a single file with `pytest tests/test_x.py`.
 
 Run frontend verification:
 ```bash

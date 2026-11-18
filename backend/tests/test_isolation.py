@@ -1175,9 +1175,8 @@ async def worker_engine() -> AsyncGenerator[AsyncEngine, None]:
     from app.core.config import settings
 
     assert settings.WORKER_DATABASE_URL, "WORKER_DATABASE_URL is not set"
-    engine = create_async_engine(
-        settings.WORKER_DATABASE_URL, connect_args={"statement_cache_size": 0}
-    )
+    # A test-only engine on the direct test database: the default asyncpg statement cache is fine here.
+    engine = create_async_engine(settings.WORKER_DATABASE_URL)
     yield engine
     await engine.dispose()
 

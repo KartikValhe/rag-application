@@ -51,7 +51,7 @@ async def _in_rolled_back_test_transaction(fn: Callable[[AsyncConnection], Await
     Run `fn` on a superuser connection to the TEST database inside one transaction that is always
     rolled back (PostgreSQL DDL and GRANT/REVOKE are transactional), so nothing persists.
     """
-    engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"], connect_args={"statement_cache_size": 0})
+    engine = create_async_engine(os.environ["MIGRATION_DATABASE_URL"])
     try:
         async with engine.connect() as conn:
             trans = await conn.begin()

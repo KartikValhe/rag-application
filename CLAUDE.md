@@ -13,7 +13,7 @@ Multi-tenant white-label academic platform (named "RAG" but no RAG/vector code e
 - Default-deny permissions; same generic 404 for "not found" and "not yours".
 - Never read or print `.env` files, secrets or real credentials.
 - Never run tests, prove-it checks or migration experiments against the dev database (`ragplatform`). pytest uses `ragplatform_test` only (guard in `tests/conftest.py`; set up with `python -m app.scripts.prepare_test_db`). Prove-it checks run only in the test DB.
-- Work in small steps: plan first, then code, then tests. Run `pytest -q`, `ruff check .`, `mypy app` before reporting.
+- Work in small steps: plan first, then code, then tests. Before reporting run `python -m app.scripts.run_tests gate`, `ruff check .` and `mypy app` (see Test tiers).
 - Every fix gets a regression test. Do not weaken or skip tests.
 - Keep code comments plain English. Keep output short: summaries, not full file dumps.
 
@@ -30,8 +30,8 @@ uvicorn app.main:app --reload --port 8000
 ruff check .            # lint (CI)
 mypy app                # strict mode (CI)
 pip-audit               # CI
-pytest                  # needs running Postgres + Redis (migrated DB)
-pytest tests/test_isolation.py -k <name> -v   # single test/file
+python -m app.scripts.run_tests fast|gate|full [pytest args]   # the way to run backend tests (see Test tiers)
+pytest tests/test_isolation.py -k <name> -v   # single test/file; needs Postgres + Redis (migrated test DB)
 ```
 Tests are async (`asyncio_mode=auto`, session-scoped loop). `tests/conftest.py` defaults to the docker-compose DB/Redis (Redis DB 1) and uses the superuser `MIGRATION_DATABASE_URL` for fixtures to bypass RLS.
 
@@ -43,6 +43,18 @@ npm test                # node --test on an explicit file list in package.json â
 node --test --experimental-strip-types path/to/file.test.ts   # single test
 npm run test:e2e        # Playwright; needs backend + frontend running with seeded data
 ```
+
+## Test tiers (backend)
+
+`tests/tier_map.py` is the one reviewed table that gives every test file its markers (`fast`, `db`, `subprocess`, `security`, `slow`, `linux`; strict markers). A new test file with no entry fails collection: add it to the table.
+
+- While working: `run_tests fast` (no Postgres, Redis or child process; runs with docker stopped) plus the touched module's tests, e.g. `run_tests full tests/test_x.py`.
+- Before reporting: `run_tests gate` (fast + security; `--touched` adds the tests of changed modules), then `ruff check .` and `mypy app`.
+- `run_tests full` belongs to CI or to an explicit request. Run it in parts (`-m "slow and not security"`, then the rest) to stay under the 10-minute command limit.
+- Every report quotes the exact pytest summary line (the runner prints it as its last line).
+- Never more than one pytest process at a time (the runner's lock file enforces it for run_tests, not for plain `pytest`).
+- `real_model` tests (need `RUN_REAL_MODEL=1` and model files) and Linux-only tests (`linux` marker) are skipped locally on Windows. Linux-only tests run in CI.
+- Tests are never deleted, skipped or weakened to save time. Test-fixture engines use asyncpg's default statement cache for speed; engines under `app/` keep `statement_cache_size=0` for the pooler (`tests/test_engine_config.py` guards it).
 
 ## Architecture
 
