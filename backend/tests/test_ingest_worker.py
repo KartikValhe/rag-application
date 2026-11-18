@@ -164,7 +164,7 @@ async def test_a_full_global_cap_also_sends_the_job_back(
 
 @pytest.mark.parametrize(
     "code",
-    ["scanned_pdf", "parse_timeout", "too_many_pages", "quota_pages_exceeded", "pdf_active_content", "invalid_encoding",
+    ["scanned_pdf", "parse_timeout", "too_many_pages", "quota_pages_exceeded", "pdf_active_content", "pdf_embedded_file", "invalid_encoding",
      "file_type_mismatch", "password_protected_pdf", "no_text_found", "unreadable_text", "text_too_large"],
 )
 async def test_permanent_errors_fail_the_version_and_the_job_without_retry(

@@ -82,20 +82,33 @@ DOC_MAX_PDF_PAGES = 200  # document profile default; the tenant limit is passed 
 DOC_MAX_PPTX_SLIDES = 100
 # Names that make a PDF active or able to carry other files. /OpenAction and /AA are NOT here:
 # they only name actions, and the sandboxed parser never renders or executes anything.
-PDF_FORBIDDEN_NAMES = ("JavaScript", "JS", "Launch", "EmbeddedFile", "RichMedia", "XFA")
-# A PDF name ends at whitespace or a delimiter, so /JSON must not match /JS
-_PDF_NAME_END = rb"(?![^\s()<>\[\]{}/%])"
+PDF_ACTIVE_NAMES = ("JavaScript", "JS", "Launch", "RichMedia", "XFA")
+PDF_EMBEDDED_NAME = "EmbeddedFile"  # singular only: /EmbeddedFiles is the catalog's name tree key
+PDF_FORBIDDEN_NAMES = (*PDF_ACTIVE_NAMES, PDF_EMBEDDED_NAME)
+# A PDF name ends at whitespace (NUL, tab, LF, FF, CR, space) or one of ()<>[]{}/%, so /JSON must
+# not match /JS, and /JavaScript followed by a NUL byte must still match. The \s of a bytes pattern
+# has no NUL, so it is added by hand. (/EmbeddedFiles, /EmbeddedFileX: the name goes on, no match.)
+_PDF_NAME_END = rb"(?![^\s\x00()<>\[\]{}/%])"
 # Every regex here runs over attacker-controlled bytes (up to 50 MB), so each one uses BOUNDED
 # repetition only. An unbounded pattern such as \d+\s+\d+ backtracks quadratically on a long run
 # of digits: 2 MB of digits kept the scan busy for hours. With {m,n} bounds the work per start
 # position is a small constant, so the scan stays linear in the file size. Keep it that way.
 PDF_FORBIDDEN_RE = re.compile(rb"/(?:" + b"|".join(n.encode() for n in PDF_FORBIDDEN_NAMES) + rb")" + _PDF_NAME_END)
+# The same without the attachment name: once an attachment is seen the scan only looks for these,
+# so a file made of millions of /EmbeddedFile tokens costs one match, not millions.
+PDF_ACTIVE_RE = re.compile(rb"/(?:" + b"|".join(n.encode() for n in PDF_ACTIVE_NAMES) + rb")" + _PDF_NAME_END)
 PDF_HEX_ESCAPE_RE = re.compile(rb"#([0-9A-Fa-f]{2})")
+PDF_ACTIVE_CONTENT_MESSAGE = "PDFs with scripts, launch actions or rich media are not allowed."
+# Fixed text, nothing taken from the file. Teacher-facing: say what is wrong and how to fix it.
+PDF_EMBEDDED_FILE_MESSAGE = (
+    "This PDF has another file attached inside it (some tools add one when you export or sign a PDF). "
+    "Export or print it again without attachments, or upload a DOCX version instead."
+)
 # Object number (up to 10 digits), generation (up to 5 digits, max 65535) and a little whitespace.
 # Real writers put one space or newline between the tokens; an object written with more is
 # simply not counted, and the sandboxed parser still enforces its own limits.
 PDF_OBJ_RE = re.compile(rb"[0-9]{1,10}\s{1,10}[0-9]{1,5}\s{1,10}obj\b")
-PDF_PAGE_RE = re.compile(rb"/Type\s{0,32}/Page" + _PDF_NAME_END)
+PDF_PAGE_RE = re.compile(rb"/Type[\s\x00]{0,32}/Page" + _PDF_NAME_END)
 
 # Control characters to strip from plain text (preserve \t, \n, \r)
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
@@ -744,8 +757,11 @@ def validate_pdf_bytes(
 ) -> int:
     """
     The one PDF rule, shared by timetable imports and documents. Best-effort scan of the raw bytes:
-    - rejects /JavaScript, /JS, /Launch, /EmbeddedFile, /RichMedia and /XFA, also written with
-      #xx escapes (/J#61vaScript);
+    - rejects /JavaScript, /JS, /Launch, /RichMedia and /XFA (pdf_active_content) and the singular
+      /EmbeddedFile (pdf_embedded_file: a real attached file), also written with #xx escapes
+      (/J#61vaScript). The plural /EmbeddedFiles is the catalog's name tree key, which many PDFs
+      carry without any attachment, and it is allowed. If both kinds are present the more serious
+      code, pdf_active_content, wins;
     - allows /OpenAction and /AA (they only name actions and nothing here executes them);
     - caps the object and page counts, and returns the page count it saw.
     It only sees UNCOMPRESSED names and counts: a name or a /Type /Page inside a compressed object
@@ -757,6 +773,7 @@ def validate_pdf_bytes(
     """
     pages = 0
     objects = 0
+    embedded = False
     pos = 0
     size = len(data)
     while pos < size:
@@ -769,11 +786,14 @@ def validate_pdf_bytes(
         # Decode the slice and its look-ahead apart, so the match offsets of the slice stay known
         main = _decode_name_escapes(data[pos:end])
         plain = main + _decode_name_escapes(data[end : end + _PDF_SCAN_OVERLAP])
-        if PDF_FORBIDDEN_RE.search(plain):
-            raise UploadSecurityError(
-                code="pdf_active_content",
-                message="PDFs with scripts, launch actions, rich media or embedded files are not allowed.",
-            )
+        found = PDF_ACTIVE_RE.search(plain) if embedded else PDF_FORBIDDEN_RE.search(plain)
+        if found is not None and found.group(0)[1:] == PDF_EMBEDDED_NAME.encode():
+            # Spelled with #xx escapes the match is still the plain name here: the slice is decoded.
+            # The leftmost match was the attachment, so nothing forbidden comes before it
+            embedded = True
+            found = PDF_ACTIVE_RE.search(plain, found.end())
+        if found is not None:
+            raise UploadSecurityError(code="pdf_active_content", message=PDF_ACTIVE_CONTENT_MESSAGE)
         # A match belongs to the slice it starts in, so the look-ahead is never counted twice
         for match in PDF_PAGE_RE.finditer(plain):
             if match.start() >= len(main):
@@ -787,6 +807,8 @@ def validate_pdf_bytes(
                 break
             objects += 1
         pos = end
+    if embedded:
+        raise UploadSecurityError(code="pdf_embedded_file", message=PDF_EMBEDDED_FILE_MESSAGE)
     if objects > MAX_PDF_OBJECTS:
         raise UploadSecurityError(code="pdf_too_complex", message="The PDF is too large or complex to process.")
     if pages > max_pages:

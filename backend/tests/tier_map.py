@@ -63,6 +63,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_ml_real_model.py": ("fast",),  # skipped unless RUN_REAL_MODEL=1 (needs the real model files)
     "test_ml_scripts.py": ("fast",),
     "test_parsed_document.py": ("fast",),
+    "test_pdf_embedded_file_rule.py": ("fast", "security"),
     "test_review_5b3_text.py": ("fast",),
     "test_review_5b3_upload_scan.py": ("fast", "security"),
     "test_run_tests.py": ("fast",),

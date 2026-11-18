@@ -41,6 +41,8 @@ PAYLOADS = {
     "hash41_escapes": lambda: _fill(b"#41"),
     "digit_runs_split_by_space": _digit_runs,
     "type_page_whitespace": lambda: _fill(b"/Type" + b" " * 61),
+    "embedded_file_repeats": lambda: _fill(b"/EmbeddedFile "),
+    "type_page_nul_whitespace": lambda: _fill(b"/Type" + b"\x00" * 61),
 }
 
 

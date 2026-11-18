@@ -42,6 +42,7 @@ PERMANENT_ERROR_CODES: frozenset[str] = frozenset(
         "zip_bomb_detected",
         "zip_member_too_large",
         "pdf_active_content",
+        "pdf_embedded_file",
         "pdf_too_complex",
         "unsupported_format",
         "invalid_encoding",

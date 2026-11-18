@@ -189,7 +189,6 @@ def test_clean_pdf_passes() -> None:
         b"/JavaScript",
         b"/JS (x)",
         b"/Launch",
-        b"/EmbeddedFile",
         b"/RichMedia",
         b"/XFA",
         b"/J#61vaScript",
@@ -201,6 +200,13 @@ def test_pdf_active_content_rejected(token: bytes) -> None:
     with pytest.raises(UploadSecurityError) as exc:
         sniff_and_validate_file_type(make_pdf(token), "a.pdf")
     assert code_of(exc) == "pdf_active_content"
+
+
+@pytest.mark.parametrize("token", [b"/EmbeddedFile", b"/E#6dbeddedFile"])
+def test_pdf_embedded_file_rejected_with_its_own_code(token: bytes) -> None:
+    with pytest.raises(UploadSecurityError) as exc:
+        sniff_and_validate_file_type(make_pdf(token), "a.pdf")
+    assert code_of(exc) == "pdf_embedded_file"
 
 
 @pytest.mark.parametrize("token", [b"/OpenAction 3 0 R", b"/AA << >>", b"/O#70enAction 3 0 R"])

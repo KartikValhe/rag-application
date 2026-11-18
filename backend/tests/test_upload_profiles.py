@@ -361,5 +361,5 @@ def test_errors_never_echo_file_or_member_names() -> None:
 def test_new_codes_are_documented() -> None:
     doc = (Path(__file__).resolve().parents[2] / "docs" / "api" / "phase5.md").read_text(encoding="utf-8")
     for code in ("unsupported_format", "invalid_encoding", "too_many_pages", "too_many_slides", "file_too_large",
-                 "too_many_parts", "pdf_active_content", "pdf_too_complex"):
+                 "too_many_parts", "pdf_active_content", "pdf_embedded_file", "pdf_too_complex"):
         assert f"`{code}`" in doc, code

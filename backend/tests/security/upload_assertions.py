@@ -79,24 +79,26 @@ FORBIDDEN_PDF_TOKENS = [
     b"/JavaScript",
     b"/JS (x)",
     b"/Launch",
-    b"/EmbeddedFile",
     b"/RichMedia",
     b"/XFA",
     b"/J#61vaScript",  # #-escaped variants
     b"/R#69chMedia",
     b"/XF#41",
-    b"/E#6dbeddedFile",
 ]
+# A real attached file has its own code (real-corpus finding, 2026-11-18)
+EMBEDDED_PDF_TOKENS = [b"/EmbeddedFile", b"/E#6dbeddedFile"]
 
 
 def assert_hostile_pdfs_rejected() -> None:
-    """Every forbidden name, also #-escaped, is rejected with pdf_active_content by BOTH profiles."""
+    """Every forbidden name, also #-escaped, is rejected by BOTH profiles: active content with
+    pdf_active_content, an attached file with pdf_embedded_file."""
+    cases = [(t, "pdf_active_content") for t in FORBIDDEN_PDF_TOKENS] + [(t, "pdf_embedded_file") for t in EMBEDDED_PDF_TOKENS]
     for profile in UploadProfile:
-        for token in FORBIDDEN_PDF_TOKENS:
+        for token, expected in cases:
             try:
                 validate_upload(make_pdf(token), "a.pdf", profile)
             except UploadSecurityError as exc:
-                assert code_of(exc) == "pdf_active_content", f"{profile} {token!r}: wrong code {code_of(exc)}"
+                assert code_of(exc) == expected, f"{profile} {token!r}: wrong code {code_of(exc)}"
             else:
                 raise AssertionError(f"{profile.value}: hostile PDF {token!r} was accepted")
 
@@ -290,7 +292,7 @@ async def assert_anonymous_upload_not_consumed(
 
 # Every regex the PDF scan uses. The current values are handed to the child process, so a
 # monkeypatched (for example unbounded) pattern in the parent is what the child really runs.
-PDF_SCAN_PATTERNS = ("PDF_OBJ_RE", "PDF_PAGE_RE", "PDF_FORBIDDEN_RE", "PDF_HEX_ESCAPE_RE")
+PDF_SCAN_PATTERNS = ("PDF_OBJ_RE", "PDF_PAGE_RE", "PDF_FORBIDDEN_RE", "PDF_ACTIVE_RE", "PDF_HEX_ESCAPE_RE")
 SCAN_BUDGET_SECONDS = 2.0  # generous: the linear scan of 2 MB takes well under 0.5 s
 SCAN_KILL_SECONDS = 25.0  # a quadratic scan is killed here instead of running for hours
 
