@@ -84,11 +84,11 @@ def test_the_worker_makes_itself_non_dumpable_at_startup(monkeypatch: pytest.Mon
         calls.append("set_non_dumpable")
         return True
 
-    def not_assembled() -> object:
-        raise ingest.PipelineNotAssembled("stages are not assembled yet")
+    def not_configured(*_args: object, **_kwargs: object) -> object:
+        raise ingest.WorkerNotConfigured("the embedding model is not configured")
 
     monkeypatch.setattr(sandbox_child, "set_non_dumpable", record)
-    monkeypatch.setattr(ingest, "assemble_default_stages", not_assembled)
+    monkeypatch.setattr(ingest, "prepare_embedder", not_configured)
     assert ingest.main() == 2
     assert calls == ["set_non_dumpable"], "the worker did not harden itself before doing anything else"
 

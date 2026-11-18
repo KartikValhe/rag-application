@@ -114,6 +114,13 @@ WHERE status IN ('done', 'failed') AND updated_at < {NOW} - make_interval(days =
   {{tenant_filter}}
 """
 
+# The job is `done` under THIS worker's claim: the index transaction finished it (the API role cannot clear
+# worker_id or attempts, so the claim is still visible on the finished row).
+COMPLETED_BY_SQL = """
+SELECT 1 FROM app.ingest_jobs
+WHERE tenant_id = :tenant_id AND id = :id AND status = 'done' AND worker_id = :worker AND attempts = :attempts
+"""
+
 LIST_TENANTS_SQL = "SELECT id FROM app.tenants {tenant_filter} ORDER BY id"
 
 # Runs on a TENANT session (app_tenant): one job per version, never a duplicate.
@@ -214,6 +221,11 @@ class JobQueue:
     async def heartbeat(self, job: Job) -> bool:
         """Extend the lease. False when the job is no longer this worker's (stop working on it)."""
         return bool(await self._execute(HEARTBEAT_SQL, {**self._owned(job), "lease": float(self.lease_seconds)}))
+
+    async def is_completed_by(self, job: Job) -> bool:
+        """True when the job row is `done` under this worker's own claim (the index transaction finished it)."""
+        params = {k: v for k, v in self._owned(job).items() if k != "now"}
+        return bool(await self._execute(COMPLETED_BY_SQL, params))
 
     async def complete(self, job: Job) -> bool:
         return bool(await self._execute(COMPLETE_SQL, self._owned(job)))

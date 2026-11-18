@@ -67,6 +67,9 @@ ERROR_MESSAGES: dict[str, str] = {
     "invalid_cursor": "The cursor is not valid.",
     "retry_limit_reached": "This file has been retried too many times. Upload it again as a new version.",
     "service_unavailable": "Document storage is temporarily unavailable. Please try again in a few minutes.",
+    "version_not_ready": "Only a version that has finished processing (status ready) can be published.",
+    "flags_acknowledgement_required": "This version has flagged passages. Review them and publish again with acknowledge_flags set to true.",
+    "publish_conflict": "Another version of this document was published at the same time. Reload and try again.",
 }
 
 
@@ -264,6 +267,7 @@ _CONSTRAINT_ERRORS: dict[str, tuple[int, str]] = {
     "uq_document_versions_one_in_flight": (status.HTTP_409_CONFLICT, "document_processing_in_progress"),
     "uq_document_versions_version_no": (status.HTTP_409_CONFLICT, "document_processing_in_progress"),
     "uq_ingest_jobs_version": (status.HTTP_409_CONFLICT, "document_processing_in_progress"),
+    "uq_document_versions_one_published": (status.HTTP_409_CONFLICT, "publish_conflict"),
 }
 _NOT_FOUND_CONSTRAINTS = frozenset(
     {"fk_document_classes_class_subject", "fk_documents_subject", "fk_document_classes_document"}

@@ -45,6 +45,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     #    assertion helper notices). Most need the database; two are pure.
     "security/test_prove_it_fails_documents.py": ("db", "security"),
     "security/test_prove_it_fails_parse.py": ("db", "subprocess", "security"),
+    "security/test_prove_it_fails_pipeline.py": ("db", "security", "slow"),
     "security/test_prove_it_fails_preauth.py": ("db", "security"),
     "security/test_prove_it_fails_review2.py": ("fast", "security"),
     "security/test_prove_it_fails_review4.py": ("db", "security"),
@@ -53,7 +54,9 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "security/test_prove_it_fails_worker.py": ("db", "security"),
     # ── tests that need no infrastructure ──
     "test_body_limit_routes.py": ("fast", "security"),
+    "test_chunker.py": ("fast",),
     "test_document_extract.py": ("fast",),
+    "test_ingest_settings.py": ("fast",),
     "test_document_text.py": ("fast",),
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
@@ -67,6 +70,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_test_db_guard.py": ("fast", "security"),
     "test_tiers.py": ("fast",),
     "test_upload_profiles.py": ("fast",),
+    "test_worker_entry.py": ("fast", "security"),
     "test_upload_review_followups.py": ("fast", "security"),
     # ── tests that start child processes (no database) ──
     "test_document_parse_child.py": ("subprocess",),
@@ -80,6 +84,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_timetable_hardening.py": ("subprocess", "security"),
     "test_timetable_real_child.py": ("subprocess",),
     # ── tests that need both the database and child processes ──
+    "test_ingest_pipeline_e2e.py": ("db", "subprocess", "slow"),
     "test_ingest_worker.py": ("db", "subprocess", "slow"),
     "test_parse_stage.py": ("db", "subprocess", "slow"),
     "test_timetable_import.py": ("db", "subprocess"),
@@ -91,7 +96,9 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_authz_rbac.py": ("db", "security"),
     "test_batch_c.py": ("db",),
     "test_branding.py": ("db",),
+    "test_document_lifecycle.py": ("db", "slow"),
     "test_document_limits.py": ("db",),
+    "test_embed_stage.py": ("db", "slow"),
     "test_document_permissions.py": ("db", "security"),
     "test_document_retry_limits.py": ("db",),
     "test_document_route_matrix.py": ("db", "security", "slow"),
@@ -100,6 +107,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_document_store.py": ("db",),
     "test_document_upload.py": ("db", "slow"),
     "test_engine_config.py": ("db", "security"),
+    "test_index_stage.py": ("db", "slow"),
     "test_ingest_sweeper.py": ("db",),
     "test_isolation.py": ("db", "security"),
     "test_phase2_endpoints.py": ("db",),

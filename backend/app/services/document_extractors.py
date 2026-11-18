@@ -33,12 +33,17 @@ This module must never import app.core.config.
 import io
 import re
 import time
-import unicodedata
 from collections.abc import Iterator
 from typing import Any
 
 from app.services.document_gates import GateError, check_scanned_pdf, check_unreadable_text
-from app.services.document_text import clean_text, count_chars, guess_script
+from app.services.document_text import JOINERS as _JOINERS
+from app.services.document_text import (
+    clean_text,
+    count_chars,
+    guess_script,
+)
+from app.services.document_text import is_unsafe_cut as _unsafe_cut
 from app.services.parsed_document import (
     MAX_BLOCK_CHARS,
     MAX_BLOCKS_PER_PAGE,
@@ -58,10 +63,6 @@ _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r?\n[ \t]*){2,}")
 _PDF_LANG_RE = re.compile(rb"/Lang\s{0,8}\(\s{0,4}([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]{1,8}){0,3}\s{0,4}\)")
 _MD_MAX_HEADING_LINE = 1024  # a longer line is never a heading (and is never run through a pattern)
 _MD_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
-
-
-_JOINERS = "\u200c\u200d"  # ZWNJ, ZWJ
-_VIRAMA = "\u094d"
 
 
 def _md_heading(line: str) -> tuple[int, str] | None:
@@ -89,20 +90,6 @@ def _md_heading(line: str) -> tuple[int, str] | None:
     if 0 < k < len(text) and text[k - 1] in " \t":
         text = text[:k].rstrip(" \t")  # the closing sequence ("# Title ##")
     return level, text
-
-
-def _unsafe_cut(text: str, cut: int) -> bool:
-    """True when cutting `text` into text[:cut] and text[cut:] would split a conjunct: the second piece
-    would start with a joiner or a combining mark, or the first would end with a joiner or a virama.
-    (A piece that starts with a joiner is not clean text: the parent would refuse the whole document.)"""
-    after = text[cut]
-    before = text[cut - 1]
-    return (
-        after in _JOINERS
-        or unicodedata.category(after).startswith("M")
-        or before in _JOINERS
-        or before == _VIRAMA
-    )
 
 
 def split_text(text: str, limit: int = MAX_BLOCK_CHARS) -> list[str]:

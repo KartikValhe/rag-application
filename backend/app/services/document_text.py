@@ -116,6 +116,27 @@ def is_clean_text(value: str) -> bool:
     return unicodedata.is_normalized("NFC", value)
 
 
+# ── The cut-point rule (shared by the parser's block splitter and the chunker) ──
+
+JOINERS = "‌‍"  # ZWNJ, ZWJ
+VIRAMA = "्"
+
+
+def is_unsafe_cut(text: str, cut: int) -> bool:
+    """True when cutting `text` into text[:cut] and text[cut:] would split a conjunct: the second piece
+    would start with a joiner or a combining mark, or the first would end with a joiner or a virama.
+    (A piece that starts with a joiner is not clean text: the parent would refuse the whole document.)
+    `cut` must be inside the text (0 < cut < len(text))."""
+    after = text[cut]
+    before = text[cut - 1]
+    return (
+        after in JOINERS
+        or unicodedata.category(after).startswith("M")
+        or before in JOINERS
+        or before == VIRAMA
+    )
+
+
 # ── Scripts and character counts ─────────────────────────────────────────────
 
 SCRIPT_GUESSES = ("latn", "deva", "mixed")

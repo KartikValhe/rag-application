@@ -290,7 +290,7 @@ def _without_embedder_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_settings_defaults_for_the_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_embedder_env(monkeypatch)
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.EMBEDDING_BATCH_SIZE == 16
+    assert s.EMBEDDING_BATCH_SIZE == 8  # 5c-2: measured best (design C3)
     assert s.EMBEDDING_THREADS == 1
     assert s.EMBEDDING_MODEL_ID == "e5-small"
     assert s.EMBEDDING_MODEL_DIR == ""

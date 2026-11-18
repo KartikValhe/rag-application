@@ -256,7 +256,7 @@ python -m app.scripts.fetch_model e5-small --out ./models
 
 # 2. Point the app at the directory (settings, see .env.example)
 #    EMBEDDING_MODEL_DIR=./models      EMBEDDING_MODEL_ID=e5-small
-#    EMBEDDING_BATCH_SIZE=16           EMBEDDING_THREADS=1
+#    EMBEDDING_BATCH_SIZE=8            EMBEDDING_THREADS=1
 
 # 3. Optional manual checks (not tests, not in CI)
 python -m app.scripts.check_onnx_parity     # cosine > 0.999 against a reference on 50 en/hi/mr sentences
@@ -265,10 +265,29 @@ RUN_REAL_MODEL=1 pytest tests/test_ml_real_model.py   # model-quality checks on 
 ```
 
 - **At start-up** the loader re-verifies the size and sha256 of every file (a second or two for 470 MB), refuses an extra file, a symlink or an entry marked `UNVERIFIED`, and then loads only the ONNX protobuf and `tokenizer.json`. A missing or changed file stops the service with a clear message. It never opens a network connection.
-- **Memory:** about 0.5 GB resident per process for e5-small (fp32), plus activations that grow with `EMBEDDING_BATCH_SIZE` (design C3; **UNVERIFIED** until `bench_embed` runs). The API loads the model lazily on the first query, once per process, so run few API workers (`WEB_CONCURRENCY` 1-2). Use `EMBEDDING_BATCH_SIZE=8` on a 2 GB worker.
+- **Memory and speed (measured 2026-11-18 on a Windows laptop, real e5-small, `intra_op_num_threads=1`; the peak RSS includes the benchmark process itself):** batch 1: 3.5 texts/s at 1,094 MB; batch **8: 3.2 texts/s at 1,369 MB (the default)**; batch 16: 2.7 texts/s at 1,447 MB; batch 32: 3.0 texts/s at 1,818 MB. A bigger batch is not faster and costs memory. A 300-chunk document takes about 100 s to embed, a 1,000-chunk upload about 5 minutes. The API loads the model lazily on the first query, once per process, so run few API workers (`WEB_CONCURRENCY` 1-2). Plan about 1.5 GB for a worker process while it embeds (the model, the activations and the sandboxed parser child), and keep `EMBEDDING_BATCH_SIZE=8` on a 2 GB host.
 - **Production images bake the verified files in** (`COPY` the directory from a build stage that ran `fetch_model`) and run with **no outbound network** for this purpose; keep the directory read-only for the service user. Nothing in the image build or at runtime may call Hugging Face except that one build step.
 - **A new or changed model** (for example `bge-m3`, still `UNVERIFIED` in the lock file) is first reviewed with `python -m app.scripts.fetch_model <name> --print-hashes [--file PATH ...]`, which prints the size and sha256 of the files you already have and writes nothing, and then pinned in the lock file by hand in a reviewed change.
 - `fetch_model` has no proxy support (`trust_env` is off on purpose, so a `~/.netrc` or proxy variable cannot add credentials). If a redirect to a host outside the allow-list is refused, the host is printed: review it before adding it to `ALLOWED_HOST_SUFFIXES`.
+
+### Running the ingestion worker locally (step 5c-2)
+
+The worker (`python -m app.workers.ingest`, from `backend/`) turns uploaded files into searchable chunks: sandboxed validation and parsing, chunking, embedding and one short indexing transaction, plus the sweeper loop. It **starts only when everything it needs is there**; otherwise it prints what is missing and exits with code 2:
+
+- `WORKER_DATABASE_URL` (a direct or session-mode connection as the `app_worker` role), `REDIS_URL` and `DOCUMENT_STORE_DIR` (the same directory the API uses);
+- `EMBEDDING_MODEL_DIR` pointing at the verified model files (`python -m app.scripts.fetch_model e5-small --out ./models`, see above). The loader re-verifies every file's size and sha256 at start-up (a second or two) and loads the model **once**; a missing or changed file stops the start. There is no setting or environment variable that selects a fake model.
+
+```bash
+docker compose up -d                      # Postgres, Redis
+alembic upgrade head && python -m app.scripts.seed
+python -m app.scripts.fetch_model e5-small --out ./models      # once; the only command that uses the network
+EMBEDDING_MODEL_DIR=./models python -m app.workers.ingest      # one worker; Ctrl+C finishes or releases the current job
+```
+
+- **Memory:** about 1.4-1.5 GB while a job embeds with the default batch size 8 (see the measurements above); the parser child is capped separately (`DOC_PARSE_MEMORY_LIMIT_MB`, Linux only). Do not run it on a host with less than 2 GB.
+- **Time:** about 3 texts/s on one thread, so a 300-chunk document takes about 100 s and a 1,000-chunk upload about 5 minutes. The job lease (`INGEST_LEASE_SECONDS`, 180) is renewed every `INGEST_HEARTBEAT_SECONDS` (30) and after every embedding batch, and one attempt may run up to `INGEST_MAX_JOB_SECONDS` (3600), so a long upload does not lose its lease. The blocking model call runs on its own thread, so the heartbeat keeps ticking.
+- **Publishing:** a finished version is `ready`. Publish it with `POST /api/v1/documents/{id}/versions/{version_id}/publish` (the previous published version is archived in the same transaction). **Auto-publish is off** (`DOC_AUTO_PUBLISH_ENABLED=false`) until the injection scanner of step 5d exists; do not switch it on before then.
+- Production runs the worker in a container as described under "Worker deployment requirements" above.
 
 ### Document parser benchmark (manual, real files never committed)
 

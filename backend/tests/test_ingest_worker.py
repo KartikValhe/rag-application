@@ -666,18 +666,27 @@ async def test_a_stage_that_asks_for_another_tenants_rows_gets_nothing(
 # ── The default entry point ──────────────────────────────────────────────────
 
 
-def test_the_default_entry_point_refuses_to_start_until_the_real_stages_exist() -> None:
+def test_the_default_entry_point_refuses_to_start_without_the_embedding_model() -> None:
+    """Step 5c-2: the real stages exist; the entry point starts only when the model files verify and the rest is
+    configured. Here no model directory is configured, so it exits with code 2 and says why."""
     backend = Path(__file__).resolve().parents[1]
-    env = {**os.environ, "PYTHONPATH": str(backend)}  # explicit _test URLs from the test environment, no .env
+    # explicit _test URLs from the test environment, no .env (the working directory has none); no model directory
+    env = {**os.environ, "PYTHONPATH": str(backend), "EMBEDDING_MODEL_DIR": ""}
     result = subprocess.run(
         [sys.executable, "-P", "-m", "app.workers.ingest"],
         cwd=str(Path(os.environ.get("TEMP", "/tmp"))), env=env, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 2
-    assert "5c" in result.stderr and "not" in result.stderr.lower()
+    assert "not started" in result.stderr and "EMBEDDING_MODEL_DIR" in result.stderr
+    assert "Traceback" not in result.stderr  # a clear message, not a crash
 
 
-def test_assembling_the_default_stages_is_refused() -> None:
-    with pytest.raises(ingest.PipelineNotAssembled):
-        ingest.assemble_default_stages()
+def test_preparing_the_embedder_is_refused_when_the_configuration_is_incomplete() -> None:
+    from app.core.config import settings
 
+    class Incomplete:
+        def __getattr__(self, name: str) -> object:
+            return "" if name == "EMBEDDING_MODEL_DIR" else getattr(settings, name)
+
+    with pytest.raises(ingest.WorkerNotConfigured, match="EMBEDDING_MODEL_DIR"):
+        ingest.prepare_embedder(Incomplete())  # type: ignore[arg-type]

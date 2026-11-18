@@ -3,7 +3,8 @@ app/api/v1/documents.py
 ───────────────────────
 Document routes, step 5b-1 (design A2-A4). Upload, replace, list, detail, PATCH, soft delete,
 status, retry, version delete and download, plus the admin usage and purge routes.
-Not here yet: publish, flags and test search (5c/5d); the worker that processes queued versions (5b-2).
+Publish is here since 5c-2 (it calls services/document_lifecycle.publish_version, the same function the worker's
+auto-publish uses). Not here yet: flags and test search (5d).
 
 Rules every route follows:
   - require(permission) first (default-deny); students hold no document:* permission, so they get 403.
@@ -34,6 +35,7 @@ from typing import Annotated
 import structlog
 from fastapi import (
     APIRouter,
+    Body,
     Depends,
     File,
     Form,
@@ -88,8 +90,15 @@ from app.schemas.document import (
     DocumentUsageResponse,
     DocumentVersionResponse,
     NamedRef,
+    PublishRequest,
 )
-from app.services import document_limits, document_scope, document_store, document_upload
+from app.services import (
+    document_lifecycle,
+    document_limits,
+    document_scope,
+    document_store,
+    document_upload,
+)
 from app.services.audit import record_audit_event
 from app.services.document_limits import DocumentLimits
 from app.services.document_upload import api_error
@@ -776,6 +785,46 @@ async def retry_version(
                 actor_id=user.id,
                 request=request,
                 db=db,
+            )
+            await db.refresh(v)
+            return _version_response(v)
+    except IntegrityError as exc:
+        mapped = document_upload.integrity_error_to_http(exc)
+        if mapped is None:
+            raise
+        raise mapped from None
+
+
+@router.post("/{document_id}/versions/{version_id}/publish", response_model=DocumentVersionResponse)
+async def publish_version(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    request: Request,
+    user: Annotated[User, Depends(require("document:publish"))],
+    body: Annotated[PublishRequest, Body()] = PublishRequest(),
+) -> DocumentVersionResponse:
+    """
+    Publish a ready version (design A2). A teacher needs an assignment in EVERY linked class (403
+    document_manage_requires_all_classes otherwise, generic 404 when out of scope). One transaction: the
+    previous published version is archived (its chunks deleted, its file queued for deletion after
+    DOC_ARCHIVE_FILE_RETENTION_DAYS), archived versions beyond DOC_MAX_ARCHIVED_VERSIONS are pruned, the new
+    version is published and everything is audited. 409 version_not_ready, flags_acknowledgement_required or
+    publish_conflict (a concurrent publish won).
+    """
+    tid = user.tenant_id
+    try:
+        async with tenant_session_context(str(tid)) as db:
+            await document_scope.load_document_for(db, user, document_id, action="publish", for_update=True)
+            v = await _load_version(db, tid, document_id, version_id)  # the generic 404 for a foreign version id
+            await document_lifecycle.publish_version(
+                db,
+                tenant_id=tid,
+                document_id=document_id,
+                version_id=version_id,
+                actor_id=user.id,
+                acknowledge_flags=body.acknowledge_flags,
+                auto=False,
+                request=request,
             )
             await db.refresh(v)
             return _version_response(v)

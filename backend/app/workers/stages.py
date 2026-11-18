@@ -62,6 +62,10 @@ JSON_LIMITS = sandbox.JsonLimits(max_structure=MAX_JSON_STRUCTURE, max_depth=MAX
 _CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 SOFT_DEADLINE_SHARE = 0.8  # share of the wall clock the child may use before it gives up on its own
 
+# ctx.results key the index stage sets after its transaction committed: the job was finished there (status done),
+# so the worker must neither complete it again nor read the heartbeat's "not running any more" as a lost job.
+JOB_COMPLETED_KEY = "job_completed"
+
 # The ingest stage names written to document_versions.stage while each stage runs.
 STAGE_NAMES = ("validate", "parse", "chunk", "embed", "index")
 STAGE_COLUMN_VALUE = {
@@ -120,10 +124,17 @@ class StageContext:
     # Opens one transaction with the tenant set and the version still active (set by the worker)
     _session: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     results: dict[str, Any] = field(default_factory=dict)
+    # Renews the job lease and both slots RIGHT NOW (the embedding stage calls it after every batch). Raises
+    # JobStopped when the lease or the job is lost. The worker sets it; the default does nothing.
+    beat: Callable[[], Awaitable[None]] = field(default=lambda: _no_beat())
 
     def session(self) -> AbstractAsyncContextManager[AsyncSession]:
         """One tenant transaction. Raises JobStopped when the version is no longer queued/processing or the job is not this worker's."""
         return self._session()
+
+
+async def _no_beat() -> None:
+    return None
 
 
 Stage = Callable[[StageContext], Awaitable[None]]
@@ -448,7 +459,7 @@ async def lock_job_ownership(db: AsyncSession, job: "Job") -> None:
 
 @asynccontextmanager
 async def active_version_session(
-    tenant_sessions: TenantSessions, job: "Job"
+    tenant_sessions: TenantSessions, job: "Job", *, lock_document: uuid.UUID | None = None
 ) -> AsyncIterator[AsyncSession]:
     """
     One transaction for a job: the tenant is set from the claimed row first, then the version row is
@@ -456,8 +467,25 @@ async def active_version_session(
     A deleted or archived version (backlog B40) raises JobStopped("cancelled") and a lost job
     (reclaimed after a lease expiry, or frozen) raises JobStopped("job_lost"), both before anything is
     written. The share locks make a concurrent delete or reclaim wait until this transaction ends.
+
+    `lock_document` (the index transaction, which writes chunks): the document row is locked FOR SHARE
+    FIRST and a deleted document raises JobStopped("cancelled"). The delete route locks the document, then
+    deletes the chunks it can see; chunks written by a transaction that did not wait for it would survive.
+    Taking the document lock first also keeps one lock order everywhere: document, version, job.
     """
     async with tenant_sessions.for_job(job) as db:
+        if lock_document is not None:
+            deleted = (
+                await db.execute(
+                    text(
+                        "SELECT deleted_at IS NOT NULL FROM app.documents "
+                        "WHERE tenant_id = :t AND id = :d FOR SHARE"
+                    ),
+                    {"t": job.tenant_id, "d": lock_document},
+                )
+            ).scalar_one_or_none()
+            if deleted is None or deleted:
+                raise errors.JobStopped("cancelled")
         status = (
             await db.execute(
                 text(

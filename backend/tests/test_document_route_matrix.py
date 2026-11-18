@@ -50,6 +50,8 @@ EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, int, int, int, int]]] = {
         "document:view", (200, 200, 404, 403, 401)),
     ("POST", "/api/v1/documents/{document_id}/versions/{version_id}/retry"): (
         "document:upload", (202, 202, 404, 403, 401)),
+    ("POST", "/api/v1/documents/{document_id}/versions/{version_id}/publish"): (
+        "document:publish", (200, 200, 404, 403, 401)),
     ("DELETE", "/api/v1/documents/{document_id}/versions/{version_id}"): (
         "document:upload", (204, 204, 404, 403, 401)),
     ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/download"): (
@@ -97,6 +99,8 @@ async def _prepare(
     status, error = "failed", "processing_failed"
     if path.endswith("/download"):
         status, error = "published", None
+    if path.endswith("/publish"):
+        status, error = "ready", None
     made = await make_document(
         raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, status=status, error_code=error,
         store_root=store_root,
@@ -108,6 +112,8 @@ async def _prepare(
     kwargs: dict[str, Any] = {}
     if method == "PATCH":
         kwargs["json"] = {"title": "Renamed"}
+    if path.endswith("/publish"):
+        kwargs["json"] = {}
     if path.endswith("/versions") and method == "POST":
         kwargs["files"] = {"file": ("v.txt", uuid.uuid4().hex.encode(), "text/plain")}
     return concrete, kwargs

@@ -94,9 +94,13 @@ class Settings(BaseSettings):
     # ── Ingestion worker (design A3, step 5b-2) ─────────────────────────────
     INGEST_GLOBAL_CONCURRENCY: int = 2  # jobs running at once on the whole platform
     INGEST_TENANT_CONCURRENCY: int = 1  # jobs running at once per tenant
-    INGEST_LEASE_SECONDS: int = 120  # job lease and slot TTL; a dead worker's job is free after this
+    # Timing for a 1,000-chunk upload (about 5 minutes of embedding, measured at 2.7-3.5 texts/s with the real
+    # e5-small): the lease is renewed every INGEST_HEARTBEAT_SECONDS and after every embedding batch, so it only has
+    # to outlast a few missed renewals; a dead worker's job is free again after INGEST_LEASE_SECONDS. The cap on
+    # one attempt covers the 2,000,000 character ceiling (about 4,500 Hindi chunks, about 30 minutes) with a margin.
+    INGEST_LEASE_SECONDS: int = 180
     INGEST_HEARTBEAT_SECONDS: int = 30  # how often the lease and both slots are renewed
-    INGEST_MAX_JOB_SECONDS: int = 1800  # hard cap on one attempt (slot max lifetime)
+    INGEST_MAX_JOB_SECONDS: int = 3600  # hard cap on one attempt (slot max lifetime)
     INGEST_MAX_ATTEMPTS: int = 3  # attempts for an outage (database, Redis, storage)
     # A crashed parser child (a signal, SIGXCPU, an OOM kill, no answer) is transient but counts against this
     # smaller budget, so a file that kills its parser cannot loop through all INGEST_MAX_ATTEMPTS attempts.
@@ -122,12 +126,26 @@ class Settings(BaseSettings):
     DOC_PARSE_CPU_SECONDS: int = 120
     DOC_MAX_TEXT_CHARS: int = 2_000_000  # extracted characters per version (text_too_large); hard ceiling too
 
+    # ── Chunking, publishing and archiving (step 5c-2, design A2 and A3) ─────
+    # Token counts come from the embedder's own tokenizer. The e5-small limit of 512 includes the 'passage: ' prefix,
+    # two special tokens and the heading path, which is why the content maximum is 460 (see app/services/chunker.py).
+    CHUNK_TARGET_TOKENS: int = Field(default=380, ge=1)
+    CHUNK_MAX_TOKENS: int = Field(default=460, ge=1)
+    CHUNK_OVERLAP_TOKENS: int = Field(default=60, ge=0)
+    # A ready version without injection flags is published by the worker itself. OFF until the injection scanner
+    # (5d) owns document_versions.flagged_chunk_count: today every version would count as unflagged.
+    DOC_AUTO_PUBLISH_ENABLED: bool = False
+    DOC_ARCHIVE_FILE_RETENTION_DAYS: int = Field(default=30, ge=0)  # an archived version's file waits this long
+    DOC_MAX_ARCHIVED_VERSIONS: int = Field(default=5, ge=0)  # older archived versions are pruned
+
     # ── Embedding model (app/ml, step 5c-1) ─────────────────────────────────
     # Local, verified model files only: nothing is ever downloaded at runtime (python -m app.scripts.fetch_model
     # is the one operator command that does). Empty means "not configured": the embedder refuses to load.
     EMBEDDING_MODEL_DIR: str = ""  # holds <dir>/<model name>/<files of models.lock.json>
     EMBEDDING_MODEL_ID: str = "e5-small"  # a name from app/ml/models.lock.json (or its repo@revision key)
-    EMBEDDING_BATCH_SIZE: int = Field(default=16, ge=1, le=256)  # texts per model run (8 on 2 GB hosts)
+    # Texts per model run. Measured (laptop, real e5-small, one thread): batch 1 = 3.5 texts/s at 1,094 MB peak, 8 = 3.2
+    # at 1,369 MB, 16 = 2.7 at 1,447 MB, 32 = 3.0 at 1,818 MB: a bigger batch is not faster and costs memory.
+    EMBEDDING_BATCH_SIZE: int = Field(default=8, ge=1, le=256)
     EMBEDDING_THREADS: int = Field(default=1, ge=1, le=64)  # onnxruntime intra-op threads
 
     # ── Derived helpers ─────────────────────────────────────────────────────
@@ -187,6 +205,19 @@ class Settings(BaseSettings):
                 "SECRET_KEY and PLATFORM_SECRET_KEY are too weak: must be at least 32 characters."
             )
         return v
+
+    @model_validator(mode="after")
+    def _ingest_settings_must_fit_together(self) -> "Settings":
+        if self.INGEST_LEASE_SECONDS < 4 * self.INGEST_HEARTBEAT_SECONDS:
+            raise ValueError("INGEST_LEASE_SECONDS must be at least four times INGEST_HEARTBEAT_SECONDS")
+        if self.INGEST_MAX_JOB_SECONDS < self.INGEST_LEASE_SECONDS:
+            raise ValueError("INGEST_MAX_JOB_SECONDS must not be below INGEST_LEASE_SECONDS")
+        from app.services.chunker import (
+            ChunkingConfig,  # validates the token budget (raises ValueError)
+        )
+
+        ChunkingConfig(self.CHUNK_TARGET_TOKENS, self.CHUNK_MAX_TOKENS, self.CHUNK_OVERLAP_TOKENS)
+        return self
 
     @model_validator(mode="after")
     def _keys_must_differ(self) -> "Settings":

@@ -39,8 +39,13 @@ owner's chunks nor mark the version ready, failed or queued.
 Deviation from the written order (documented in docs/phase5-design.md): the slots are taken BEFORE the
 version moves to `processing`, so a busy slot never makes a version flap between processing and queued.
 
-`python -m app.workers.ingest` REFUSES to start until the real stages are assembled in step 5c: a
-half pipeline would leave versions stuck in `processing`.
+The stages are the real ones since step 5c-2 (workers/pipeline.py). `python -m app.workers.ingest` starts ONLY
+when the embedding model files verify (the 5c-1 loader) and WORKER_DATABASE_URL, Redis and the document store
+are configured; otherwise it prints why and exits with code 2. The embedder is loaded ONCE at start-up.
+
+The index stage (the last one) finishes the job itself inside its transaction (job `done`, with the version
+`ready`), so the two can never disagree. The worker then neither calls `complete` nor treats the heartbeat's
+"not running any more" as a lost job (STOP_JOB_DONE below).
 """
 
 import asyncio
@@ -68,11 +73,12 @@ from app.core.slots import (
     SlotRejected,
 )
 from app.services import document_limits, document_store
-from app.workers import errors
+from app.workers import errors, pipeline
 from app.workers import stages as stage_module
 from app.workers.db import TenantSessions, WorkerDatabases
 from app.workers.queue import Job, JobQueue
 from app.workers.stages import (
+    JOB_COMPLETED_KEY,
     STAGE_COLUMN_VALUE,
     IngestStages,
     ParseSettings,
@@ -83,6 +89,7 @@ from app.workers.stages import (
 
 if TYPE_CHECKING:
     from app.core.config import Settings
+    from app.ml.embedder import Embedder
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +104,8 @@ HEARTBEAT_MAX_BACKEND_FAILURES = 3
 STOP_SLOT_LEASE_LOST = "slot_lease_lost"
 STOP_REDIS_UNAVAILABLE = "redis_unavailable"
 STOP_MAX_LIFETIME = "max_job_lifetime"
+# The heartbeat found the job `done` by THIS worker's own claim: the index transaction finished it a moment ago
+STOP_JOB_DONE = "job_done"
 
 
 def tenant_slot_key(tenant_id: uuid.UUID) -> str:
@@ -319,10 +328,22 @@ async def _supervise(
     info: VersionInfo,
     limits: document_limits.DocumentLimits,
 ) -> JobOutcome:
-    work = asyncio.create_task(_run_stages(ctx, job, stages, info, limits))
+    sctx = StageContext(
+        job=job,
+        version=info,
+        limits=limits,
+        config=ctx.config,
+        store=ctx.store,
+        tenant_sessions=ctx.tenant_sessions,
+        _session=lambda: active_version_session(ctx.tenant_sessions, job),
+        beat=lambda: _beat_now(ctx, job, lease),
+    )
+    work = asyncio.create_task(_run_stages(ctx, job, stages, sctx))
     beat = asyncio.create_task(_heartbeat(ctx, job, lease))
     try:
         await asyncio.wait({work, beat}, return_when=asyncio.FIRST_COMPLETED)
+        if not work.done() and _beat_says_done(beat):
+            await asyncio.wait({work})  # the index transaction ended the job: let the stage return
     except asyncio.CancelledError:
         work.cancel()
         beat.cancel()
@@ -332,6 +353,8 @@ async def _supervise(
         beat.cancel()
         await asyncio.gather(beat, return_exceptions=True)
         work.result()  # a stage error is raised here and classified by the caller
+        if sctx.results.get(JOB_COMPLETED_KEY):
+            return JobOutcome.DONE  # the index transaction already marked the job done
         if await ctx.queue.complete(job):
             return JobOutcome.DONE
         return JobOutcome.CANCELLED  # the job row was frozen meanwhile (document deleted)
@@ -342,21 +365,33 @@ async def _supervise(
     raise errors.JobStopped(beat.result())
 
 
-async def _run_stages(
-    ctx: WorkerContext, job: Job, stages: IngestStages, info: VersionInfo, limits: document_limits.DocumentLimits
-) -> None:
-    sctx = StageContext(
-        job=job,
-        version=info,
-        limits=limits,
-        config=ctx.config,
-        store=ctx.store,
-        tenant_sessions=ctx.tenant_sessions,
-        _session=lambda: active_version_session(ctx.tenant_sessions, job),
-    )
+def _beat_says_done(beat: "asyncio.Task[str]") -> bool:
+    return beat.done() and not beat.cancelled() and beat.exception() is None and beat.result() == STOP_JOB_DONE
+
+
+async def _run_stages(ctx: WorkerContext, job: Job, stages: IngestStages, sctx: StageContext) -> None:
     for name, stage in stages.ordered():
         await _enter_stage(ctx, job, name)
         await stage(sctx)
+
+
+async def _beat_now(ctx: WorkerContext, job: Job, lease: SlotLease) -> None:
+    """
+    Renew the job lease and both slots right now (a stage calls this after every embedding batch, so a long
+    job never depends on the timer alone). JobStopped when the lease or the job is lost. A Redis outage is
+    left to the heartbeat task, which counts consecutive failures: one failed call says nothing.
+    """
+    cfg = ctx.config
+    try:
+        renewed = await ctx.slots.renew_lease(lease, cfg.lease_seconds, max_total_seconds=cfg.max_job_seconds)
+    except SlotBackendUnavailable:
+        return
+    if renewed is RenewResult.LEASE_LOST:
+        raise errors.JobStopped(STOP_SLOT_LEASE_LOST)
+    if renewed is RenewResult.MAX_LIFETIME:
+        raise errors.JobStopped(STOP_MAX_LIFETIME)
+    if not await ctx.queue.heartbeat(job):
+        raise errors.JobStopped("job_lost")
 
 
 async def _heartbeat(ctx: WorkerContext, job: Job, lease: SlotLease) -> str:
@@ -381,7 +416,8 @@ async def _heartbeat(ctx: WorkerContext, job: Job, lease: SlotLease) -> str:
                 return STOP_MAX_LIFETIME
         try:
             if not await ctx.queue.heartbeat(job):
-                return "job_lost"
+                # Not running any more: lost, or finished by this worker's own index transaction a moment ago
+                return STOP_JOB_DONE if await ctx.queue.is_completed_by(job) else "job_lost"
         except Exception:
             return "db_unavailable"
 
@@ -521,26 +557,46 @@ def install_signal_handlers(stop: asyncio.Event) -> None:
             signal.signal(sig, lambda *_a: loop.call_soon_threadsafe(stop.set))
 
 
-# ── The default entry point ──────────────────────────────────────────────────
+# ── The entry point ──────────────────────────────────────────────────────────
 
 
-class PipelineNotAssembled(RuntimeError):
-    """The real stages do not exist yet (step 5c)."""
+class WorkerNotConfigured(RuntimeError):
+    """The worker cannot start: something it needs is missing or does not verify. The message says what."""
 
 
-def assemble_default_stages() -> IngestStages:
+def prepare_embedder(settings: "Settings", *, load: Callable[..., "Embedder"] | None = None) -> "Embedder":
     """
-    The production pipeline. Until step 5c assembles the real parse, chunk, embed and index stages
-    this refuses: starting with fake or missing stages would leave every version stuck in
-    `processing` (or mark empty results as ready).
+    Check the configuration and load the embedding model ONCE (blocking; start-up only). Raises
+    WorkerNotConfigured with a clear message when WORKER_DATABASE_URL, Redis, the document store or the model
+    directory is missing, or when the model files do not verify against models.lock.json (the 5c-1 loader).
+    The FakeEmbedder is never reachable from here: tests pass it to pipeline.build_ingest_stages directly.
     """
-    raise PipelineNotAssembled(
-        "The ingestion worker is not started: the real pipeline stages (parse, chunk, embed, index) are "
-        "assembled in step 5c. Run it with injected stages in tests only."
-    )
+    from pathlib import Path
+
+    from app.ml.lock import ModelLoadError
+
+    problems = pipeline.configuration_problems(settings)
+    if problems:
+        raise WorkerNotConfigured("The ingestion worker is not started:\n  - " + "\n  - ".join(problems))
+    if load is None:
+        from app.ml.loader import load_embedder
+
+        load = load_embedder
+    try:
+        return load(
+            settings.EMBEDDING_MODEL_ID,
+            Path(settings.EMBEDDING_MODEL_DIR),
+            batch_size=settings.EMBEDDING_BATCH_SIZE,
+            threads=settings.EMBEDDING_THREADS,
+        )
+    except ModelLoadError as exc:
+        raise WorkerNotConfigured(
+            f"The ingestion worker is not started: the embedding model files do not verify ({exc}). "
+            "Run python -m app.scripts.fetch_model e5-small --out <EMBEDDING_MODEL_DIR>."
+        ) from exc
 
 
-async def _amain(stages: IngestStages) -> None:
+async def _amain(embedder: "Embedder") -> None:
     from app.core.config import settings
     from app.core.slots import default_manager
     from app.services.document_store import get_document_store
@@ -557,6 +613,9 @@ async def _amain(stages: IngestStages) -> None:
         tenant_concurrency=config.tenant_concurrency,
     )
     store = get_document_store()
+    stages = pipeline.build_ingest_stages(
+        store=store, embedder=embedder, parse=config.parse, settings=pipeline.PipelineSettings.from_settings(settings)
+    )
     ctx = WorkerContext(
         queue=queue,
         tenant_sessions=dbs.tenant_sessions,
@@ -584,15 +643,17 @@ async def _amain(stages: IngestStages) -> None:
 
 
 def main() -> int:
+    from app.core.config import settings
+
     # The worker's environment holds the database URLs and SECRET_KEY. Make the process non-dumpable
     # (Linux) so a compromised parser child of the same user cannot read /proc/<this pid>/environ.
     sandbox_child.set_non_dumpable()
     try:
-        stages = assemble_default_stages()
-    except PipelineNotAssembled as exc:
+        embedder = prepare_embedder(settings)
+    except WorkerNotConfigured as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    asyncio.run(_amain(stages))
+    asyncio.run(_amain(embedder))
     return 0
 
 

@@ -11,7 +11,7 @@ One response model per endpoint; see docs/api/phase5.md.
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 
 class _Strict(BaseModel):
@@ -109,6 +109,12 @@ class DocumentUpdateRequest(_Strict):
 
     title: str | None = Field(default=None, min_length=1, max_length=200)
     class_ids: list[uuid.UUID] | None = Field(default=None, min_length=1, max_length=50)
+
+
+class PublishRequest(_Strict):
+    """POST .../versions/{version_id}/publish. `acknowledge_flags` must be a real boolean (no "yes", no null)."""
+
+    acknowledge_flags: StrictBool = False
 
 
 class TenantDocumentLimitsResponse(_Strict):
