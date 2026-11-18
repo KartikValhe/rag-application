@@ -164,6 +164,9 @@ class JobOutcome(enum.Enum):
     STOPPED = "stopped"  # heartbeat lost a slot or Redis: released and requeued
     BACKEND_DOWN = "backend_down"  # Redis or the database unavailable at the start: requeued, attempt refunded
     CANCELLED = "cancelled"  # the version or the job row was taken away (document deleted)
+    # run_one only: the claim found nothing for this worker (the queue is empty, or another worker was first).
+    # No job of this worker was touched. ingest_document_version never returns it.
+    NO_JOB = "no_job"
 
 
 @dataclass
@@ -268,11 +271,14 @@ async def _enter_stage(ctx: WorkerContext, job: Job, name: str) -> None:
 # ── The job ──────────────────────────────────────────────────────────────────
 
 
-async def run_one(ctx: WorkerContext, stages: IngestStages) -> JobOutcome | None:
-    """Claim the next job and run it. None when nothing is claimable."""
+async def run_one(ctx: WorkerContext, stages: IngestStages) -> JobOutcome:
+    """
+    Claim the next job and run it. Always returns a JobOutcome (or raises): NO_JOB when nothing was claimable,
+    which also happens when another worker claims the job first.
+    """
     job = await ctx.queue.claim(ctx.worker_id)
     if job is None:
-        return None
+        return JobOutcome.NO_JOB
     return await ingest_document_version(job, stages, ctx)
 
 

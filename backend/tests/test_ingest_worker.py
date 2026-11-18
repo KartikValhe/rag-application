@@ -31,6 +31,7 @@ from tests.fixtures.worker import (
     chunk_count,
     job_row,
     make_context,
+    make_queue,
     queued_version,
     version_row,
 )
@@ -83,10 +84,38 @@ async def test_a_job_runs_all_stages_in_order_and_ends_done(
     await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 
-async def test_nothing_to_claim_returns_none(
+async def test_nothing_to_claim_returns_the_no_job_outcome(
     worker_dbs: WorkerDatabases, tmp_path: Path, quiet_queue: None, ingest_slots: SlotManager
 ) -> None:
-    assert await _run(make_context(worker_dbs, tmp_path, ingest_slots), FakePipeline()) is None
+    assert await _run(make_context(worker_dbs, tmp_path, ingest_slots), FakePipeline()) == ingest.JobOutcome.NO_JOB
+
+
+async def test_the_runner_contract_has_no_none_return(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
+    quiet_queue: None, ingest_slots: SlotManager,
+) -> None:
+    """
+    run_one always answers with a JobOutcome, never None (regression for a flaky test that read a None as a
+    failure with no explanation). "Another worker claimed the job first" is NO_JOB, and that worker keeps it.
+    """
+    import typing
+
+    assert typing.get_type_hints(ingest.run_one)["return"] is ingest.JobOutcome
+    assert typing.get_type_hints(ingest.ingest_document_version)["return"] is ingest.JobOutcome
+
+    made = await queued_version(raw_db, academic_world.a, tmp_path)
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots)
+    other = await make_queue(worker_dbs).claim("other-worker")  # somebody else is first
+    assert other is not None and other.version_id == made.version.id
+    pipeline = FakePipeline()
+    outcome = await _run(ctx, pipeline)
+    assert outcome is not None
+    assert outcome == ingest.JobOutcome.NO_JOB
+    assert pipeline.calls == []  # no stage ran for a job this worker never owned
+    row = await job_row(raw_db, made.job.id)
+    assert (row["status"], row["worker_id"], row["attempts"]) == ("running", "other-worker", 1)
+    assert (await version_row(raw_db, made.version.id)).status == "queued"  # untouched
+    await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 
 # ── Busy slots ───────────────────────────────────────────────────────────────

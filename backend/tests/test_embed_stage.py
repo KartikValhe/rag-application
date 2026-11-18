@@ -8,14 +8,17 @@ tenant sessions and Postgres are real; the embedder is the FakeEmbedder. The _te
 """
 
 import asyncio
+import threading
+from collections.abc import Awaitable
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.slots import SlotManager
+from app.core.slots import RenewResult, SlotManager
 from app.db.models.audit import AuditLog
 from app.db.models.document import Chunk, ChunkEmbedding
 from app.services.chunker import ChunkingConfig, chunk_document
@@ -34,14 +37,24 @@ from tests.fixtures.pipeline import (
     slides_doc,
     stub_stages,
 )
-from tests.fixtures.worker import FAST, job_row, make_context, queued_version, version_row
+from tests.fixtures.worker import (
+    FAST,
+    FakeClock,
+    ManualTicker,
+    job_row,
+    make_context,
+    make_queue,
+    queued_version,
+    version_row,
+)
+from tests.security.worker_assertions import assert_no_slots_held
 
 pytestmark = pytest.mark.asyncio
 
 
 async def run_job(
     dbs: WorkerDatabases, tmp_path: Path, slots: SlotManager, st: stages.IngestStages, *, config: ingest.IngestSettings = FAST
-) -> ingest.JobOutcome | None:
+) -> ingest.JobOutcome:
     return await ingest.run_one(make_context(dbs, tmp_path, slots, config=config), st)
 
 
@@ -266,32 +279,99 @@ async def test_a_lost_job_stops_the_embedding_between_batches(
     assert len(emb.batches) == 2
 
 
+class GatedEmbedder(RecordingEmbedder):
+    """
+    A model that waits, on its executor thread, for permits the TEST hands out: no wall-clock sleep decides anything.
+    `entered` is set (on the event loop) when the first batch starts. A batch that is never released fails after
+    `gate_timeout` seconds instead of hanging the thread.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, *, gate_timeout: float = 30.0) -> None:
+        super().__init__()
+        self._loop = loop
+        self.entered = asyncio.Event()
+        self.gate = threading.Semaphore(0)
+        self.gate_timeout = gate_timeout
+
+    def embed_passages(self, texts: object) -> list[list[float]]:
+        self._loop.call_soon_threadsafe(self.entered.set)
+        if not self.gate.acquire(timeout=self.gate_timeout):
+            raise RuntimeError("the test never released the model (gate timeout)")
+        return super().embed_passages(texts)
+
+
+async def within[T](awaitable: Awaitable[T], what: str, seconds: float = 30.0) -> T:
+    """Await with a guard: a hang fails fast with a readable message instead of freezing the suite."""
+    future = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({future}, timeout=seconds)
+    if not done:
+        future.cancel()
+        raise AssertionError(f"timed out after {seconds:.0f} s waiting for {what}")
+    return future.result()
+
+
 async def test_a_slow_model_keeps_the_lease_alive_through_the_heartbeat_and_the_job_completes(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
-    quiet_queue: None, ingest_slots: SlotManager,
+    quiet_queue: None, ingest_slots: SlotManager, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The model call takes far longer than the lease. It runs in an executor, so the heartbeat keeps renewing;
-    a second worker polling the queue the whole time never steals the job."""
-    from tests.fixtures.worker import make_queue
+    """
+    The model call outlives the job lease. It runs in an executor, so the heartbeat keeps renewing; a second
+    worker polling the queue the whole time never steals the job. No wall-clock time decides anything: the model
+    waits for permits the test gives, the heartbeat for a manual tick, and the job lease runs on a fake clock that
+    passes the ORIGINAL lease while the model is still busy. The second worker starts only after the first one
+    holds the job (it used to race the worker for the first claim, which made this test flaky).
+    """
+    w = academic_world.a
+    made = await queued_version(raw_db, w, tmp_path)
+    clock = FakeClock(datetime.now(UTC))
+    ticker = ManualTicker()
+    config = replace(FAST, lease_seconds=100.0, max_job_seconds=3600.0)
+    emb = GatedEmbedder(asyncio.get_running_loop())
+    st = stub_stages(slides_doc([f"text {i}" for i in range(40)]), emb)  # 5 batches of 8
+    ctx = make_context(worker_dbs, tmp_path, ingest_slots, config=config, clock=clock, sleep=ticker.sleep)
+    thief_queue = make_queue(worker_dbs, config, clock=clock)
 
-    made = await queued_version(raw_db, academic_world.a, tmp_path)
-    config = replace(FAST, lease_seconds=1.5, heartbeat_seconds=0.15, max_job_seconds=120.0)
-    emb = RecordingEmbedder(delay=0.4)  # 5 batches x 0.4 s = 2 s of model time against a 1.5 s lease
-    st = stub_stages(slides_doc([f"text {i}" for i in range(40)]), emb)
-    runner = asyncio.create_task(run_job(worker_dbs, tmp_path, ingest_slots, st, config=config))
-    thief_queue = make_queue(worker_dbs, config)
+    renewals: list[RenewResult] = []
+    real_renew = ingest_slots.renew_lease
+
+    async def spy(*args: object, **kwargs: object) -> RenewResult:
+        result = await real_renew(*args, **kwargs)  # type: ignore[arg-type]
+        renewals.append(result)
+        return result
+
+    monkeypatch.setattr(ingest_slots, "renew_lease", spy)
+
+    runner = asyncio.create_task(ingest.run_one(ctx, st))
     stolen = []
-    while not runner.done():
-        got = await thief_queue.claim("thief")
-        if got is not None:
-            stolen.append(got)
-        await asyncio.sleep(0.2)
-    assert await runner == ingest.JobOutcome.DONE
+    try:
+        await within(emb.entered.wait(), "the first model batch to start")  # the worker holds the job now
+        assert (await job_row(raw_db, made.job.id))["status"] == "running"
+        for _ in range(3):
+            clock.advance(80.0)  # 240 s in all: the original 100 s lease runs out in the second round
+            got = await thief_queue.claim("thief")
+            if got is not None:
+                stolen.append(got)
+            await within(ticker.beat(), "one heartbeat round")
+            lease = (await job_row(raw_db, made.job.id))["lease_expires_at"]
+            assert lease == clock.now() + timedelta(seconds=config.lease_seconds)  # renewed from NOW
+        assert not emb.batches  # all of that happened while the first batch was still inside the model
+        assert renewals == [RenewResult.RENEWED] * 3  # the heartbeat renewed the slots every round
+        assert await thief_queue.claim("thief") is None
+        emb.gate.release(5)
+        outcome = await within(runner, "the job to finish")
+    finally:
+        emb.gate.release(100)  # never leave the model thread waiting
+        if not runner.done():
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+    assert outcome == ingest.JobOutcome.DONE
     assert stolen == []
     assert len(emb.batches) == 5
+    assert renewals == [RenewResult.RENEWED] * (3 + 5)  # three heartbeat rounds, then one beat after each batch
     row = await job_row(raw_db, made.job.id)
     assert (row["status"], row["attempts"]) == ("done", 1)
     assert (await version_row(raw_db, made.version.id)).status == "ready"
+    await assert_no_slots_held(ingest_slots, w.id)
 
 
 async def test_a_model_that_returns_the_wrong_shape_is_a_crash_not_a_corrupt_write(

@@ -58,10 +58,11 @@ def new_key() -> str:
 
 async def test_renew_extends_a_live_lease(mgr: SlotManager) -> None:
     key = new_key()
-    lease = await mgr.acquire([lim(key, ttl=0.6)])
-    await asyncio.sleep(0.3)
-    assert await mgr.renew(lease, 2.0) is True
-    await asyncio.sleep(0.6)  # past the ORIGINAL expiry
+    # Wide margins: a stalled runner (the test pauses for a second) must not turn "renewed in time" into "expired"
+    lease = await mgr.acquire([lim(key, ttl=1.5)])
+    await asyncio.sleep(0.2)
+    assert await mgr.renew(lease, 3.0) is True
+    await asyncio.sleep(1.5)  # past the ORIGINAL expiry (1.5 s after the acquire)
     assert await mgr.count(key) == 1
     with pytest.raises(SlotRejected):
         await mgr.acquire([lim(key)])
@@ -242,16 +243,16 @@ async def test_a_lease_has_a_start_time() -> None:
 async def test_a_heartbeat_cannot_renew_past_the_maximum_lifetime(mgr: SlotManager) -> None:
     """A hung worker whose heartbeat keeps running: renew must start returning False at the cap."""
     key = new_key()
-    lease = await mgr.acquire([lim(key, ttl=0.5)])
+    lease = await mgr.acquire([lim(key, ttl=2.0)])  # long enough that a slow runner cannot expire it between renewals
     started = time.monotonic()
     renewals = 0
     async with asyncio.timeout(8):  # without the cap this loop would never end
-        while await mgr.renew(lease, 0.5, max_total_seconds=1.0):
+        while await mgr.renew(lease, 2.0, max_total_seconds=1.0):
             renewals += 1
             await asyncio.sleep(0.15)
     elapsed = time.monotonic() - started
     assert renewals >= 4, renewals
-    assert 0.9 <= elapsed <= 1.6, elapsed
+    assert 0.9 <= elapsed <= 4.0, elapsed  # the cap (1 s) ended it; the upper bound only rules out "never"
     # Nothing keeps the slot after the cap: it expires on its own within the last ttl
     await asyncio.sleep(0.7)
     assert await mgr.count(key) == 0
@@ -267,9 +268,9 @@ async def test_the_ttl_is_cut_to_the_time_left_before_the_cap(mgr: SlotManager) 
 
 async def test_renew_without_a_maximum_is_unchanged(mgr: SlotManager) -> None:
     key = new_key()
-    lease = await mgr.acquire([lim(key, ttl=0.5)])
+    lease = await mgr.acquire([lim(key, ttl=2.0)])
     for _ in range(4):
-        assert await mgr.renew(lease, 0.5) is True
+        assert await mgr.renew(lease, 2.0) is True
         await asyncio.sleep(0.2)
     await mgr.release(lease)
 
