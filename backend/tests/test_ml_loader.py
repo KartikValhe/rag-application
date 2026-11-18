@@ -393,12 +393,17 @@ def test_build_embedder_uses_the_configured_name_dir_batch_and_threads(
 
 
 def test_the_worker_entry_point_still_refuses_to_start() -> None:
-    """5c-1 builds the embedding layer only: the pipeline is wired in 5c-2/5c-3, so the entry point refuses."""
+    """The entry point exits with code 2 and says what is missing when the worker is not configured.
+
+    The child is started with an explicitly EMPTY EMBEDDING_MODEL_DIR (the process environment wins over a
+    .env file), so the result does not depend on whether this machine has the model configured. Without that,
+    a configured machine started the real worker, which then ran until the timeout."""
     import subprocess
     import sys
 
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    backend = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(backend), EMBEDDING_MODEL_DIR="")
     res = subprocess.run([sys.executable, "-m", "app.workers.ingest"], capture_output=True, text=True,
-                         env=env, timeout=60, cwd=str(Path(__file__).resolve().parents[1]))
+                         env=env, timeout=30, cwd=str(backend))
     assert res.returncode == 2
-    assert res.stderr.strip()
+    assert "EMBEDDING_MODEL_DIR" in res.stderr  # refused for this reason, not for some other error

@@ -50,7 +50,7 @@ npm run test:e2e        # Playwright; needs backend + frontend running with seed
 
 - While working: `run_tests fast` (no Postgres, Redis or child process; runs with docker stopped) plus the touched module's tests, e.g. `run_tests full tests/test_x.py`.
 - Before reporting: `run_tests gate` (fast + security; `--touched` adds the tests of changed modules), then `ruff check .` and `mypy app`.
-- `run_tests full` belongs to CI or to an explicit request. Run it in parts (`-m "slow and not security"`, then the rest) to stay under the 10-minute command limit.
+- `run_tests full` belongs to CI or to an explicit request. It takes about 22 minutes on a Windows developer machine (measured 2026-11-18), and each half of a two-part split already takes more than 10 minutes, so splitting no longer stays under the command limit. Run it once in the background (redirect its output to a file outside the repo) and wait for it to finish; the summary line is the last line of that file.
 - Every report quotes the exact pytest summary line (the runner prints it as its last line).
 - Never more than one pytest process at a time (the runner's lock file enforces it for run_tests, not for plain `pytest`).
 - `real_model` tests (need `RUN_REAL_MODEL=1` and model files) and Linux-only tests (`linux` marker) are skipped locally on Windows. Linux-only tests run in CI.
