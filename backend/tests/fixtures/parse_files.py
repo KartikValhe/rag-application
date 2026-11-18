@@ -13,7 +13,6 @@ Small REAL files for the document parser tests (step 5b-3), generated inside the
 """
 
 import io
-import re
 import tempfile
 import zipfile
 from collections.abc import Iterator
@@ -238,21 +237,3 @@ def leftover_guard(monkeypatch: Any, store_root: Path | None = None) -> Iterator
     guard.start(monkeypatch)
     yield guard
     guard.check()
-
-
-def page_texts_of(pdf_bytes: bytes) -> list[str]:
-    """Text of every page by a reference route (pypdfium2 directly), for sanity checks of the builders."""
-    import pypdfium2 as pdfium
-
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    try:
-        out = []
-        for i in range(len(pdf)):
-            page = pdf[i]
-            tp = page.get_textpage()
-            out.append(re.sub(r"\s+", " ", tp.get_text_range()).strip())
-            tp.close()
-            page.close()
-        return out
-    finally:
-        pdf.close()

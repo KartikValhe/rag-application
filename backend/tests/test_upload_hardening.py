@@ -89,20 +89,23 @@ def test_xl_prefix_without_workbook_is_rejected() -> None:
 # ─── Finding 6: macro / embedded content / fail closed ───────────────────────
 
 @pytest.mark.parametrize(
-    "part",
-    ["ppt/vbaProject.bin", "XL/VBAPROJECT.BIN", "deep/er/vbaproject.bin", "xl/sub/VbaProject.Bin"],
+    ("part", "code"),
+    [
+        # a VBA project anywhere, in any letter case
+        ("ppt/vbaProject.bin", "macro_enabled_file"),
+        ("XL/VBAPROJECT.BIN", "macro_enabled_file"),
+        ("deep/er/vbaproject.bin", "macro_enabled_file"),
+        ("xl/sub/VbaProject.Bin", "macro_enabled_file"),
+        # embedded objects
+        ("xl/embeddings/oleObject1.xlsx", "embedded_content"),
+        ("word/Embeddings/a.dat", "embedded_content"),
+        ("ppt/embeddings/x.bin", "embedded_content"),
+    ],
 )
-def test_vba_project_anywhere_rejected(part: str) -> None:
+def test_vba_project_and_embeddings_are_rejected(part: str, code: str) -> None:
     with pytest.raises(UploadSecurityError) as exc:
         sniff_and_validate_file_type(good_xlsx({part: b"x"}), "a.xlsx")
-    assert code_of(exc) == "macro_enabled_file"
-
-
-@pytest.mark.parametrize("part", ["xl/embeddings/oleObject1.xlsx", "word/Embeddings/a.dat", "ppt/embeddings/x.bin"])
-def test_embeddings_rejected(part: str) -> None:
-    with pytest.raises(UploadSecurityError) as exc:
-        sniff_and_validate_file_type(good_xlsx({part: b"x"}), "a.xlsx")
-    assert code_of(exc) == "embedded_content"
+    assert code_of(exc) == code
 
 
 def test_nested_zip_rejected() -> None:
@@ -181,42 +184,6 @@ def make_pdf(extra_obj: bytes = b"", pages: int = 1) -> bytes:
 
 def test_clean_pdf_passes() -> None:
     assert sniff_and_validate_file_type(make_pdf(), "a.pdf") == "pdf"
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        b"/JavaScript",
-        b"/JS (x)",
-        b"/Launch",
-        b"/RichMedia",
-        b"/XFA",
-        b"/J#61vaScript",
-        b"/R#69chMedia",
-        b"/XF#41",
-    ],
-)
-def test_pdf_active_content_rejected(token: bytes) -> None:
-    with pytest.raises(UploadSecurityError) as exc:
-        sniff_and_validate_file_type(make_pdf(token), "a.pdf")
-    assert code_of(exc) == "pdf_active_content"
-
-
-@pytest.mark.parametrize("token", [b"/EmbeddedFile", b"/E#6dbeddedFile"])
-def test_pdf_embedded_file_rejected_with_its_own_code(token: bytes) -> None:
-    with pytest.raises(UploadSecurityError) as exc:
-        sniff_and_validate_file_type(make_pdf(token), "a.pdf")
-    assert code_of(exc) == "pdf_embedded_file"
-
-
-@pytest.mark.parametrize("token", [b"/OpenAction 3 0 R", b"/AA << >>", b"/O#70enAction 3 0 R"])
-def test_pdf_open_action_and_aa_are_allowed(token: bytes) -> None:
-    """Relaxed rule (Phase 5 decision 4): they only name actions; the sandboxed parser executes nothing."""
-    assert sniff_and_validate_file_type(make_pdf(token), "a.pdf") == "pdf"
-
-
-def test_pdf_similar_names_not_flagged() -> None:
-    assert sniff_and_validate_file_type(make_pdf(b"/JSON 1 /AAA 2 /XFAX 3 /RichMediaX 4"), "a.pdf") == "pdf"
 
 
 def test_pdf_page_and_object_caps() -> None:

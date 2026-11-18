@@ -11,12 +11,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
-class DayOfWeek(int):
-    """0 = Monday, 1 = Tuesday, 2 = Wednesday, 3 = Thursday, 4 = Friday, 5 = Saturday, 6 = Sunday."""
-    pass
-
-
 DAY_NAMES = {
     0: "Monday",
     1: "Tuesday",

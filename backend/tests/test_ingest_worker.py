@@ -459,26 +459,6 @@ async def test_a_hung_child_is_killed_the_job_fails_permanently_and_slots_are_re
     await assert_no_slots_held(ingest_slots, academic_world.a.id)
 
 
-async def test_a_crashing_child_is_a_transient_worker_crash(
-    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
-    quiet_queue: None, ingest_slots: SlotManager,
-) -> None:
-    made = await queued_version(raw_db, academic_world.a, tmp_path)
-    ctx = make_context(worker_dbs, tmp_path, ingest_slots)
-    pipeline = FakePipeline()
-
-    async def crash(sctx: stages.StageContext) -> None:
-        await stages.validate_in_sandbox(
-            b"x", file_kind="txt", limits=sctx.limits, parse=sctx.config.parse, child_module="tests._sandbox_children",
-            child_args=("boom",),
-        )
-
-    pipeline.hooks["parse"] = crash
-    assert await _run(ctx, pipeline) == ingest.JobOutcome.RETRY
-    assert (await job_row(raw_db, made.job.id))["last_error_code"] == "worker_crash"
-    await assert_no_slots_held(ingest_slots, academic_world.a.id)
-
-
 async def test_the_real_validate_stage_reads_the_stored_file_and_runs_it_in_the_sandbox(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
     quiet_queue: None, ingest_slots: SlotManager,

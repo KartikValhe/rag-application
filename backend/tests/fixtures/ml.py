@@ -36,7 +36,6 @@ WORDS = (
     + "महाराष्ट्राची मुंबई आहे इतिहास शेतकरी पाऊस शाळा विद्यार्थी शिक्षिका पुस्तक".split()  # noqa: SIM905
 )
 VOCAB = {tok: i for i, tok in enumerate(SPECIALS + WORDS)}
-PAD_ID = VOCAB["<pad>"]
 
 
 def sha256_of(path: Path) -> str:

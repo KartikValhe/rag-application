@@ -26,8 +26,6 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.core import sandbox
-from app.core.sandbox import describe_exit as _describe_exit  # noqa: F401  (kept for callers and tests)
-from app.core.sandbox import kill_tree as _kill_tree  # noqa: F401  (kept for callers and tests)
 from app.core.slots import SlotLease, SlotLimit, SlotManager, SlotRejected, default_manager
 from app.core.upload_security import UploadSecurityError
 

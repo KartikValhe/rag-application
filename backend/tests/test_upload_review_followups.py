@@ -63,7 +63,6 @@ def rels(rel_type: str, target: str, mode: str = "") -> bytes:
     ).encode()
 
 
-MAIN_PART = {"docx": "word/document.xml", "pptx": "ppt/presentation.xml", "xlsx": "xl/workbook.xml"}
 ROOT = {"docx": "word", "pptx": "ppt", "xlsx": "xl"}
 
 

@@ -66,22 +66,19 @@ async def test_wcag_valid_colors() -> None:
         validate_wcag_contrast(c)
 
 
-async def test_wcag_rejects_bright_yellow_on_white_surface() -> None:
+@pytest.mark.parametrize(
+    ("color", "fragment"),
+    [
+        ("#ffff00", "light theme surface"),  # bright yellow on a white surface
+        ("#050505", "dark theme surface"),  # dark colour on a dark surface
+        ("#0284c7", "contrast"),  # mid tone with insufficient text contrast
+    ],
+    ids=["bright-yellow-on-white", "dark-on-dark", "mid-tone-text"],
+)
+async def test_wcag_rejects_inaccessible_colors(color: str, fragment: str) -> None:
     with pytest.raises(ValueError) as exc:
-        validate_wcag_contrast("#ffff00")
-    assert "light theme surface" in str(exc.value).lower()
-
-
-async def test_wcag_rejects_dark_color_on_dark_surface() -> None:
-    with pytest.raises(ValueError) as exc:
-        validate_wcag_contrast("#050505")
-    assert "dark theme surface" in str(exc.value).lower()
-
-
-async def test_wcag_rejects_mid_tone_insufficient_text() -> None:
-    with pytest.raises(ValueError) as exc:
-        validate_wcag_contrast("#0284c7")
-    assert "contrast" in str(exc.value).lower()
+        validate_wcag_contrast(color)
+    assert fragment in str(exc.value).lower()
 
 
 # ── 2. Design Tokens Schema Tests ─────────────────────────────────────────────

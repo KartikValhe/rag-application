@@ -8,7 +8,6 @@ import csv
 import io
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import structlog
 from fastapi import HTTPException, status
@@ -163,16 +162,6 @@ class ImportRow:
         self.role_name = role_name
         self.success = success
         self.error = error
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "row_number": self.row_number,
-            "email": self.email,
-            "full_name": self.full_name,
-            "role_name": self.role_name,
-            "success": self.success,
-            "error": self.error,
-        }
 
 
 async def bulk_import_users(

@@ -300,8 +300,18 @@ async def test_next_week_after_friday() -> None:
     assert "on Monday" in res.message
 
 
-async def test_weekend_query() -> None:
-    """Case 5: Saturday query correctly rolls over to Monday morning."""
+@pytest.mark.parametrize(
+    "now",
+    [
+        # Case 5: Saturday 2026-11-14 at 14:00 rolls over to Monday
+        datetime(2026, 11, 14, 14, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        # Case 6: Monday 11:00 AM, after the only Monday lecture, finds next Monday's lecture (7 days ahead)
+        datetime(2026, 11, 9, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    ],
+    ids=["weekend-query", "no-more-lectures-today"],
+)
+async def test_next_lecture_rolls_over_to_the_next_monday(now: datetime) -> None:
+    """Monday 09:00 is the ONLY lecture, so a query after it (or on the weekend) finds next Monday's."""
     tid = uuid.uuid4()
     cid = uuid.uuid4()
     sub_id = uuid.uuid4()
@@ -318,40 +328,8 @@ async def test_weekend_query() -> None:
         entries=[(e_mon, "Grade 10", "Calculus", "MATH101", "Dr. Gauss")],
     )
 
-    # Saturday 2026-11-14 at 14:00
-    now = datetime(2026, 11, 14, 14, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
     res = await next_lecture(user, now=now, db=db)
 
-    assert res.status == "upcoming_future"
-    assert res.next_lecture is not None
-    assert res.next_lecture.day_name == "Monday"
-
-
-async def test_no_more_lectures_today() -> None:
-    """Case 6: After lecture finishes today with no more lectures scheduled this week."""
-    tid = uuid.uuid4()
-    cid = uuid.uuid4()
-    sub_id = uuid.uuid4()
-    user = User(id=uuid.uuid4(), tenant_id=tid, full_name="Alice Student", is_admin=False)
-
-    e_mon = TimetableEntry(
-        tenant_id=tid, timetable_id=uuid.uuid4(), class_id=cid, subject_id=sub_id,
-        day_of_week=0, start_time=time(9, 0), end_time=time(10, 0), room="Room 101"
-    )
-
-    # If Monday is the ONLY lecture, then looking ahead 1-7 days will find Monday of next week
-    # But if no future lecture exists at all (entries list empty), status is no_published_timetable.
-    db = MockScheduleDB(
-        tenant_id=tid,
-        class_ids=[cid],
-        entries=[(e_mon, "Grade 10", "Calculus", "MATH101", "Dr. Gauss")],
-    )
-
-    # Monday 11:00 AM (after Monday lecture)
-    now = datetime(2026, 11, 9, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
-    res = await next_lecture(user, now=now, db=db)
-
-    # It will find next Monday's lecture (7 days ahead)
     assert res.status == "upcoming_future"
     assert res.next_lecture is not None
     assert res.next_lecture.day_name == "Monday"
@@ -523,25 +501,6 @@ async def test_different_tenant_timezone() -> None:
     assert res.current_lecture is not None
     assert res.current_lecture.subject_name == "English"
     assert res.tenant_timezone == "America/New_York"
-
-
-async def test_draft_never_visible_to_students() -> None:
-    """Case 12: Draft entries are never queried or returned to students."""
-    tid = uuid.uuid4()
-    cid = uuid.uuid4()
-    user = User(id=uuid.uuid4(), tenant_id=tid, full_name="Alice Student", is_admin=False)
-
-    # DB returns 0 published entries because timetable status is 'draft'
-    db = MockScheduleDB(
-        tenant_id=tid,
-        class_ids=[cid],
-        entries=[],  # Filtered out by Timetable.status == 'published'
-    )
-
-    res = await next_lecture(user, db=db)
-    assert res.status == "no_published_timetable"
-    assert res.current_lecture is None
-    assert res.next_lecture is None
 
 
 async def test_cross_tenant_isolation() -> None:

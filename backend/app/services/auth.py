@@ -108,15 +108,6 @@ async def _record_login_failure(
         await redis.expire(email_key, settings.LOGIN_THROTTLE_WINDOW_SECONDS)
 
 
-async def _check_and_increment_throttle(
-    tenant_id: str,
-    email: str,
-    ip: str | None = None,
-) -> None:
-    """Deprecated alias for backwards compatibility."""
-    await _check_throttle(tenant_id, email, ip)
-
-
 async def _clear_throttle(tenant_id: str, email: str) -> None:
     """Clear the email throttle counter after a successful login."""
     redis = await get_redis()

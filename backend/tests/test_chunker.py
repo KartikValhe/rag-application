@@ -31,10 +31,6 @@ def subword(text: str) -> int:
     return max(1, math.ceil(len(text) / 3)) if text else 0
 
 
-def embedded_tokens(chunk: TextChunk, count: Callable[[str], int]) -> int:
-    return count(chunk.embedding_text)
-
-
 def check_bounds(chunks: list[TextChunk], count: Callable[[str], int], config: ChunkingConfig = CFG) -> None:
     for c in chunks:
         assert c.content.strip(), "empty chunk"

@@ -259,18 +259,6 @@ class FakePipeline:
         )
 
 
-def raise_once(exc_factory: Callable[[], BaseException]) -> StageHook:
-    """A hook that raises on its first call only."""
-    state = {"n": 0}
-
-    async def hook(_ctx: stages.StageContext) -> None:
-        state["n"] += 1
-        if state["n"] == 1:
-            raise exc_factory()
-
-    return hook
-
-
 # ── Deterministic time and outages ───────────────────────────────────────────
 
 

@@ -28,34 +28,34 @@ from app.db.models.tenant import Tenant
 from app.db.models.user import User
 
 
-def test_jwt_secret_fails_if_weak() -> None:
-    """Settings must reject short or default secret keys (< 32 characters)."""
+@pytest.mark.parametrize(
+    ("secret_key", "platform_secret_key", "message"),
+    [
+        # short keys (< 32 characters)
+        ("too_short", "also_too_short", "SECRET_KEY and PLATFORM_SECRET_KEY are too weak"),
+        # the committed 'change-me' placeholders
+        (
+            "change-me-placeholder-key-long-enough",
+            "change-me-another-placeholder-key-here",
+            "must be set to real secrets",
+        ),
+    ],
+    ids=["too-short", "placeholder"],
+)
+def test_weak_or_placeholder_jwt_secrets_are_rejected(
+    secret_key: str, platform_secret_key: str, message: str
+) -> None:
+    """Settings must reject short keys and 'change-me' placeholder keys."""
     with pytest.raises(ValidationError) as exc:
         Settings(
             _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
-            SECRET_KEY="too_short",
-            PLATFORM_SECRET_KEY="also_too_short",
+            SECRET_KEY=secret_key,
+            PLATFORM_SECRET_KEY=platform_secret_key,
         )
-    errors = str(exc.value)
-    assert "SECRET_KEY and PLATFORM_SECRET_KEY are too weak" in errors
-
-
-def test_jwt_secret_fails_if_default_placeholder() -> None:
-    """Settings must reject 'change-me' placeholder keys."""
-    with pytest.raises(ValidationError) as exc:
-        Settings(
-            _env_file=None,
-            DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
-            PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
-            MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
-            SECRET_KEY="change-me-placeholder-key-long-enough",
-            PLATFORM_SECRET_KEY="change-me-another-placeholder-key-here",
-        )
-    errors = str(exc.value)
-    assert "must be set to real secrets" in errors
+    assert message in str(exc.value)
 
 
 def test_jwt_secrets_must_differ() -> None:
@@ -709,17 +709,19 @@ async def test_per_ip_throttle_does_not_block_successful_logins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Per-IP throttle counts FAILED attempts only.
-    60 successful logins from one IP must NOT be blocked.
+    Per-IP throttle counts FAILED attempts only: more successful logins than the per-IP limit from one IP
+    must NOT be blocked. The limit is lowered to 3 so 4 logins prove it (the default 50 needed 60 slow
+    argon2 logins, about 25 s).
     """
     from app.core.redis_client import get_redis
 
     monkeypatch.setattr(settings, "TRUST_PROXY", True)
+    monkeypatch.setattr(settings, "LOGIN_THROTTLE_IP_MAX_ATTEMPTS", 3)
     redis = await get_redis()
     await redis.flushdb()
 
     ip = "198.51.100.88"
-    for _ in range(60):
+    for _ in range(settings.LOGIN_THROTTLE_IP_MAX_ATTEMPTS + 1):
         res = await client.post(
             "/api/v1/auth/login",
             headers={"X-Forwarded-For": ip},

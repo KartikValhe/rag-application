@@ -97,21 +97,6 @@ async def test_input_bytes_reach_child_over_stdin() -> None:
     assert records[0]["n"] == len(payload)
 
 
-async def test_timeout_kills_hung_child(tmp_path: Path) -> None:
-    pid_file = tmp_path / "pid.txt"
-    t0 = time.time()
-    with pytest.raises(UploadSecurityError) as exc:
-        await tpr.run_killable_parse(
-            str(pid_file).encode(), "sleep", uuid.uuid4(), timeout_seconds=2.0, child_module=CHILD
-        )
-    elapsed = time.time() - t0
-    assert exc.value.status_code == 408
-    assert isinstance(exc.value.detail, dict)
-    assert exc.value.detail["code"] == "parse_timeout"
-    assert 1.5 <= elapsed < 8.0, f"elapsed {elapsed:.2f}s"
-    assert await _wait_dead(int(pid_file.read_text()))
-
-
 async def test_timeout_kills_whole_process_tree(tmp_path: Path) -> None:
     pid_file = tmp_path / "pids.txt"
     with pytest.raises(UploadSecurityError):

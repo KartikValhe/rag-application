@@ -24,15 +24,6 @@ def _auth_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _login(client: AsyncClient, tenant_slug: str, email: str, password: str) -> dict:
-    resp = await client.post(
-        "/api/v1/auth/login",
-        json={"email": email, "password": password, "tenant_slug": tenant_slug},
-    )
-    assert resp.status_code == 200, resp.text
-    return resp.json()
-
-
 # ── Registration ──────────────────────────────────────────────────────────────
 
 async def test_register_open_mode_creates_active_user(

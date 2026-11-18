@@ -15,7 +15,6 @@ registry, and an anonymous upload to either is refused before one body byte is r
 
 import re
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -165,6 +164,3 @@ async def test_anonymous_document_upload_is_refused_before_the_body_is_read(
 ) -> None:
     w = academic_world.a
     await assert_anonymous_upload_not_consumed(app, path, [("Host", "localhost"), ("X-Tenant-Slug", w.tenant.slug)])
-
-
-_UNUSED: tuple[Callable[..., Awaitable[Any]], ...] = ()

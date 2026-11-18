@@ -38,10 +38,6 @@ def set_request_context(
     )
 
 
-def get_request_id() -> str:
-    return _request_id_var.get()
-
-
 def get_request_tenant_id() -> str:
     """
     FastAPI dependency: return the tenant_id set by the middleware.
@@ -55,8 +51,4 @@ def get_request_tenant_id() -> str:
             "Ensure TenantResolutionMiddleware ran and set the tenant."
         )
     return tid
-
-
-def get_request_tenant_slug() -> str | None:
-    return _tenant_slug_var.get()
 

@@ -26,7 +26,6 @@ dependencies = [
     "redis[asyncio]>=5.2.0",
     # Email
     "aiosmtplib>=3.0.0",
-    "jinja2>=3.1.4",
     # File parsing & upload safety
     "openpyxl>=3.1.5",
     # Libraries that parse UNTRUSTED files, pinned exactly (review of 5b-3). The document parser's full set
@@ -47,7 +46,6 @@ dependencies = [
     "python-multipart>=0.0.12",
     "pillow==13.0.0",
     "httpx>=0.28.0",
-    "orjson>=3.10.0",
     "structlog>=24.4.0",
     "tzdata>=2024.1",
 ]

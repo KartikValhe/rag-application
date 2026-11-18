@@ -49,11 +49,6 @@ def _hdr(token: str, slug: str | None = None) -> dict[str, str]:
     return headers
 
 
-async def _set_tz(raw_db: AsyncSession, tenant_id: uuid.UUID, tz: str) -> None:
-    await raw_db.execute(text("UPDATE app.tenants SET timezone = :tz WHERE id = :id"), {"tz": tz, "id": tenant_id})
-    await raw_db.commit()
-
-
 async def _timezone_of(raw_db: AsyncSession, tenant_id: uuid.UUID) -> str:
     return (await raw_db.execute(select(Tenant.timezone).where(Tenant.id == tenant_id))).scalar_one()
 

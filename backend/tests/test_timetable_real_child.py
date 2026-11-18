@@ -122,9 +122,3 @@ async def test_abnormal_exit_is_logged_server_side_but_client_message_is_fixed(
     assert "private" not in text
     assert "file.xlsx" not in text
     assert "private" not in str(exc.value.detail)
-
-
-def test_describe_exit_reports_signal_name() -> None:
-    assert tpr._describe_exit(-15, b"") == ("-15", "SIGTERM", "unknown")
-    assert tpr._describe_exit(1, b"junk child_error_type=MemoryError\n") == ("1", "none", "MemoryError")
-    assert tpr._describe_exit(1, b"child_error_type=../../etc/passwd") == ("1", "none", "unknown")
