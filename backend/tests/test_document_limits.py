@@ -33,7 +33,7 @@ from app.db.models.user import User
 from tests.test_isolation import _tenants_column_privilege_inventory
 from tests.test_tenants_rls import _as_tenant, _assert_tenant_denied
 
-pytestmark = pytest.mark.asyncio
+# No module-level asyncio mark: asyncio_mode=auto already runs the async tests, and the sync tests here must not carry it.
 
 MIGRATIONS = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 

@@ -278,7 +278,17 @@ def test_the_loader_never_opens_a_socket(synthetic_e5: SyntheticModel, tmp_path:
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 
-def test_settings_defaults_for_the_embedder() -> None:
+EMBEDDER_SETTING_NAMES = ("EMBEDDING_BATCH_SIZE", "EMBEDDING_THREADS", "EMBEDDING_MODEL_ID", "EMBEDDING_MODEL_DIR")
+
+
+def _without_embedder_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither the shell environment nor a .env file may change what these tests see."""
+    for name in EMBEDDER_SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_settings_defaults_for_the_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    _without_embedder_env(monkeypatch)
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.EMBEDDING_BATCH_SIZE == 16
     assert s.EMBEDDING_THREADS == 1
@@ -286,9 +296,18 @@ def test_settings_defaults_for_the_embedder() -> None:
     assert s.EMBEDDING_MODEL_DIR == ""
 
 
+def test_settings_defaults_ignore_a_value_set_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # regression: a developer's EMBEDDING_MODEL_DIR must never leak into the default check above
+    monkeypatch.setenv("EMBEDDING_MODEL_DIR", "/somewhere/else")
+    assert Settings(_env_file=None).EMBEDDING_MODEL_DIR == "/somewhere/else"  # type: ignore[call-arg]
+    _without_embedder_env(monkeypatch)
+    assert Settings(_env_file=None).EMBEDDING_MODEL_DIR == ""  # type: ignore[call-arg]
+
+
 @pytest.mark.parametrize("field,value", [("EMBEDDING_BATCH_SIZE", 0), ("EMBEDDING_BATCH_SIZE", 1000),
                                           ("EMBEDDING_THREADS", 0)])
-def test_settings_refuse_nonsense_embedder_values(field: str, value: int) -> None:
+def test_settings_refuse_nonsense_embedder_values(field: str, value: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    _without_embedder_env(monkeypatch)
     with pytest.raises(ValueError):
         Settings(_env_file=None, **{field: value})  # type: ignore[call-arg]
 

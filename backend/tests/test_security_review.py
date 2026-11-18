@@ -32,6 +32,7 @@ def test_jwt_secret_fails_if_weak() -> None:
     """Settings must reject short or default secret keys (< 32 characters)."""
     with pytest.raises(ValidationError) as exc:
         Settings(
+            _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
@@ -46,6 +47,7 @@ def test_jwt_secret_fails_if_default_placeholder() -> None:
     """Settings must reject 'change-me' placeholder keys."""
     with pytest.raises(ValidationError) as exc:
         Settings(
+            _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
@@ -61,6 +63,7 @@ def test_jwt_secrets_must_differ() -> None:
     same_secret = "a" * 40
     with pytest.raises(ValidationError) as exc:
         Settings(
+            _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
@@ -110,6 +113,7 @@ def test_committed_jwt_secrets_rejected() -> None:
     """Old hardcoded hex keys from docker-compose must be explicitly rejected."""
     with pytest.raises(ValidationError) as exc:
         Settings(
+            _env_file=None,
             DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             PLATFORM_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",
             MIGRATION_DATABASE_URL="postgresql+asyncpg://u:p@localhost/db",

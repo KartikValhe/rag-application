@@ -34,7 +34,7 @@ from tests.fixtures.documents import auth, make_document
 from tests.security.upload_assertions import assert_anonymous_upload_not_consumed
 from tests.test_document_store import all_app_routes
 
-pytestmark = pytest.mark.asyncio
+# No module-level asyncio mark: asyncio_mode=auto already runs the async tests, and the sync tests here must not carry it.
 
 ROLES = ("admin", "teacher", "teacher_out", "student", "anonymous")
 
