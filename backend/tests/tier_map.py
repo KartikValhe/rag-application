@@ -120,6 +120,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_retrieval_devanagari.py": ("db",),
     "test_retrieval_grants.py": ("db", "security"),
     "test_retrieval_leaks.py": ("db", "security"),
+    "test_retrieval_limits.py": ("db", "security"),
+    "test_retrieval_negative.py": ("db", "security"),
     "test_retrieval_quality.py": ("db",),
     "test_retrieval_scope.py": ("db", "security"),
     "test_retrieval_sql_safety.py": ("db", "security"),

@@ -99,6 +99,7 @@ class ChunkSpec:
     excluded: bool = False
     flags: tuple[str, ...] = ()
     embed: bool = True  # False: no embedding row at all
+    id: uuid.UUID | None = None  # a chosen chunk id (tests that depend on id order)
 
 
 @dataclass
@@ -180,6 +181,7 @@ async def seed_document(
     made: list[Chunk] = []
     for i, spec in enumerate(specs):
         chunk = Chunk(
+            **({"id": spec.id} if spec.id is not None else {}),
             tenant_id=wt.id,
             document_version_id=version.id,
             document_id=document.id,
@@ -208,3 +210,29 @@ async def seed_document(
             )
     await db.commit()
     return SeededDocument(document=document, version=version, chunks=made)
+
+
+DISTRACTOR_WORD = "quokkafact"
+DISTRACTOR_COUNT = 8  # more than the 6 final hits, fewer than the 20 of each ranked side with the test chunks
+
+
+async def seed_distractors(
+    db: AsyncSession, wt: WorldTenant, *, subject: str = "Math", classes: tuple[str, ...] = ("10-A",),
+    n: int = DISTRACTOR_COUNT, word: str = DISTRACTOR_WORD,
+) -> SeededDocument:
+    """A published in-scope document of `n` chunks that all match `word` (put it in the query). They fill the
+    final hits, so a leak test whose forbidden chunk ranks below rank 6 still has to catch it in the ranked
+    lists (tests/security/retrieval_assertions.py). They are keyword-only (no vector: the FakeEmbedder's
+    feature hashing cannot keep a long text's similarity below a real match) and long with one match, so a
+    short chunk that really matches the query still ranks above them. The vector side below the final hits
+    is covered by prove-it test 8 with scripted vectors."""
+    return await seed_document(
+        db, wt, subject=subject, classes=classes, uploader=wt.admin,
+        chunks=[ChunkSpec(f"{word} distractor {i} {_FILLER}", embed=False) for i in range(n)],
+    )
+
+
+_FILLER = (
+    "about ordinary class work with many plain words that carry no meaning for any query in these tests, "
+    "only length, so that the ranking of real matches stays above them"
+)

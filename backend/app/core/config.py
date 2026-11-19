@@ -161,7 +161,11 @@ class Settings(BaseSettings):
     RETRIEVAL_MIN_KEYWORD_COVERAGE: float = Field(default=0.0, ge=0.0, le=1.0)
     # Up to this many candidate chunks the vector side is an exact scan; above it the HNSW index is used.
     RETRIEVAL_EXACT_MAX_CANDIDATES: int = Field(default=50_000, ge=0)
-    RETRIEVAL_HNSW_EF_SEARCH: int = Field(default=100, ge=1, le=1000)
+    RETRIEVAL_HNSW_EF_SEARCH: int = Field(default=100, ge=1, le=1000)  # must be >= RETRIEVAL_VECTOR_K
+    # statement_timeout for every statement of one search (transaction-local; over it: 503 search_timeout)
+    RETRIEVAL_STATEMENT_TIMEOUT_MS: int = Field(default=5000, ge=1, le=600_000)
+    # The keyword side ranks at most this many matching chunks (the lowest ids); must be >= RETRIEVAL_KEYWORD_K
+    RETRIEVAL_KEYWORD_MAX_CANDIDATES: int = Field(default=2000, ge=1, le=1_000_000)
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property
@@ -232,6 +236,15 @@ class Settings(BaseSettings):
         )
 
         ChunkingConfig(self.CHUNK_TARGET_TOKENS, self.CHUNK_MAX_TOKENS, self.CHUNK_OVERLAP_TOKENS)
+        return self
+
+    @model_validator(mode="after")
+    def _retrieval_settings_must_fit_together(self) -> "Settings":
+        # Kept here and in RetrievalConfig: retrieval.py imports this module, so it cannot be imported here
+        if self.RETRIEVAL_HNSW_EF_SEARCH < self.RETRIEVAL_VECTOR_K:
+            raise ValueError("RETRIEVAL_HNSW_EF_SEARCH must be at least RETRIEVAL_VECTOR_K")
+        if self.RETRIEVAL_KEYWORD_MAX_CANDIDATES < self.RETRIEVAL_KEYWORD_K:
+            raise ValueError("RETRIEVAL_KEYWORD_MAX_CANDIDATES must be at least RETRIEVAL_KEYWORD_K")
         return self
 
     @model_validator(mode="after")

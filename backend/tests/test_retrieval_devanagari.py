@@ -101,4 +101,5 @@ async def test_inflected_marathi_forms_do_not_match_on_the_keyword_side(
         w, subject="Math", classes=("10-A",), uploader=w.t1, embedder=embedder, chunks=[ChunkSpec(MARATHI)],
     )
     result = await run_search(w, w.t1, "पाने", embedder)
-    assert all(h.keyword_rank is None for h in result.hits)
+    assert result.candidate_count == 1, "the chunk is in scope, so the keyword side had something to match"
+    assert result.keyword_ranked == (), f"LC_CTYPE-independent: पाने matched {result.keyword_ranked}"

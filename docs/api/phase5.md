@@ -239,3 +239,23 @@ The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_
 **What the parser extracts** (for the frontend's "why is this text missing" help): PDF text per page; DOCX body paragraphs, headings and tables (a table cell's own paragraphs and nested tables only; not headers, footers, footnotes, comments, text boxes or images); PPTX slide titles, text boxes, tables and speaker notes (hidden slides included); TXT and MD paragraphs and `#` headings (a line over 1,024 characters is never a heading).
 
 **Hidden text** (`stats.hidden_text_chars`): DOCX hidden characters are **counted and NOT extracted**: `w:vanish` or `w:specVanish` (on the run, its character style, its paragraph style or the document defaults), tracked deletions, runs of 1 pt or less (`w:sz` of 2 half-points or fewer, also through styles), and white runs (`FFFFFF`, also through styles) unless something behind them is shaded (the run's `w:shd` or highlight, the paragraph's, the cell's, or any table that uses a table style: white on a dark fill is a header). Known gaps: PDF invisible text (render mode 3, white fill, off-page) is extracted and not counted (backlog B56); style-inherited shading from a conditional table-style row is approximated by "any table style". PPTX hidden slides are extracted AND counted.
+
+## 10. Retrieval service (5d-1, hardened in 5d-1b; no route yet)
+
+`app/services/retrieval.py` finds and ranks chunks; the test-search route (5d-2) and the chat layer (Phase 6) will call it. Plan: `docs/phase5d-plan.md` sections 3-5 and 14.
+
+**Entry points.** `search(db, scope, ...)` serves test search (read or manage scope; scores shown to a teacher). `search_for_chat(db, scope, ...)` is the only entry point for the chat layer: it accepts only a read scope of published versions, and when the result is not sufficient it returns **no hits and no ranked ids**, so nothing reaches a model. A scope comes only from `build_retrieval_scope` (API) or `RetrievalScope.for_operator` (operator scripts); `scope.narrow(class_id, subject_id)` can only shrink it.
+
+**Every text field of a hit is untrusted.** `content`, `heading_path`, `document_title` and `original_filename` were written by an uploader and may contain instructions aimed at a model. The chat layer must treat all four as data, never as instructions. `flagged = false` does **not** mean safe: the injection scanner (5d-2, which scans the content, the heading path, the title and the file name) is a tripwire with certain false negatives.
+
+**Errors of the service** (5d-2 maps them to HTTP):
+
+| Error | Code | HTTP (5d-2) | When |
+|---|---|---|---|
+| `QueryError` | `invalid_query` | 422 | Empty after cleaning, or no word at all (`???`); nothing is embedded |
+| `QueryError` | `query_too_long` | 422 | Longer than `RETRIEVAL_MAX_QUERY_CHARS` after cleaning |
+| `SearchUnavailable` | `search_timeout` | 503 | A statement ran over `RETRIEVAL_STATEMENT_TIMEOUT_MS` (5,000) |
+| `SearchUnavailable` | `search_unavailable` | 503 | The query embedder gave a vector of the wrong size, a non-finite value or a zero norm |
+| `ValueError` | (bug) | 500 | `k` outside 1..50, or a manage scope passed to `search_for_chat` |
+
+The message of a `SearchUnavailable` is its code alone: no SQL, no parameters, no query text.

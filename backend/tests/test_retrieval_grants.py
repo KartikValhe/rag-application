@@ -40,6 +40,33 @@ async def test_exact_table_privileges_on_chunks_and_embeddings(raw_db: AsyncSess
             assert got == expected, f"{role} on app.{table}: {sorted(got)}, expected {sorted(expected)}"
 
 
+async def test_only_the_owner_and_app_tenant_hold_any_privilege(raw_db: AsyncSession) -> None:
+    """Read from the ACLs themselves (pg_class.relacl, pg_attribute.attacl), not from information_schema,
+    which only shows roles the current user is a member of: EVERY grantee of a table or column privilege on
+    the two tables must be the table owner or app_tenant. A grant to any other role (or PUBLIC) fails here,
+    whatever its name."""
+    rows = (
+        await raw_db.execute(
+            text(
+                "SELECT c.relname, pg_get_userbyid(c.relowner), "
+                "       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, 'table' "
+                "FROM pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a "
+                "WHERE c.relnamespace = 'app'::regnamespace AND c.relname = ANY(:t) "
+                "UNION ALL "
+                "SELECT c.relname, pg_get_userbyid(c.relowner), "
+                "       CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, att.attname "
+                "FROM pg_class c JOIN pg_attribute att ON att.attrelid = c.oid AND att.attacl IS NOT NULL, "
+                "     aclexplode(att.attacl) a "
+                "WHERE c.relnamespace = 'app'::regnamespace AND c.relname = ANY(:t)"
+            ),
+            {"t": list(TABLES)},
+        )
+    ).all()
+    assert {r[0] for r in rows} == set(TABLES), "both tables were found"
+    for table, owner, grantee, where in rows:
+        assert grantee in {owner, "app_tenant"}, f"{grantee} holds a privilege on app.{table} ({where})"
+
+
 async def test_no_column_grants_on_chunks_and_embeddings(raw_db: AsyncSession) -> None:
     rows = (
         await raw_db.execute(

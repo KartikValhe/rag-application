@@ -9,8 +9,9 @@ World (tests/fixtures/academic_world.py):
   T1 teaches 10-A Math, 10-A Physics, 10-B Math.   T2 teaches 10-B Physics, 11-A Chemistry.
   S1 is enrolled in 10-A and 11-A.                 S2 in 10-B.
 
-The vector side returns every in-scope chunk (up to 20), so "absent" really means "out of scope", not
-"ranked too low".
+Every "absent" check looks at the hits and both ranked lists and asserts that neither list was cut, so
+"absent" really means "out of scope", not "ranked too low". Distractors in the searched pairs fill the six
+final hits.
 """
 
 import uuid
@@ -23,9 +24,15 @@ from app.core.authz import GENERIC_NOT_FOUND
 from app.core.tenant_db import tenant_session_context
 from app.services import retrieval
 from tests.fixtures.academic_world import AcademicWorld, WorldTenant
-from tests.fixtures.retrieval_world import SeededDocument, fake_embedder, seed_document
+from tests.fixtures.retrieval_world import (
+    DISTRACTOR_WORD,
+    SeededDocument,
+    fake_embedder,
+    seed_distractors,
+    seed_document,
+)
 from tests.security.retrieval_assertions import (
-    assert_canary_absent,
+    assert_absent,
     assert_canary_present,
     run_search,
 )
@@ -43,7 +50,13 @@ async def _doc(
 
 
 async def _search(w: WorldTenant, user: object, query: str, **kw: object) -> retrieval.RetrievalResult:
-    return await run_search(w, user, query, fake_embedder(), **kw)  # type: ignore[arg-type]
+    return await run_search(w, user, f"{query} {DISTRACTOR_WORD}", fake_embedder(), **kw)  # type: ignore[arg-type]
+
+
+async def _distractors(db: AsyncSession, w: WorldTenant) -> None:
+    """Distractors in every offered pair the tests search, so each searched scope has more than six chunks."""
+    for subject, classes in (("Math", ("10-A", "10-B")), ("Physics", ("10-A",)), ("Physics", ("10-B",))):
+        await seed_distractors(db, w, subject=subject, classes=classes)
 
 
 # ── pairs, not a cross product ───────────────────────────────────────────────
@@ -54,12 +67,13 @@ async def test_pair_level_scope_document_of_one_pair_is_not_returned_for_its_nei
 ) -> None:
     """THE pair test: a (10-A, Math) document is not returned for (10-A, Physics) nor for (10-B, Math)."""
     w = academic_world.a
-    _, canary = await _doc(raw_db, w, "Math", ("10-A",))
+    doc, canary = await _doc(raw_db, w, "Math", ("10-A",))
+    await _distractors(raw_db, w)
     for cls, subj in (("10-A", "Physics"), ("10-B", "Math")):
         class_id, subject_id = w.pair(cls, subj)
         for user in (w.admin, w.t1):
             result = await _search(w, user, canary, class_id=class_id, subject_id=subject_id)
-            assert_canary_absent(result, canary, f"narrowed to ({cls}, {subj})")
+            assert_absent(result, doc, f"narrowed to ({cls}, {subj})", canary=canary)
     class_id, subject_id = w.pair("10-A", "Math")
     assert_canary_present(await _search(w, w.t1, canary, class_id=class_id, subject_id=subject_id), canary, "own pair")
 
@@ -67,8 +81,9 @@ async def test_pair_level_scope_document_of_one_pair_is_not_returned_for_its_nei
 async def test_teacher_never_reaches_the_cross_product_pair(academic_world: AcademicWorld, raw_db: AsyncSession) -> None:
     """T1 teaches Physics (in 10-A) and teaches in 10-B (Math), but never 10-B Physics."""
     w = academic_world.a
-    _, canary = await _doc(raw_db, w, "Physics", ("10-B",))
-    assert_canary_absent(await _search(w, w.t1, canary), canary, "T1 and a 10-B Physics document")
+    doc, canary = await _doc(raw_db, w, "Physics", ("10-B",))
+    await _distractors(raw_db, w)
+    assert_absent(await _search(w, w.t1, canary), doc, "T1 and a 10-B Physics document", canary=canary)
     assert_canary_present(await _search(w, w.t2, canary), canary, "T2 teaches 10-B Physics")
 
 
@@ -76,25 +91,27 @@ async def test_a_shared_document_is_found_from_each_linked_class_only(
     academic_world: AcademicWorld, raw_db: AsyncSession
 ) -> None:
     w = academic_world.a
-    _, canary = await _doc(raw_db, w, "Math", ("10-A", "10-B"))
+    doc, canary = await _doc(raw_db, w, "Math", ("10-A", "10-B"))
+    await _distractors(raw_db, w)
     for cls in ("10-A", "10-B"):
         class_id, subject_id = w.pair(cls, "Math")
         assert_canary_present(await _search(w, w.t1, canary, class_id=class_id, subject_id=subject_id), canary, cls)
         assert_canary_present(await _search(w, w.admin, canary, class_id=class_id), canary, f"admin, class {cls}")
-    assert_canary_absent(await _search(w, w.admin, canary, class_id=w.classes["11-A"].id), canary, "11-A")
-    assert_canary_absent(await _search(w, w.t2, canary), canary, "T2 does not teach Math")
+    assert_absent(await _search(w, w.admin, canary, class_id=w.classes["11-A"].id), doc, "11-A", canary=canary)
+    assert_absent(await _search(w, w.t2, canary), doc, "T2 does not teach Math", canary=canary)
 
 
 async def test_students_read_only_their_enrolled_classes(academic_world: AcademicWorld, raw_db: AsyncSession) -> None:
     w = academic_world.a
-    _, only_10a = await _doc(raw_db, w, "Math", ("10-A",))
-    _, only_10b = await _doc(raw_db, w, "Math", ("10-B",))
+    doc_10a, only_10a = await _doc(raw_db, w, "Math", ("10-A",))
+    doc_10b, only_10b = await _doc(raw_db, w, "Math", ("10-B",))
+    await _distractors(raw_db, w)
     s1 = await _search(w, w.s1, f"{only_10a} {only_10b}", purpose="read")
     assert_canary_present(s1, only_10a, "S1 is in 10-A")
-    assert_canary_absent(s1, only_10b, "S1 is not in 10-B")
+    assert_absent(s1, doc_10b, "S1 is not in 10-B", canary=only_10b)
     s2 = await _search(w, w.s2, f"{only_10a} {only_10b}", purpose="read")
     assert_canary_present(s2, only_10b, "S2 is in 10-B")
-    assert_canary_absent(s2, only_10a, "S2 is not in 10-A")
+    assert_absent(s2, doc_10a, "S2 is not in 10-A", canary=only_10a)
 
 
 async def test_a_student_manages_nothing_and_a_viewer_without_pairs_gets_an_empty_scope(
@@ -161,6 +178,7 @@ async def test_operator_scope_needs_an_offered_pair_of_that_tenant(academic_worl
     async with tenant_session_context(str(w.id)) as db:
         scope = await retrieval.RetrievalScope.for_operator(db, w.id, *w.pair("10-A", "Math"))
         assert scope.pairs == frozenset({w.pair("10-A", "Math")}) and scope.statuses == ("published",)
+        assert scope.purpose == "read", "the operator scope evaluates what students would see"
         for class_id, subject_id in (w.pair("11-A", "Math"), other.pair("10-A", "Math")):
             with pytest.raises(HTTPException) as exc:
                 await retrieval.RetrievalScope.for_operator(db, w.id, class_id, subject_id)

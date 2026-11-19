@@ -154,6 +154,37 @@ async def test_below_the_threshold_the_result_is_insufficient(academic_world: Ac
     assert result.hits, "the hits are still shown to the teacher with their scores"
 
 
+async def test_the_top_vector_chunk_is_kept_and_sufficiency_comes_from_the_returned_hits(
+    academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    """A is the best vector match (0.95) but shares no word with the query; B and C are on both sides. With
+    k = 2 fusion alone keeps B and C and would drop A, while max_similarity (0.95 from A) said "sufficient":
+    the decision would rest on a chunk nobody sees. A must replace the lowest fused hit (C), and every
+    number of the decision must come from the returned hits."""
+    w = academic_world.a
+    embedder = ScriptedEmbedder({})
+    doc = await seed_document(
+        raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, embedder=embedder,
+        chunks=[
+            ChunkSpec("Living cells exchange water with their surroundings.", vector=axis_vector(0.95, 1)),
+            ChunkSpec("Osmosis moves water across a membrane.", vector=axis_vector(0.80, 2)),
+            ChunkSpec("A membrane controls what enters the cell by osmosis.", vector=axis_vector(0.70, 3)),
+        ],
+    )
+    a, b, c = doc.chunk_id(0), doc.chunk_id(1), doc.chunk_id(2)
+    result = await run_search(w, w.t1, "osmosis membrane", embedder, k=2)
+    assert result.vector_ranked == (a, b, c) and set(result.keyword_ranked) == {b, c}
+    fused = retrieval.rrf_fuse(result.vector_ranked, result.keyword_ranked, 60)
+    assert a not in {f.id for f in fused[:2]}, "precondition: fusion alone drops the top vector chunk"
+    assert [h.chunk_id for h in result.hits] == [fused[0].id, a]
+    sims = [h.vector_similarity for h in result.hits if h.vector_similarity is not None]
+    assert result.max_similarity is not None and result.max_similarity == max(sims)
+    assert abs(result.max_similarity - 0.95) < 1e-4
+    matched = [h.keyword_matched_terms for h in result.hits if h.keyword_matched_terms is not None]
+    assert result.keyword_coverage == max(matched) / result.query_lexeme_count
+    assert result.sufficient and result.reason == "similarity"
+
+
 async def test_no_candidates_in_scope(academic_world: AcademicWorld) -> None:
     w = academic_world.a
     result = await run_search(w, w.t1, "anything", fake_embedder())
