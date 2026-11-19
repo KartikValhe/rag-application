@@ -90,3 +90,39 @@ def assert_foreign_version_hidden(response: Any) -> None:
     """The flags of a version the caller may not see: the generic 404, no flagged excerpt."""
     assert "items" not in (response.json() or {}), "the flags route returned a foreign version's flagged chunks"
     assert_generic_404(response)
+
+
+def assert_no_material(response: Any, canary: str) -> None:
+    """A test search by someone who manages no pair (a student, even with document:view): either the generic
+    404 or a 200 with an empty scope, and never a hit with the canary."""
+    body = response.json()
+    hits = body.get("hits", []) if isinstance(body, dict) else []
+    leaked = [h for h in hits if canary in str(h.get("content", ""))]
+    assert not leaked, f"test search leaked {len(leaked)} chunk(s) with {canary!r} to a caller without a pair"
+    if response.status_code == 404:
+        assert_generic_404(response)
+        return
+    assert response.status_code == 200, f"expected 200 (empty scope) or the generic 404, got {response.status_code}"
+    assert body["reason"] == "empty_scope", f"material reached a caller without a pair: reason {body['reason']}"
+
+
+def assert_embed_cap_respected(max_in_flight: int, cap: int) -> None:
+    """At no moment were more than `cap` query embeddings running."""
+    assert max_in_flight <= cap, f"embedding cap exceeded: {max_in_flight} embeddings at once, the cap is {cap}"
+
+
+def assert_publish_needs_acknowledgement(response: Any) -> None:
+    """Publishing a version that needs a teacher's acknowledgement, without it: 409 flags_acknowledgement_required."""
+    detail = response.json().get("detail")
+    code = detail.get("code") if isinstance(detail, dict) else None
+    assert (response.status_code, code) == (409, "flags_acknowledgement_required"), (
+        f"published without acknowledgement: {response.status_code} {code}"
+    )
+
+
+def assert_not_echoed(response: Any, secret: str) -> None:
+    """A 422 that does not repeat what the client sent (a password, a token, a query)."""
+    assert response.status_code == 422, f"expected 422, got {response.status_code}"
+    assert secret not in response.text, "the 422 body echoed the request input"
+    for error in response.json().get("detail", []):
+        assert "input" not in error, "the 422 body echoed the request input"

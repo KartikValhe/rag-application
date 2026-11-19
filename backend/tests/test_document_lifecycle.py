@@ -279,7 +279,8 @@ async def test_a_replacement_leaves_the_old_version_published_until_the_new_one_
     assert await statuses(raw_db, v1.document.id) == {1: "published", 2: "queued"}
     assert await count_rows(raw_db, "chunks", v1.version.id) == 3  # students keep reading v1
 
-    await raw_db.execute(text("UPDATE app.document_versions SET status = 'ready' WHERE document_id = :d AND version_no = 2"), {"d": v1.document.id})
+    # As the worker leaves it: ready and scanned (a NULL count would mean "never scanned", 5d-2b)
+    await raw_db.execute(text("UPDATE app.document_versions SET status = 'ready', flagged_chunk_count = 0 WHERE document_id = :d AND version_no = 2"), {"d": v1.document.id})
     await raw_db.commit()
     assert await statuses(raw_db, v1.document.id) == {1: "published", 2: "ready"}  # ready alone changes nothing for students
     assert await count_rows(raw_db, "chunks", v1.version.id) == 3

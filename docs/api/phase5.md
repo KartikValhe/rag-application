@@ -252,7 +252,7 @@ The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_
 
 **Entry points.** `search(db, scope, ...)` serves test search (read or manage scope; scores shown to a teacher). `search_for_chat(db, scope, ...)` is the only entry point for the chat layer: it accepts only a read scope of published versions, and when the result is not sufficient it returns **no hits and no ranked ids**, so nothing reaches a model. A scope comes only from `build_retrieval_scope` (API) or `RetrievalScope.for_operator` (operator scripts); `scope.narrow(class_id, subject_id)` can only shrink it.
 
-**Every text field of a hit is untrusted.** `content`, `heading_path`, `document_title` and `original_filename` were written by an uploader and may contain instructions aimed at a model. The chat layer must treat all four as data, never as instructions. `flagged = false` does **not** mean safe: the injection scanner (5d-2, which scans the content, the heading path, the title and the file name) is a tripwire with certain false negatives.
+**Every text field of a hit is untrusted.** `content`, `heading_path`, `document_title` and `original_filename` were written by an uploader and may contain instructions aimed at a model. The chat layer must treat all four as data, never as instructions. `flagged` and `injection_flags` of a hit cover the **chunk text only** (heading path and content, scanned at ingest). The title and the file name are NOT part of them: they are scanned only when the test-search or flags route answers (`title_flagged` and `filename_flagged` exist in those two responses and nowhere else; the chat layer gets no title flag). `flagged = false` does **not** mean safe: the scanner is a tripwire with certain false negatives.
 
 **Errors of the service** (the test-search route maps them to HTTP, section 11):
 
@@ -262,9 +262,12 @@ The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_
 | `QueryError` | `query_too_long` | 422 | Longer than `RETRIEVAL_MAX_QUERY_CHARS` after cleaning |
 | `SearchUnavailable` | `search_timeout` | 503 | A statement ran over `RETRIEVAL_STATEMENT_TIMEOUT_MS` (5,000) |
 | `SearchUnavailable` | `search_unavailable` | 503 | The query embedder gave a vector of the wrong size, a non-finite value or a zero norm |
+| `SearchUnavailable` | `search_busy` | 503 | The query-embedding cap (`RETRIEVAL_EMBED_CONCURRENCY`, 2 per API process) stayed full for `RETRIEVAL_EMBED_QUEUE_SECONDS` (5) |
 | `ValueError` | (bug) | 500 | `k` outside 1..50, or a manage scope passed to `search_for_chat` |
 
 The message of a `SearchUnavailable` is its code alone: no SQL, no parameters, no query text.
+
+**Embedding the query (5d-2b).** `retrieval.embed_query(query_embedder, query)` embeds under the per-process cap (an asyncio semaphore of `RETRIEVAL_EMBED_CONCURRENCY` and a thread pool of the same size, not asyncio's shared default pool) and returns a query embedder that answers with that vector for that query only. Call it with no transaction open, then open the search transaction. A caller over the cap waits up to `RETRIEVAL_EMBED_QUEUE_SECONDS`, then gets `search_busy`. The cap is per API process (backlog B103).
 
 ## 11. Test search, injection flags and the flags route (5d-2)
 
@@ -277,9 +280,14 @@ For tenant admins and teachers (`document:view`); students get `403`, no token `
 1. **Permission** (403).
 2. **Scope:** the caller's own (class, subject) pairs (section 4), narrowed by `class_id` and/or `subject_id`. The ids can only narrow: a class, subject or pair the caller does not teach, an unknown id or another tenant's id is the generic `404 not_found`, the same body as every other document route. The tenant always comes from the token; the request has no tenant field.
 3. **Rate limit:** `DOC_TEST_SEARCH_RATE_USER` (60) searches per user per `DOC_TEST_SEARCH_RATE_WINDOW_SECONDS` (600): `429 test_search_rate_limit_exceeded` with `Retry-After` and `retry_after_seconds`. Checked after the scope, so a probe of foreign ids never uses up the window. Redis down outside development: `503 service_unavailable` (fails closed).
-4. **Query:** cleaned like ingested text (NFC; control, zero-width and bidi characters dropped; whitespace collapsed). Empty, or no searchable word at all (`???`): `422 invalid_query`. Over `RETRIEVAL_MAX_QUERY_CHARS` (500) after cleaning: `422 query_too_long`. A JSON string with a lone surrogate (`"\ud800"`) is refused by the schema (FastAPI's `422` list, with U+FFFD echoed in place of the surrogate); before 5d-2 that case ended as a generic 500 on every JSON route.
-5. **Model:** the process-wide query embedder is loaded on the first test search of the process (seconds; backlog B96), with no database transaction open. A model that cannot load or fails, or a query vector of the wrong size, with a non-finite value or a zero norm: `503 search_unavailable`.
-6. **Search** with a manage scope (section 10). A statement over `RETRIEVAL_STATEMENT_TIMEOUT_MS`: `503 search_timeout`.
+4. **Query:** cleaned like ingested text (NFC; control, zero-width and bidi characters dropped; whitespace collapsed). Empty, or no searchable word at all (`???`): `422 invalid_query`. Over `RETRIEVAL_MAX_QUERY_CHARS` (500) after cleaning: `422 query_too_long`. These come AFTER the rate limit, so an unusable query also uses up the window (tested). A JSON string with a lone surrogate (`"\ud800"`) is refused by the schema (FastAPI's `422` list, section 11.4); before 5d-2 that case ended as a generic 500 on every JSON route.
+5. **Model:** the process-wide query embedder is loaded on the first test search of the process (seconds; backlog B96). A model that cannot load or fails, or a query vector of the wrong size, with a non-finite value or a zero norm: `503 search_unavailable`.
+6. **Embedding** under the per-process cap (section 10): at most `RETRIEVAL_EMBED_CONCURRENCY` (2) query embeddings at once; a search over the cap waits up to `RETRIEVAL_EMBED_QUEUE_SECONDS` (5) and then gets `503 search_busy`. An empty scope embeds nothing.
+7. **Search** with a manage scope (section 10), in a second transaction opened only after the embedding. A statement over `RETRIEVAL_STATEMENT_TIMEOUT_MS`: `503 search_timeout`.
+
+The route's own two transactions (steps 2-4 and step 7) are closed while the model loads and embeds. The permission check's session stays open for the whole request (backlog B100).
+
+**Accepted gap: scope and search are two transactions.** The scope (the caller's pairs) is read in the first transaction and used by the search in the second, after the embedding. An assignment revoked in between does not affect the ONE request that already passed its scope check: it still shows that pair's material, as a request that finished a moment earlier would have. The next request is refused (tested: `test_an_assignment_revoked_between_the_scope_and_the_search`). Closing the gap would mean embedding inside the scope transaction, which holds a connection during the model call (the problem of B96).
 
 `include_drafts: true` adds versions in status **`ready`** (never queued, processing, failed or archived); each hit carries `version_status`. Only this route can ask for drafts: a read scope (students, the chat layer) refuses them.
 
@@ -291,43 +299,54 @@ Every 503 and 422 message is a fixed text: never SQL, a file path, a library mes
 
 Read-only and not audited. Needs `document:view` and the same scope as the other version routes: one linked pair in scope. Anything else, and a version of another document, is the generic 404. The route lists the flagged chunks of the version in ordinal order:
 
-- `chunk_id`, `ordinal`, the pages, `heading_path`, the codes and `excluded`;
-- an `excerpt` of at most **300 characters**. It starts 80 characters before the first match, or at the start of the chunk when the match is in the heading.
+- `chunk_id`, `ordinal`, the pages, `heading_path`, the stored codes (`injection_flags`) and `excluded`;
+- an `excerpt` of the content, at most **300 characters**: around the first match in the content, or the content's start when nothing in the content matches;
+- `matches` (5d-2b): one entry per code the CURRENT rules find in the chunk, with `source` (`heading_path` or `content`: where the match starts) and `excerpt`, at most **300 characters** around the matched span (up to 80 characters before it). A chunk flagged only because of its heading shows the heading span. A stored code that the current rules no longer find has no entry (run `rescan_flags`, section 11.3).
+
+`flagged_chunk_count: null` means the version was **never scanned** (indexed before 5d-2); `0` means scanned, nothing found.
 
 Page with `after_ordinal` set to the previous page's `next_after_ordinal`. Use it before `POST .../publish` with `acknowledge_flags: true`.
 
-**The excerpt, the heading path and the title are UNTRUSTED text** from the uploaded file and its uploader. Show them as plain text, never as HTML or Markdown, and never feed them to a model as instructions.
+**The excerpts (`excerpt` and every `matches[].excerpt`), the heading path and the title are UNTRUSTED text** from the uploaded file and its uploader. Show them as plain text, never as HTML or Markdown, and never feed them to a model as instructions.
 
 ### 11.3 Injection codes (`app/services/injection_scan.py`)
 
 The worker's index stage scans every chunk (heading path, a newline, then the content) before its transaction opens, and stores the codes in `chunks.injection_flags`. `flagged_chunk_count` is the number of chunks with at least one code.
 
-- A version with flags cannot be published without `acknowledge_flags: true` (409 `flags_acknowledgement_required`), and it is never auto-published.
-- Flagged chunks of a published version **are returned** by retrieval with `flagged: true` and their codes (flag, never drop).
-- The **document title and the original file name** are scanned when a response is built (`title_flagged`, `filename_flagged`), because a title can change after ingest. They are not stored, and they do not change `flagged_chunk_count` or the publish rule (backlog B98).
+- A version with flags cannot be published without `acknowledge_flags: true` (409 `flags_acknowledgement_required` with `reason: "flagged"`), and it is never auto-published.
+- **A version never scanned** (`flagged_chunk_count` NULL: indexed before 5d-2) is treated the same way: "not scanned" is not "clean". Publishing it needs `acknowledge_flags: true` (409 with `reason: "not_scanned"`); the acknowledgement is recorded and audited (`document:flags_acknowledged` with `not_scanned: true`). Test search works on it like on any ready version.
+- Flagged chunks of a published version **are returned** by retrieval with `flagged: true` and their codes (flag, never drop). These flags cover the **chunk text only** (heading path and content).
+- The **document title and the original file name** are cleaned like chunk text (`clean_text`) and scanned only when the test-search or flags response is built (`title_flagged`, `filename_flagged`, in those two responses only), because a title can change after ingest. They are not stored, they are not part of a hit's `flagged`, and they do not change `flagged_chunk_count` or the publish rule. **A title edited after publish is not reviewed again** (backlog B98).
+- **Rescan:** `python -m app.scripts.rescan_flags <tenant slug>` (dry run) or `... --apply` scans the stored chunks of the tenant's ready and published versions with the current rules and writes the codes and `flagged_chunk_count` (one transaction per version, audited as `document:flags_rescanned`; prints counts and ids only). **Versions indexed before 5d-2 need it** (until then publishing them needs an acknowledgement); so does every version after a rule change (backlog B102).
 
 | Code | What it looks for (English, Hindi, Marathi) |
 |---|---|
-| `instruction_override` | "ignore / disregard / forget all previous instructions", "override your instructions"; "पिछले निर्देशों को अनदेखा करो", "ऊपर के निर्देश भूल जाओ"; "मागील सूचना दुर्लक्ष करा", "वरील सूचना विसरा" (with and without nukta) |
-| `role_markup` | chat-template markers such as `<\|im_start\|>`, `[INST]`, `<<SYS>>`, `### system`, a line starting with `system:` or `assistant:` |
-| `role_play` | "you are now (a / DAN / ...)", "from now on you will", "act as an AI", "pretend you are", "developer mode", "jailbreak"; "अब से तुम"; "आतापासून तू" |
+| `instruction_override` | "ignore / disregard / forget (up to five words) previous / prior / above instructions / prompts / directives", "forget your rules", "override your instructions"; "पिछले निर्देशों को अनदेखा करो", "ऊपर के निर्देश भूल जाओ"; "मागील सूचना दुर्लक्ष करा", "वरील सूचना विसरा" (with and without nukta). Not: "forget the old rules of spelling" (an instruction or prompt noun is required) |
+| `role_markup` | chat-template tokens such as `<\|im_start\|>` (also spaced: `< \|im_start\| >`), `[INST]`, `<<SYS>>`, `### system`, `### Instruction:`, a line starting with `system:`. Not: `Assistant:` or `User:` speaker labels, `## User guide` |
+| `role_play` | "you are / you're now", "pretend you are", "act as", "from now on you are" followed by a model-ish role (AI, assistant, chatbot, DAN, unrestricted, jailbroken, "in developer mode" ...); "from now on you will ignore / answer without ..."; "developer mode" and "jailbreak" only next to AI, model, prompt or instructions words; "अब से तुम (एक) एआई ..."; "आतापासून तू (एक) एआय ...". Not: "you are now ready", "pretend to be a shopkeeper", "developer mode in Android", "अब से तुम रोज़ पढ़ाई करोगे" |
 | `prompt_extraction` | "reveal / show / print / repeat your (system) prompt or instructions", "what are your instructions"; "अपने निर्देश बताओ"; "तुझ्या सूचना सांग" |
-| `model_directive` | text addressed to a model ("AI: you must ...", "ChatGPT, always ..."), "if a student asks ..., say ..."; the same in Hindi and Marathi |
+| `model_directive` | text addressed to a model ("AI: you must ...", "ChatGPT, always ...", "Chatbot: if a student asks ..."), or "if a student asks ..., the chatbot must say ..."; in Hindi and Marathi addressed to a model ("एआई: तुम्हें ...", "चैटबॉट, अगर कोई छात्र पूछे ..."). Not: a plain "If a student asks why ..., tell them ..." |
 | `tool_call` | `<tool_call>`, `<function_call>`, `"function_call":`, `{"name": ..., "arguments": ...}`, `<\|tool\|>` |
-| `link_directive` | a URL near an imperative ("visit", "click", "send to"; "खोलो", "भेजो"; "उघडा", "पाठवा"), or a Markdown image (it can send data out when it loads) |
-| `encoded_blob` | 200 or more base64 characters in a row with at least one digit, `+` or `/` |
+| `link_directive` | only with a sign of exfiltration: send, upload, forward or "submit ... to" a URL ("भेजो", "पाठवा"); visit, open or click a URL whose query carries data (a parameter such as `data=`, `secret=`, `conversation=`, or a placeholder value such as `={...}`; also "खोलो", "उघडा"); a Markdown image or an HTML `<img src=...>` (they load by themselves). Not: "Visit https://ncert.nic.in", a YouTube `watch?v=` link |
+| `encoded_blob` | 200 or more base64 characters in a row with at least one digit, `+` or `/` and at least one letter (not the digits of pi, not a DNA sequence) |
 
-Matching runs on a normalised copy: format characters removed, Unicode tag characters turned into the ASCII they hide, NFKC, case folded. Full-width letters, mathematical letters, no-break spaces and case make no difference. The stored text is never changed.
+Matching runs on a normalised copy: the invisible characters ingest cleaning drops (format characters, variation selectors, fillers, controls) removed, Unicode tag characters turned into the ASCII they hide, NFKD and case folded, Cyrillic and Greek look-alikes of the trigger letters turned into Latin, combining marks after a Latin letter removed (never a Devanagari sign), NFKC, and every whitespace run collapsed to one space (or one line break). Words may be separated by spaces or `_ - . , / : ;`. Full-width letters, accents, `İ`, look-alikes, zero-width characters and runs of spaces make no difference. The stored text is never changed.
+
+**Measured (5d-2b, `tests/fixtures/scan_corpus.py`):** 0 of 54 ordinary syllabus sentences (English, Hindi, Marathi, and computer-science lessons about prompts and chatbots) are flagged (the 5d-2 rules flagged 21); 20 of 20 reported cheap evasions are caught (the 5d-2 rules caught 0). Both tests print their numbers. The corpus was written for the test: it is not a false-positive rate of real files (B99).
 
 **Limits.** This is a tripwire, not a guarantee:
 
 - Paraphrases, other languages, text in images, a phrase split across two chunks and anything not foreseen pass **unflagged**. `flagged: false` never means safe.
-- Text that is legitimately **about** these things is flagged: a computer-science lesson on prompts, a teacher's note "if a student asks ..., answer ...", or "Visit www.example.org for the worksheet".
+- Text that is really **about** injection is still flagged: a lesson that quotes a jailbreak prompt, "tell the chatbot: ignore all previous instructions", or a note to "send the answers to https://...". Ordinary text about prompts and chatbots, plain links and plain "if a student asks" notes are not (5d-2b). Evasions still open: backlog B101.
 - Not detectable per chunk: zero-width and bidi characters (removed at ingest), PDF hidden text (backlog B56), PPTX hidden slides (backlog B53).
 
 | Code | HTTP | Where |
 |---|---|---|
 | `invalid_query`, `query_too_long` | 422 | test search |
 | `test_search_rate_limit_exceeded` | 429 + `Retry-After` | test search; the body also has `retry_after_seconds` |
-| `search_unavailable`, `search_timeout` | 503 | test search |
+| `search_unavailable`, `search_timeout`, `search_busy` | 503 | test search |
 | `service_unavailable` | 503 | test search: Redis is down outside development |
+
+### 11.4 Validation errors on every route (5d-2b)
+
+FastAPI's `422` keeps its shape, `{"detail": [errors]}`, but an error now carries only `type`, `loc`, `msg` and, when it holds the schema's own limits (`ge`, `le`, `max_length`, `pattern` ...), `ctx`. The echoed `input` is gone: for a missing field it was the whole request body, so a login without `tenant_slug` repeated the password (review of 5d-2, finding 8; tested on `/auth/login` with six bad bodies). Nothing in `frontend/src` read `input`.

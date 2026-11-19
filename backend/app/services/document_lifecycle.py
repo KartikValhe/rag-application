@@ -9,8 +9,9 @@ Everything runs in the CALLER's transaction (a tenant session with app.tenant_id
 
   1. the document row is locked (FOR NO KEY UPDATE): concurrent publishes, deletes and replacements of one
      document are serialised, and the loser sees the winner's committed state;
-  2. the version must be `ready` (409 version_not_ready) and, when it has injection flags, the caller must have
-     acknowledged them (409 flags_acknowledgement_required; the acknowledging user is recorded);
+  2. the version must be `ready` (409 version_not_ready) and, when it has injection flags OR was never scanned
+     (flagged_chunk_count NULL, indexed before 5d-2), the caller must have acknowledged that (409
+     flags_acknowledgement_required with reason "flagged" or "not_scanned"; the acknowledging user is recorded);
   3. `archive_published`: the previous published version becomes `archived`, its chunks are deleted (their
      embeddings go with them by cascade) and its file goes into the storage outbox with
      not_before = now() + DOC_ARCHIVE_FILE_RETENTION_DAYS (the same transaction time as published_at);
@@ -65,6 +66,14 @@ class PublishResult:
     archived: list[ArchivedVersion]
     pruned: list[PrunedVersion]
     flags_acknowledged: bool
+
+
+def needs_acknowledgement(flagged_chunk_count: int | None) -> bool:
+    """True when publishing needs acknowledge_flags: the version has flagged chunks, OR it was never scanned
+    (flagged_chunk_count NULL: indexed before the 5d-2 scanner; python -m app.scripts.rescan_flags fills it).
+    "Not scanned" is not "clean" (review of 5d-2, finding 4). A module-level function so a prove-it test can
+    switch the rule off."""
+    return flagged_chunk_count is None or flagged_chunk_count > 0
 
 
 def _not_found() -> HTTPException:
@@ -188,12 +197,15 @@ async def publish_version(
     ).first()
     if version is None:
         raise _not_found()
-    version_no, version_status, flagged = int(version[0]), version[1], int(version[2] or 0)
+    version_no, version_status = int(version[0]), version[1]
+    flagged: int | None = None if version[2] is None else int(version[2])
     if version_status != "ready":
         raise api_error(status.HTTP_409_CONFLICT, "version_not_ready")
-    if flagged > 0 and not acknowledge_flags:
-        raise api_error(status.HTTP_409_CONFLICT, "flags_acknowledgement_required")
-    acknowledged = flagged > 0 and acknowledge_flags
+    needs_ack = needs_acknowledgement(flagged)
+    if needs_ack and not acknowledge_flags:
+        reason = "not_scanned" if flagged is None else "flagged"
+        raise api_error(status.HTTP_409_CONFLICT, "flags_acknowledgement_required", reason=reason)
+    acknowledged = needs_ack and acknowledge_flags
 
     archived = await archive_published(db, tenant_id=tenant_id, document_id=document_id, retention_days=retention)
     published_at = await mark_published(
@@ -208,10 +220,10 @@ async def publish_version(
         )
 
     if acknowledged:
-        await audit(
-            "document:flags_acknowledged",
-            {"version_id": str(version_id), "version_no": version_no, "flagged_chunk_count": flagged},
-        )
+        details: dict[str, Any] = {"version_id": str(version_id), "version_no": version_no, "flagged_chunk_count": flagged}
+        if flagged is None:
+            details["not_scanned"] = True
+        await audit("document:flags_acknowledged", details)
     for old in archived:
         await audit(
             "document:archive",

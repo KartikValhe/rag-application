@@ -117,6 +117,58 @@ async def test_an_acknowledged_flagged_chunk_is_returned_with_flagged_true_and_i
     assert by_id[str(doc.chunk_id(1))]["version_status"] == "published"
 
 
+async def test_a_version_never_scanned_needs_acknowledgement_and_test_search_still_finds_it(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession, query_embedder: EmbedderSwitch
+) -> None:
+    """Review of 5d-2, finding 4: a version indexed before the scanner existed has flagged_chunk_count NULL.
+    "Not scanned" is not "clean": publishing it needs acknowledge_flags (409 with reason not_scanned), and the
+    acknowledgement is recorded. Test search (drafts) works on it as on any ready version."""
+    from sqlalchemy import select, update
+
+    from app.db.models.audit import AuditLog
+    from app.db.models.document import DocumentVersion
+
+    w = academic_world.a
+    canary = _canary()
+    doc = await seed_document(raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, status="ready",
+                              embedder=EMBEDDER, chunks=[ChunkSpec(f"Plain old lesson {canary}.", vector=axis_vector(0.95, 3))])
+    await raw_db.execute(update(DocumentVersion).where(DocumentVersion.id == doc.version.id).values(flagged_chunk_count=None))
+    await raw_db.commit()
+    query_embedder.embedder = EMBEDDER
+    publish_url = f"/api/v1/documents/{doc.document.id}/versions/{doc.version.id}/publish"
+
+    refused = await client.post(publish_url, headers=auth(w, w.t1), json={})
+    assert_error_code(refused, 409, "flags_acknowledgement_required")
+    assert refused.json()["detail"]["reason"] == "not_scanned"
+
+    drafts = (await client.post("/api/v1/documents/test-search", headers=auth(w, w.t1),
+                                json={"query": canary, "include_drafts": True})).json()
+    assert str(doc.chunk_id(0)) in {h["chunk_id"] for h in drafts["hits"]}
+
+    published = await client.post(publish_url, headers=auth(w, w.t1), json={"acknowledge_flags": True})
+    assert published.status_code == 200, published.text
+    await raw_db.commit()
+    acknowledged_by = (await raw_db.execute(
+        select(DocumentVersion.flags_acknowledged_by).where(DocumentVersion.id == doc.version.id))).scalar_one()
+    assert acknowledged_by == w.t1.id
+    details = (await raw_db.execute(
+        select(AuditLog.details).where(AuditLog.tenant_id == w.id, AuditLog.action == "document:flags_acknowledged")
+    )).scalars().all()
+    assert {"version_id": str(doc.version.id), "version_no": 1, "flagged_chunk_count": None, "not_scanned": True} in details
+
+
+async def test_a_flagged_version_says_why_acknowledgement_is_needed(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    w = academic_world.a
+    doc = await _flagged_version(raw_db, w, _canary(), status="ready")
+    resp = await client.post(
+        f"/api/v1/documents/{doc.document.id}/versions/{doc.version.id}/publish", headers=auth(w, w.t1), json={}
+    )
+    assert_error_code(resp, 409, "flags_acknowledgement_required")
+    assert resp.json()["detail"]["reason"] == "flagged"
+
+
 async def test_a_student_outside_the_class_never_sees_the_flagged_chunk(
     academic_world: AcademicWorld, raw_db: AsyncSession
 ) -> None:

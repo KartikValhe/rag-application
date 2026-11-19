@@ -92,6 +92,7 @@ from app.schemas.document import (
     DocumentUsageResponse,
     DocumentVersionResponse,
     FlaggedChunk,
+    FlagMatch,
     NamedRef,
     PublishRequest,
     TestSearchHit,
@@ -979,7 +980,7 @@ async def _guarded_query_embedder(load: QueryEmbedderLoader) -> retrieval.QueryE
 def _hit_response(hit: retrieval.Hit, scanned: dict[str, bool]) -> TestSearchHit:
     def flagged(value: str) -> bool:
         if value not in scanned:
-            scanned[value] = bool(injection_scan.scan_text(value))
+            scanned[value] = bool(injection_scan.scan_metadata(value))
         return scanned[value]
 
     return TestSearchHit(
@@ -1016,10 +1017,15 @@ async def test_search(
     Search the caller's material with scores, for teachers and admins (plan section 6). Checks, in order:
     permission (403), scope (generic 404 for a class, subject or pair the caller does not teach), the rate
     limit (429 test_search_rate_limit_exceeded; 503 when Redis is down outside development), the query (422
-    invalid_query / query_too_long), the model (503 search_unavailable), then the search (503 search_timeout).
-    include_drafts adds READY versions (never queued, processing, failed or archived). Hits are returned even
-    when the material is not sufficient: this is the teacher's view, not the chat. Not audited (a read); the
-    query is never logged.
+    invalid_query / query_too_long), the model (503 search_unavailable), the query embedding under the
+    process-wide cap (503 search_busy after RETRIEVAL_EMBED_QUEUE_SECONDS), then the search (503
+    search_timeout). include_drafts adds READY versions (never queued, processing, failed or archived). Hits are
+    returned even when the material is not sufficient: this is the teacher's view, not the chat. Not audited (a
+    read); the query is never logged.
+
+    The scope is read in the first transaction and used by the search in the second one; an assignment revoked
+    in between still applies to this one request (accepted, plan section 14). The permission dependency's own
+    session stays open for the whole request (backlog B100).
     """
     started = time.perf_counter()
     tid = user.tenant_id
@@ -1032,9 +1038,11 @@ async def test_search(
             await retrieval.query_lexemes(db, query)
         except retrieval.QueryError as exc:
             raise api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
-    # The model is loaded with no transaction open (the first load takes seconds).
+    # The model is loaded, and the query embedded, with none of this route's transactions open.
     query_embedder = await _guarded_query_embedder(load_query_embedder)
     try:
+        if scope.pairs:  # an empty scope has nothing to compare with: nothing is embedded
+            query_embedder = await retrieval.embed_query(query_embedder, query)
         async with tenant_session_context(str(tid)) as db:
             result = await retrieval.search(db, scope, query, query_embedder, config, k=body.k)
     except retrieval.QueryError as exc:
@@ -1083,10 +1091,12 @@ async def get_version_flags(
     limit: Annotated[int, Query(ge=1, le=MAX_FLAGS_PAGE)] = 50,
 ) -> VersionFlagsResponse:
     """
-    The flagged chunks of one version, in ordinal order and paged (`after_ordinal`, `limit`), with their codes
-    and an excerpt of at most 300 characters around the first match: what a teacher acknowledges before
-    publishing. Read-only and not audited. Excerpts, headings and titles are UNTRUSTED text. The title and
-    the file name are scanned now (a title can change after ingest).
+    The flagged chunks of one version, in ordinal order and paged (`after_ordinal`, `limit`), with their stored
+    codes, an excerpt of the content (at most 300 characters around its first match) and, per code the current
+    rules find, where it matched (heading_path or content) with the matched span (at most 300 characters around
+    it): what a teacher acknowledges before publishing. Read-only and not audited. Excerpts, spans, headings and
+    titles are UNTRUSTED text. The title and the file name are cleaned and scanned now (a title can change after
+    ingest). flagged_chunk_count null means the version was never scanned (indexed before 5d-2).
     """
     scoped = await document_scope.load_document_for(db, user, document_id, action="view")
     v = await _load_version(db, user.tenant_id, document_id, version_id)
@@ -1107,6 +1117,12 @@ async def get_version_flags(
         stmt = stmt.where(Chunk.ordinal > after_ordinal)
     rows = (await db.execute(stmt)).all()
     page, more = rows[:limit], len(rows) > limit
+    reviews = await asyncio.to_thread(
+        lambda: [
+            (injection_scan.review_excerpt(r.content), injection_scan.review_matches(r.heading_path, r.content))
+            for r in page
+        ]
+    )
     items = [
         FlaggedChunk(
             chunk_id=r.id,
@@ -1116,9 +1132,10 @@ async def get_version_flags(
             heading_path=r.heading_path,
             injection_flags=list(r.injection_flags),
             excluded=r.excluded,
-            excerpt=await asyncio.to_thread(injection_scan.review_excerpt, r.content),
+            excerpt=excerpt,
+            matches=[FlagMatch(code=m.code, source=m.source, excerpt=m.excerpt) for m in matches],
         )
-        for r in page
+        for r, (excerpt, matches) in zip(page, reviews, strict=True)
     ]
     return VersionFlagsResponse(
         document_id=v.document_id,
@@ -1127,8 +1144,8 @@ async def get_version_flags(
         version_status=v.status,
         flagged_chunk_count=v.flagged_chunk_count,
         flags_acknowledged=v.flags_acknowledged_by is not None,
-        title_flagged=bool(injection_scan.scan_text(scoped.document.title)),
-        filename_flagged=bool(injection_scan.scan_text(v.original_filename)),
+        title_flagged=bool(injection_scan.scan_metadata(scoped.document.title)),
+        filename_flagged=bool(injection_scan.scan_metadata(v.original_filename)),
         items=items,
         next_after_ordinal=page[-1].ordinal if more and page else None,
     )

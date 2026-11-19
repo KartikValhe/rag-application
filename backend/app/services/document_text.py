@@ -84,6 +84,27 @@ _NOT_CLEAN_RE = re.compile(
 )
 
 
+def _class_ranges(char_class: str) -> tuple[tuple[int, int], ...]:
+    """The (first, last) code point ranges of a regex character class body made of single characters and
+    "a-b" ranges (no escapes), such as _INVISIBLE."""
+    out: list[tuple[int, int]] = []
+    i = 0
+    while i < len(char_class):
+        if i + 2 < len(char_class) and char_class[i + 1] == "-":
+            out.append((ord(char_class[i]), ord(char_class[i + 2])))
+            i += 3
+        else:
+            out.append((ord(char_class[i]), ord(char_class[i])))
+            i += 1
+    return tuple(out)
+
+
+def invisible_code_points() -> tuple[tuple[int, int], ...]:
+    """Every code point clean_text always drops (the invisible set, C1 controls and lone surrogates), as
+    ranges. The injection scanner drops the same set from its copy (review of 5d-2, finding 1)."""
+    return _class_ranges(_INVISIBLE + _C1_AND_SURROGATES)
+
+
 def clean_text(value: str) -> str:
     """
     One cleaned block: control, zero-width and bidi characters dropped, all whitespace turned into

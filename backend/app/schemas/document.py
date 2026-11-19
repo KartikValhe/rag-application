@@ -10,6 +10,7 @@ One response model per endpoint; see docs/api/phase5.md.
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
@@ -150,7 +151,9 @@ class TestSearchRequest(_Strict):
 
 class TestSearchHit(_Strict):
     """One ranked chunk. document_title, heading_path and content are UNTRUSTED text from an uploaded file:
-    show them as text, never as markup. flagged / title_flagged / filename_flagged = false does not mean safe."""
+    show them as text, never as markup. `flagged` / `injection_flags` cover the chunk text only (heading path
+    and content, scanned at ingest); title_flagged and filename_flagged are computed for this response only.
+    None of them = false means safe."""
 
     __test__ = False
 
@@ -190,9 +193,20 @@ class TestSearchResponse(_Strict):
     hits: list[TestSearchHit]
 
 
+class FlagMatch(_Strict):
+    """Where one code matched in a chunk: `source` is heading_path or content, `excerpt` at most 300 characters
+    of that UNTRUSTED text around the matched span. Show it as text, never as markup."""
+
+    code: str
+    source: Literal["heading_path", "content"]
+    excerpt: str
+
+
 class FlaggedChunk(_Strict):
     """A flagged chunk of a version. `excerpt` is at most 300 characters of the chunk's UNTRUSTED content,
-    around the first match; show it as text, never as markup."""
+    around the first match in the content (or its start); `matches` has one entry per code the CURRENT rules
+    find, with its source and span (a stored code that no longer matches has none; see rescan_flags). Show all
+    of it as text, never as markup."""
 
     chunk_id: uuid.UUID
     ordinal: int
@@ -202,6 +216,7 @@ class FlaggedChunk(_Strict):
     injection_flags: list[str]
     excluded: bool
     excerpt: str
+    matches: list[FlagMatch]
 
 
 class VersionFlagsResponse(_Strict):

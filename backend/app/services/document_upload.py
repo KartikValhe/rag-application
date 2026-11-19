@@ -78,6 +78,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "query_too_long": "The question is too long. Shorten it and try again.",
     "search_unavailable": SEARCH_UNAVAILABLE_MESSAGE,
     "search_timeout": "The search took too long. Please try again.",
+    "search_busy": "Search is busy right now. Please try again in a moment.",
 }
 
 

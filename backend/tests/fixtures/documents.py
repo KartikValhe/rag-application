@@ -127,6 +127,8 @@ async def make_document(
         sha256=hashlib.sha256(body).hexdigest(),
         storage_key=key,
         page_count=page_count,
+        # Ready and published versions were scanned by the worker (NULL would mean "never scanned", 5d-2b)
+        flagged_chunk_count=0 if status in ("ready", "published") else None,
         uploaded_by=uploader.id,
         published_at=datetime.now(UTC) if published else None,
         published_by=uploader.id if published else None,

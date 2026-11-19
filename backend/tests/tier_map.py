@@ -104,7 +104,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_document_lifecycle.py": ("db", "slow"),
     "test_document_limits.py": ("db",),
     "test_embed_stage.py": ("db", "slow"),
-    "test_document_flags_route.py": ("db", "security"),
+    "test_document_flags_route.py": ("db", "security"),  # who may read the flags (gate)
+    "test_document_flags_contract.py": ("db",),  # keys, excerpts, spans, paging, read-only
     "test_document_permissions.py": ("db", "security"),
     "test_document_retry_limits.py": ("db",),
     "test_document_route_matrix.py": ("db", "security", "slow"),
@@ -133,7 +134,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_security_review.py": ("db", "security", "slow"),
     "test_slots_renew.py": ("db",),
     "test_teacher_class_scope.py": ("db", "security"),
-    "test_test_search_route.py": ("db", "security"),
+    "test_test_search_route.py": ("db", "security"),  # who may search, scope, rate-limit order (gate)
+    "test_test_search_contract.py": ("db",),  # the response contract: 422s, k, 503s, cap, logs, headers
+    "test_rescan_flags.py": ("db",),
+    "test_validation_errors.py": ("db", "security"),
     "test_tenants_rls.py": ("db", "security"),
     "test_throttle.py": ("db", "security"),
     "test_timetable_conflicts.py": ("db",),

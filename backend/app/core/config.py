@@ -135,8 +135,11 @@ class Settings(BaseSettings):
     CHUNK_TARGET_TOKENS: int = Field(default=380, ge=1)
     CHUNK_MAX_TOKENS: int = Field(default=460, ge=1)
     CHUNK_OVERLAP_TOKENS: int = Field(default=60, ge=0)
-    # A ready version without injection flags is published by the worker itself. OFF until the injection scanner
-    # (5d) owns document_versions.flagged_chunk_count: today every version would count as unflagged.
+    # A ready version without injection flags is published by the worker itself. The scanner (5d-2) now writes
+    # document_versions.flagged_chunk_count, but this stays OFF by default (plan Q5): the scanner is a tripwire, so
+    # "nothing flagged" only means "nothing detected"; its false-positive and false-negative rates on real school
+    # files are not measured yet (5d-3); and concurrent deletes during the lock upgrade are unmeasured (B76).
+    # Versions indexed before 5d-2 (flagged_chunk_count NULL) are never auto-published and need acknowledgement.
     DOC_AUTO_PUBLISH_ENABLED: bool = False
     DOC_ARCHIVE_FILE_RETENTION_DAYS: int = Field(default=30, ge=0)  # an archived version's file waits this long
     DOC_MAX_ARCHIVED_VERSIONS: int = Field(default=5, ge=0)  # older archived versions are pruned
@@ -169,6 +172,10 @@ class Settings(BaseSettings):
     RETRIEVAL_STATEMENT_TIMEOUT_MS: int = Field(default=5000, ge=1, le=600_000)
     # The keyword side ranks at most this many matching chunks (the lowest ids); must be >= RETRIEVAL_KEYWORD_K
     RETRIEVAL_KEYWORD_MAX_CANDIDATES: int = Field(default=2000, ge=1, le=1_000_000)
+    # Query embeddings running at once in one API process (a semaphore, and the size of their own thread pool).
+    # A search over the cap waits up to RETRIEVAL_EMBED_QUEUE_SECONDS for a place, then gets 503 search_busy.
+    RETRIEVAL_EMBED_CONCURRENCY: int = Field(default=2, ge=1, le=64)
+    RETRIEVAL_EMBED_QUEUE_SECONDS: float = Field(default=5.0, ge=0.0, le=60.0)
 
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property

@@ -115,11 +115,43 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+# The parts of a validation error that are about the SCHEMA, never what the client sent. "input" is dropped
+# (for a missing field it is the whole body: a login without an email echoed the password). "ctx" is kept only
+# with the schema's own limits (numbers and patterns from the model), never a validator's free text.
+_PUBLIC_ERROR_KEYS = ("type", "loc", "msg")
+_PUBLIC_CTX_KEYS = frozenset(
+    {"ge", "gt", "le", "lt", "min_length", "max_length", "multiple_of", "max_digits", "decimal_places", "pattern", "expected"}
+)
+
+
+def _public_ctx(ctx: Any) -> dict[str, Any] | None:
+    if not isinstance(ctx, dict):
+        return None
+    kept = {k: v for k, v in ctx.items() if k in _PUBLIC_CTX_KEYS and isinstance(v, int | float | str) and not isinstance(v, bool)}
+    return kept or None
+
+
+def public_errors(errors: Any) -> Any:
+    """FastAPI's error list without the client's input (review of 5d-2, finding 8): type, loc, msg and, when it
+    holds only the schema's limits, ctx. A module-level function so a prove-it test can switch it off."""
+    out: list[dict[str, Any]] = []
+    for error in errors if isinstance(errors, list) else []:
+        if not isinstance(error, dict):
+            continue
+        public = {key: error[key] for key in _PUBLIC_ERROR_KEYS if key in error}
+        ctx = _public_ctx(error.get("ctx"))
+        if ctx is not None:
+            public["ctx"] = ctx
+        out.append(public)
+    return _json_safe(out)
+
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    """FastAPI's own 422 (the same body: {"detail": [errors]}), except that the echoed input can always be
-    encoded. The default handler failed on a lone surrogate and the request ended as a 500 (5d-2)."""
-    return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+    """FastAPI's own 422 shape ({"detail": [errors]}) without the echoed input (public_errors). Location keys
+    can hold a lone surrogate, so the body is made encodable (_json_safe): the default handler failed on one
+    and the request ended as a 500 (5d-2)."""
+    return JSONResponse(status_code=422, content={"detail": public_errors(jsonable_encoder(exc.errors()))})
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────

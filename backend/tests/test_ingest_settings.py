@@ -35,7 +35,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     s = fresh(monkeypatch)
     assert (s.CHUNK_TARGET_TOKENS, s.CHUNK_MAX_TOKENS, s.CHUNK_OVERLAP_TOKENS) == (380, 460, 60)
     assert s.EMBEDDING_BATCH_SIZE == 8  # measured: bigger batches are not faster and cost memory
-    assert s.DOC_AUTO_PUBLISH_ENABLED is False  # off until the injection scanner exists (5d)
+    assert s.DOC_AUTO_PUBLISH_ENABLED is False  # off by default (plan Q5; the scanner is a tripwire)
     assert s.DOC_ARCHIVE_FILE_RETENTION_DAYS == 30
     assert s.DOC_MAX_ARCHIVED_VERSIONS == 5
 
@@ -102,3 +102,25 @@ def test_test_search_rate_defaults_bounds_and_placeholders(monkeypatch: pytest.M
     example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
     assert "\nDOC_TEST_SEARCH_RATE_USER=60\n" in example
     assert "\nDOC_TEST_SEARCH_RATE_WINDOW_SECONDS=600\n" in example
+
+
+def test_query_embedding_cap_defaults_bounds_and_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of 5d-2, finding 5: two query embeddings at once per process, a 5 s wait for a place."""
+    for name in ("RETRIEVAL_EMBED_CONCURRENCY", "RETRIEVAL_EMBED_QUEUE_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    s = fresh(monkeypatch)
+    assert (s.RETRIEVAL_EMBED_CONCURRENCY, s.RETRIEVAL_EMBED_QUEUE_SECONDS) == (2, 5.0)
+    for bad in ({"RETRIEVAL_EMBED_CONCURRENCY": 0}, {"RETRIEVAL_EMBED_QUEUE_SECONDS": -1}, {"RETRIEVAL_EMBED_QUEUE_SECONDS": 61}):
+        with pytest.raises(ValueError):
+            fresh(monkeypatch, **bad)
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "\nRETRIEVAL_EMBED_CONCURRENCY=2\n" in example
+    assert "\nRETRIEVAL_EMBED_QUEUE_SECONDS=5\n" in example
+
+
+def test_auto_publish_stays_off_and_the_comment_says_why() -> None:
+    """Review of 5d-2, finding 10: the setting's comment no longer claims the scanner is missing."""
+    source = (Path(__file__).resolve().parents[1] / "app" / "core" / "config.py").read_text(encoding="utf-8")
+    block = source[source.index("# A ready version without injection flags") : source.index("DOC_AUTO_PUBLISH_ENABLED: bool")]
+    assert "OFF until the injection scanner" not in block
+    assert "tripwire" in block and "B76" in block

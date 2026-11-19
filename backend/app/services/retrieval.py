@@ -54,12 +54,14 @@ mean the text is safe.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import math
 import re
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, NoReturn
@@ -107,7 +109,8 @@ class QueryError(ValueError):
 
 class SearchUnavailable(RuntimeError):  # noqa: N818 (a domain error named like the API's 503 codes)
     """The search cannot run now (HTTP 503). `code` is search_timeout (a statement ran over
-    RETRIEVAL_STATEMENT_TIMEOUT_MS) or search_unavailable (the query embedder gave an unusable vector).
+    RETRIEVAL_STATEMENT_TIMEOUT_MS), search_unavailable (the query embedder gave an unusable vector) or
+    search_busy (the query-embedding cap stayed full for RETRIEVAL_EMBED_QUEUE_SECONDS).
     The message is the code alone: never SQL, parameters or query text."""
 
     http_status = 503
@@ -404,15 +407,92 @@ class QueryEmbedder:
 
     @classmethod
     def from_embedder(cls, embedder: Any) -> QueryEmbedder:
-        """Wrap an Embedder (real or fake); embed_query runs in a thread (it adds the "query: " prefix).
-        The first call of the real model loads it (seconds), while the caller's tenant transaction, and so
-        a pooled connection, stays open: backlog B96 (warm the model at API start)."""
+        """Wrap an Embedder (real or fake); embed_query runs on the query-embedding thread pool (it adds the
+        "query: " prefix). Callers embed through embed_query() below, which applies the process-wide cap and
+        runs with no transaction open."""
 
         async def embed(query: str) -> list[float]:
-            vector: list[float] = await asyncio.to_thread(embedder.embed_query, query)
+            loop = asyncio.get_running_loop()
+            vector: list[float] = await loop.run_in_executor(_query_embed_executor(), embedder.embed_query, query)
             return vector
 
         return cls(model_key=str(embedder.model_id), dim=int(embedder.dim), embed=embed)
+
+
+class EmbedLimiter:
+    """The process-wide cap on query embeddings (review of 5d-2, finding 5): at most `concurrency` run at once.
+    A caller over the cap waits up to `queue_seconds` for a place, then gets SearchUnavailable("search_busy")
+    (503); with queue_seconds 0 it is refused at once. `waiting` counts callers waiting for a place now."""
+
+    def __init__(self, concurrency: int, queue_seconds: float) -> None:
+        if concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+        self.concurrency = concurrency
+        self.queue_seconds = queue_seconds
+        self.waiting = 0
+        self._semaphore = asyncio.Semaphore(concurrency)
+
+    @contextlib.asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        if self._semaphore.locked() and self.queue_seconds <= 0:
+            raise SearchUnavailable("search_busy")
+        self.waiting += 1
+        try:
+            async with asyncio.timeout(self.queue_seconds):
+                await self._semaphore.acquire()
+        except TimeoutError:
+            raise SearchUnavailable("search_busy") from None
+        finally:
+            self.waiting -= 1
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+
+_embed_limiter: EmbedLimiter | None = None
+_embed_executor: ThreadPoolExecutor | None = None
+
+
+def get_embed_limiter() -> EmbedLimiter:
+    """The process-wide limiter, built from RETRIEVAL_EMBED_CONCURRENCY and RETRIEVAL_EMBED_QUEUE_SECONDS."""
+    global _embed_limiter
+    if _embed_limiter is None:
+        _embed_limiter = EmbedLimiter(settings.RETRIEVAL_EMBED_CONCURRENCY, settings.RETRIEVAL_EMBED_QUEUE_SECONDS)
+    return _embed_limiter
+
+
+def reset_embed_limiter() -> None:
+    """Forget the limiter, so the next call reads the settings again (tests)."""
+    global _embed_limiter
+    _embed_limiter = None
+
+
+def _query_embed_executor() -> ThreadPoolExecutor:
+    """The threads the blocking query model runs on: a pool of its own (not asyncio's shared default pool), as
+    large as the cap. Created on first use, kept for the life of the process."""
+    global _embed_executor
+    if _embed_executor is None:
+        _embed_executor = ThreadPoolExecutor(
+            max_workers=settings.RETRIEVAL_EMBED_CONCURRENCY, thread_name_prefix="query-embed"
+        )
+    return _embed_executor
+
+
+async def embed_query(query_embedder: QueryEmbedder, query: str) -> QueryEmbedder:
+    """Embed the cleaned `query` under the process-wide cap, with NO transaction open (the caller opens its
+    search transaction afterwards). Returns a QueryEmbedder that answers with this vector for this query only,
+    for search() / search_for_chat(). Raises SearchUnavailable("search_busy") over the cap and whatever the
+    embedder raises."""
+    async with get_embed_limiter().slot():
+        vector = list(await query_embedder.embed(query))
+
+    async def answer(asked: str) -> list[float]:
+        if asked != query:
+            raise SearchUnavailable("search_unavailable")  # never a vector for another text
+        return list(vector)
+
+    return QueryEmbedder(model_key=query_embedder.model_key, dim=query_embedder.dim, embed=answer)
 
 
 # ── Results ──────────────────────────────────────────────────────────────────
@@ -422,8 +502,10 @@ class QueryEmbedder:
 class Hit:
     """One returned chunk. UNTRUSTED TEXT: content, heading_path, document_title and original_filename all
     come from an uploaded file or its uploader and may hold instructions aimed at a model. The chat layer
-    must wrap every one of them as data. flagged=False does NOT mean safe: the scanner (5d-2) is a
-    tripwire with certain false negatives."""
+    must wrap every one of them as data. `flagged` and `injection_flags` cover the CHUNK TEXT only (heading
+    path and content, scanned at ingest); the title and the file name are not part of them (the test-search
+    and flags routes scan those when they answer, nothing else does). flagged=False does NOT mean safe: the
+    scanner (5d-2) is a tripwire with certain false negatives."""
 
     rank: int
     chunk_id: uuid.UUID

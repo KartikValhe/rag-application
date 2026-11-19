@@ -47,7 +47,7 @@ from tests.fixtures.ml import (  # noqa: F401  (pytest fixtures)
     synthetic_e5,
     synthetic_e5_template,
 )
-from tests.fixtures.search_api import query_embedder  # noqa: F401  (pytest fixture)
+from tests.fixtures.search_api import embed_limit, query_embedder  # noqa: F401  (pytest fixtures)
 from tests.fixtures.worker import ingest_slots, quiet_queue, worker_dbs  # noqa: F401  (pytest fixtures)
 from tests.tier_map import apply_tiers, fast_tier_violation_patches
 
