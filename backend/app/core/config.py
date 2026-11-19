@@ -148,6 +148,21 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = Field(default=8, ge=1, le=256)
     EMBEDDING_THREADS: int = Field(default=1, ge=1, le=64)  # onnxruntime intra-op threads
 
+    # ── Retrieval (step 5d, design A5, docs/phase5d-plan.md section 8) ──────
+    RETRIEVAL_VECTOR_K: int = Field(default=20, ge=1, le=200)  # chunks taken from the vector side
+    RETRIEVAL_KEYWORD_K: int = Field(default=20, ge=1, le=200)  # chunks taken from the keyword side
+    RETRIEVAL_FINAL_K: int = Field(default=6, ge=1, le=50)  # chunks kept after fusion
+    RETRIEVAL_RRF_K: int = Field(default=60, ge=1, le=1000)  # reciprocal rank fusion constant
+    RETRIEVAL_MAX_QUERY_CHARS: int = Field(default=500, ge=1, le=4000)  # measured after cleaning
+    # UNCALIBRATED. Cosine similarity of the best vector hit needed to call the material sufficient. It belongs to
+    # the active embedding model (a model change needs a new value); the 5d-3 threshold sweep replaces it.
+    RETRIEVAL_MIN_SIMILARITY: float = Field(default=0.85, ge=0.0, le=1.0)
+    # Share of the query's words found in one keyword hit that also counts as sufficient. 0 switches it off.
+    RETRIEVAL_MIN_KEYWORD_COVERAGE: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Up to this many candidate chunks the vector side is an exact scan; above it the HNSW index is used.
+    RETRIEVAL_EXACT_MAX_CANDIDATES: int = Field(default=50_000, ge=0)
+    RETRIEVAL_HNSW_EF_SEARCH: int = Field(default=100, ge=1, le=1000)
+
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property
     def is_development(self) -> bool:
