@@ -350,3 +350,120 @@ Matching runs on a normalised copy: the invisible characters ingest cleaning dro
 ### 11.4 Validation errors on every route (5d-2b)
 
 FastAPI's `422` keeps its shape, `{"detail": [errors]}`, but an error now carries only `type`, `loc`, `msg` and, when it holds the schema's own limits (`ge`, `le`, `max_length`, `pattern` ...), `ctx`. The echoed `input` is gone: for a missing field it was the whole request body, so a login without `tenant_slug` repeated the password (review of 5d-2, finding 8; tested on `/auth/login` with six bad bodies). Nothing in `frontend/src` read `input`.
+
+
+## 12. Retrieval evaluation harness (5d-3)
+
+`python -m app.scripts.eval_retrieval` measures **retrieval only** (no LLM) on a golden set of questions against the real published documents of one class and subject, with the real embedding model. It exists so the owner can choose `RETRIEVAL_MIN_SIMILARITY` from data. Plan: `docs/phase5d-plan.md` section 10. Code: `app/services/retrieval_eval.py` (pure metrics, no database) and `app/scripts/eval_retrieval.py` (the command).
+
+### 12.1 What it does and never does
+
+- Reads the golden CSV, finds the tenant by slug in a **READ ONLY** platform transaction, then runs everything in **one READ ONLY tenant transaction** as `app_tenant` (RLS on). Postgres refuses any write there (tested).
+- The scope is `RetrievalScope.for_operator`: one offered class and subject pair, **published versions only**, the purpose `read` (what a student would see). `for_operator` is used only from `app/scripts` (a test scans `app/`).
+- Every question goes through `retrieval.search`, the same service the API uses, with the settings of the environment it runs in (`RETRIEVAL_*`).
+- It prints and reports **ids, titles, file names, pages and headings only. Never chunk text.** (`ChunkRef` has no content field; a test checks the output and the report.) Titles and headings are untrusted text from uploaded files, so the console copy is cleaned of control characters.
+- It never sets a threshold. `RETRIEVAL_MIN_SIMILARITY` is read and shown; only `sufficient` follows it. The sweep (12.5) does not depend on it.
+
+### 12.2 How to run it
+
+Prerequisites: Docker is up (Postgres 5433, Redis); the documents are **published** in that class and subject; `tests/fixtures/golden_set.csv` exists (12.3); the real model is fetched and `EMBEDDING_MODEL_DIR` points at it (`python -m app.scripts.fetch_model e5-small --out <dir>`). The command uses `DATABASE_URL` and `PLATFORM_DATABASE_URL` from the environment (`backend/.env`), like the API, so **it runs against whatever database that file names**: check that it is the dev database you mean. The first run verifies and loads the model (about 0.5 GB; seconds to minutes).
+
+PowerShell, from the `backend` folder, with the owner's values (tenant `acme`, class `469bc5e7-...`, subject `abc756c6-...`). The report goes outside the repository because it holds your questions and document titles:
+
+```powershell
+cd D:\Devnectar\rag-application\backend
+.\.venv\Scripts\Activate.ps1
+python -m app.scripts.eval_retrieval `
+  --tenant acme `
+  --class-id 469bc5e7-4382-49cb-8ad6-70d16e1639b3 `
+  --subject-id abc756c6-0234-4db6-a09f-f596bfa4afca `
+  --golden tests/fixtures/golden_set.csv `
+  --k 10 `
+  --report "$env:TEMP\retrieval-eval-acme.json"
+```
+
+| Argument | Meaning |
+|---|---|
+| `--tenant` | Tenant slug (required) |
+| `--class-id`, `--subject-id` | The pair to evaluate (required; the tenant must offer it) |
+| `--golden` | The CSV (default `tests/fixtures/golden_set.csv`, relative to where you run it) |
+| `--k` | Hits per question, 1 to 50 (default 10). `hit@k` and MRR use it as the cutoff |
+| `--report` | Where to write the JSON report (required; parent folders are created) |
+
+| Result | Exit code | Message |
+|---|---|---|
+| Done | 0 | the summary, then `report written: <path>` |
+| Golden file, model directory or documents missing | **0** | `skipped: <reason>` (so a machine without the files, such as CI, is not an error) |
+| Malformed golden file | 2 | `error: golden set row N: ...` (N is the spreadsheet row; the header is row 1) |
+| Unknown tenant; a pair the tenant does not offer | 2 | `error: ...` |
+| A question that cannot be searched (no searchable word, over 500 characters) | 2 | `error: golden set row N: ... (invalid_query / query_too_long)`, found before the model loads |
+| A search timeout, or a model that fails verification | 2 | `error: ...` |
+
+### 12.3 The golden CSV
+
+UTF-8, with or without a BOM (Excel's "CSV UTF-8"). Columns are found by their header name, so their order does not matter; extra columns are ignored; blank lines are skipped. A question with a comma needs quotes (an unquoted comma gives "has 7 columns but the header has 6").
+
+| Column | Rule |
+|---|---|
+| `#` | Your number for the question (shown in the summary; blank = the row number minus one) |
+| `Language` | Free text such as `English`, `Marathi`, `Hindi`. Everything is split by this value |
+| `Question` | The question as a student would type it (at most 500 characters) |
+| `Document` | The document **title or original file name** (case, spaces and Unicode form do not matter; the file name may be written without its extension). Exact, never partial. `(none)` marks a question that should **not** be answered |
+| `Expected location` | `slide N`, `slide N-M`, `page N`, `pages N-M` (hit when the chunk's page range overlaps; a hyphen, en dash or em dash all work), or `heading: <text>` (hit when that text, casefolded and NFC-normalised, is inside the chunk's heading path). Blank for a should-not-answer row |
+| `Should answer` | `Yes` or `No` (also `y`, `n`, `true`, `false`, `1`, `0`). Blank follows the Document column. `(none)` together with `Yes` is an error |
+
+A retrieved chunk is **the expected one** when its document matches the Document cell **and** its place matches the location. PPTX slides are stored as pages, so `slide 5` and `page 5` are the same test.
+
+### 12.4 What each number means
+
+| Number | Meaning | Read it as |
+|---|---|---|
+| **hit@1 / 3 / 5 / k** | Of the should-answer questions, the share whose expected chunk is among the first 1, 3, 5, k fused results | Retrieval quality. hit@5 is about what a chat answer would see |
+| **MRR@k** | Average of 1 / (position of the expected chunk), 0 when it is not in the first k | 1.00 = always first |
+| **answer rate** | Of the should-answer questions, the share whose best vector similarity is at or above the threshold (`sufficient = true`). It does not check that the chunk is the right one | Too low: the threshold refuses real questions |
+| **refusal accuracy** | Of the should-not-answer questions, the share that stay below the threshold (refused) | Too low: the threshold lets unrelated questions through |
+| **keyword only / vector only hit@k** | The same hit@k when only one side of the hybrid search is used | Input for the trigram decision (backlog B92): a Marathi or Hindi keyword-only rate far below the vector-only rate means inflected words are missed by the keyword side |
+
+Everything is shown overall (`ALL`) and per `Language`. A rate is `n/a` when the group has no row of that kind (so "no refusal rows" never shows as 0%).
+
+Each question also gets an **outcome**, and the summary lists every failure with its cause:
+
+| Outcome | Plain English |
+|---|---|
+| `ok` | The expected chunk was retrieved and the answer would be given |
+| `below_threshold` | **Found but below the threshold:** the expected chunk was retrieved, but the best similarity is under the threshold, so the question would be refused |
+| `wrong_chunk` | Chunks were retrieved but the expected place is not among them |
+| `no_candidate` | Nothing was retrieved at all |
+| `document_not_in_scope` | The Document cell matches no published document of this class and subject (a typo, or the file is not published; backlog B80 explains why `en-01.pdf` cannot be) |
+| `refused_correctly` / `answered_anyway` | For should-not-answer rows: stayed below the threshold, or was answered |
+
+The JSON report has, per question, the top five hits (rank, chunk id, document title, pages, heading, vector similarity, keyword matched terms, fused score, whether it is the expected chunk), the hit position, the position in the keyword-only and vector-only rankings, the best similarity, the keyword coverage and the outcome. It also has the corpus: chunks per document, the flagged chunk count (injection scanner) and, for backlog B97, the keyword cap (`RETRIEVAL_KEYWORD_MAX_CANDIDATES`) next to the number of chunks in scope: the cap can only drop a better match when the scope has **more** chunks than the cap.
+
+### 12.5 The threshold sweep and how to choose
+
+The command runs **one search per question**, stores each question's best vector similarity (and keyword coverage), and computes the table for the thresholds 0.70 to 0.95 in steps of 0.01 with plain arithmetic. For each threshold: the answer rate (should-answer rows at or above it) and the refusal accuracy (should-not-answer rows below it). Two rows are marked:
+
+- **best balanced threshold:** the highest mean of the two rates; if several thresholds tie, the highest of them (it refuses more);
+- **highest threshold that keeps the answer rate at or above 90%:** the strictest value that still answers nine in ten real questions.
+
+These are starting points, not decisions. How to choose:
+
+1. Decide what is worse for your school: a wrong answer from unrelated material (a threshold too low) or a refusal of a real question (too high). The balanced row treats them as equal.
+2. Look at the **plateau** around the marked rows, not one number: choose a value in the middle of a stable stretch, so a few questions do not flip it.
+3. Look at the failure list: `below_threshold` rows with similarities just under your pick show what a lower value would recover; `answered_anyway` rows show what a higher one would stop.
+4. e5 similarities cluster high (even unrelated text often scores 0.7 or more), so expect useful values in the upper half of the range. If no value gives both a high answer rate and a high refusal accuracy, the problem is retrieval quality (hit@k), not the threshold.
+5. A small golden set (fewer than about 20 rows of each kind) gives a coarse table. Add questions before trusting a plateau.
+6. The second sweep in the JSON report (`keyword_coverage_sweep`) is the same table for the keyword-coverage clause alone. `RETRIEVAL_MIN_KEYWORD_COVERAGE` stays `0` (off) unless that table shows a clear gain.
+
+### 12.6 Turning the chosen value into the setting (by hand; the harness never does)
+
+1. **Local run:** set `RETRIEVAL_MIN_SIMILARITY=<value>` in `backend/.env` (the environment of the API process) and restart the API. `.env` is never committed.
+2. **The default:** change `RETRIEVAL_MIN_SIMILARITY` in `backend/app/core/config.py` (default `0.85`) and the same line, with its UNCALIBRATED comment, in `backend/.env.example`; say in that comment which model, which date and how many golden questions the value comes from.
+3. **`threshold_calibrated=true`:** today this flag is **not a setting**. `RetrievalConfig.threshold_calibrated` (`app/services/retrieval.py`) is a dataclass default of `False` that `RetrievalConfig.from_settings` does not set, and the test-search response copies it. To report `true`, add a setting (for example `RETRIEVAL_THRESHOLD_CALIBRATED`, default `false`, with `.env.example` and a bounds test) and pass it in `from_settings`, or flip the dataclass default once the value is the default. This is a small follow-up step and was **not done in 5d-3** (backlog B105).
+4. **Tests that pin the uncalibrated default** change with it: `tests/test_retrieval_pure.py` (`cfg.min_similarity == settings.RETRIEVAL_MIN_SIMILARITY == 0.85` and `threshold_calibrated is False`), `tests/test_retrieval_quality.py` (`result.threshold == 0.85`) and `tests/test_test_search_contract.py` (`threshold_calibrated is False`).
+5. **The value belongs to the model** (`EMBEDDING_MODEL_ID`, response field `model`). A different model, or a different `query:` / `passage:` prefix, needs a new run and a new value. Record the model key, the date and the golden-set size next to the number.
+6. Run the harness again with the new setting: the answer rate and refusal accuracy at the current setting should match its row in the table, and the questions that fail should be the ones you accepted.
+
+### 12.7 Tests
+
+`tests/test_retrieval_eval_metrics.py` (fast: loader, matcher, metrics, sweep and report on a synthetic golden set), `tests/test_eval_retrieval_script.py` (fast: skips, malformed CSV, arguments, the operator-scope guard) and `tests/test_eval_retrieval_db.py` (db: the whole command on synthetic documents with a scripted embedder, READ ONLY refused writes, skips and errors). The real golden set and the real model are never used by a test.

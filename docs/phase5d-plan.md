@@ -1,6 +1,6 @@
 # Phase 5d plan: retrieval, test search, injection scanner, retrieval-only evaluation
 
-Status: APPROVED 2026-11-19 · 5d-1 built, review fixes 5d-1b built, 5d-2 built (section 14) · 5d-3 not started.
+Status: APPROVED 2026-11-19 · 5d-1 built, review fixes 5d-1b built, 5d-2 built, 5d-2b fixes built, 5d-3 built (section 14); the harness has not been run on real data yet.
 Read with: `docs/phase5-design.md` A4-A6 and C2, `docs/backlog.md`, `CLAUDE.md`.
 There is no LLM call anywhere in 5d.
 
@@ -348,3 +348,21 @@ Each batch ends with `run_tests gate`, `ruff check .` and `mypy app`, the exact 
 - **New negative tests:** rate limit before validation (limit 1: `???` is 422, the next valid query 429); NULL count publish and test search; assignment revoked in the gap; heading-only flag span; a student with document:view through a custom role (empty scope / 404 on test search, 404 on the flags route); parallel searches under the cap.
 - **Tests first:** against stubs with the 5d-2 behaviour, 21 scanner tests and 23 route, flags, publish, 422, rescan and prove-it tests failed for the stated reasons (the corpus test printed 21 of 54 flagged, the bypass test 0 of 20; publish of a NULL-count version returned 200; the 422 bodies echoed the password; the cap settings did not exist). Passing before the fix, by design: the student-with-document:view tests (the manage scope already gave students nothing), the revoked-assignment test (it pins the accepted behaviour), prove-it 3b and 3c (the real scope function was already right).
 - **Gate split:** `tests/test_test_search_route.py` (db, security: who may search, scope, isolation, rate-limit order, student, revoked assignment) and `tests/test_test_search_contract.py` (db only: the 422 matrix, k, the 503s, the embedding cap, keys and scores, the 429 shape, logging, headers, body limit); likewise `tests/test_document_flags_route.py` (gate: 404, scope, student) and `tests/test_document_flags_contract.py` (db only). The 2 MB scanner test scans each input once and checks that the only match is the appended phrase at the end (it was two scans). Gate: 9:22 before, 8:59 after (539.55 s), on the developer machine.
+
+
+**5d-3 (2026-11-19): retrieval-only evaluation harness.** No migration, no grant, no new dependency, no LLM call, no route, no change to any retrieval setting (`RETRIEVAL_MIN_SIMILARITY` stays 0.85, uncalibrated). Not committed. How to run it and read it: `docs/api/phase5.md` section 12.
+
+- **Built:** `app/services/retrieval_eval.py` (pure: golden loader, location and document matcher, hit@k, MRR, answer rate, refusal accuracy, per-language split, the 0.70-0.95 sweep with its two marked thresholds, the JSON report and the plain-English summary) and `app/scripts/eval_retrieval.py` (the command). No chunk text can reach the report: `ChunkRef` has no content field.
+- **Read-only:** both transactions (the tenant lookup and the search) start with `SET TRANSACTION READ ONLY`; the scope is `RetrievalScope.for_operator` (published only). Prove-it: with the statement removed, 3 tests fail (`assert ['off'] == ['on']`).
+- **Skips (exit 0):** golden file, `EMBEDDING_MODEL_DIR` / model folder, or no published documents with chunks. The documents check runs before the model is loaded. Errors (exit 2) name the golden-file row: a malformed row, a question with no searchable word or over 500 characters (found before the model loads), an unknown tenant, a pair the tenant does not offer.
+- **Decisions, in the plan's spirit:**
+  - `Document` matches the title, the file name or the file name without its extension, exactly (no partial names).
+  - Outcomes per should-answer question: `document_not_in_scope`, `no_candidate`, `wrong_chunk`, `below_threshold`, `ok` (checked in that order).
+  - A balanced-threshold tie goes to the highest threshold; the 90% line uses exact fractions; the sweep values are whole hundredths, so no float drift.
+  - The keyword-only and vector-only rankings hold chunk ids only, so the command looks up their places (title, pages, heading; never content) with one read-only SELECT per question.
+  - A second sweep over the keyword coverage alone is in the JSON report.
+  - Backlog B97 check: the report states the keyword cap and the chunk count of the scope.
+- **Test files:** the plan listed one script test file; the "documents missing" and READ ONLY cases need the database, and one file has one tier, so there are two: `tests/test_eval_retrieval_script.py` (fast) and `tests/test_eval_retrieval_db.py` (db). Plus `tests/test_retrieval_eval_metrics.py` (fast). The 5d-1b guard (`for_operator` only from `app/scripts`) still passes and now has a companion check.
+- **Tests first:** both fast files failed at collection with `ImportError: cannot import name 'retrieval_eval' / 'eval_retrieval'`, the stated reason (no stub). One assertion of mine was wrong (the heading reads "Keyword only", not "keyword only") and was fixed in the test.
+- **No golden set:** `tests/fixtures/golden_set.csv` does not exist (F9) and no row was invented; every test uses a synthetic CSV.
+- **Not done, recorded:** `threshold_calibrated` is not a setting (B105); the numbers need the owner's run on the real model (B61) and the real files.
