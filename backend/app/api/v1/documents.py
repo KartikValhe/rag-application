@@ -4,7 +4,8 @@ app/api/v1/documents.py
 Document routes, step 5b-1 (design A2-A4). Upload, replace, list, detail, PATCH, soft delete,
 status, retry, version delete and download, plus the admin usage and purge routes.
 Publish is here since 5c-2 (it calls services/document_lifecycle.publish_version, the same function the worker's
-auto-publish uses). Not here yet: flags and test search (5d).
+auto-publish uses). Test search and the read-only flags route are here since 5d-2 (docs/phase5d-plan.md
+section 6; chunk exclusion is backlog B94).
 
 Rules every route follows:
   - require(permission) first (default-deny); students hold no document:* permission, so they get 403.
@@ -26,8 +27,9 @@ import base64
 import binascii
 import hashlib
 import json
+import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
@@ -89,8 +91,13 @@ from app.schemas.document import (
     DocumentUpdateRequest,
     DocumentUsageResponse,
     DocumentVersionResponse,
+    FlaggedChunk,
     NamedRef,
     PublishRequest,
+    TestSearchHit,
+    TestSearchRequest,
+    TestSearchResponse,
+    VersionFlagsResponse,
 )
 from app.services import (
     document_lifecycle,
@@ -98,6 +105,8 @@ from app.services import (
     document_scope,
     document_store,
     document_upload,
+    injection_scan,
+    retrieval,
 )
 from app.services.audit import record_audit_event
 from app.services.document_limits import DocumentLimits
@@ -917,6 +926,212 @@ async def download_version(
         "Content-Length": str(v.size_bytes),
     }
     return StreamingResponse(_guarded_stream(chunks, tid), media_type="application/octet-stream", headers=headers)
+
+
+# ── Test search and flags (step 5d-2) ────────────────────────────────────────
+
+QueryEmbedderLoader = Callable[[], Awaitable[retrieval.QueryEmbedder]]
+
+
+async def _process_query_embedder() -> retrieval.QueryEmbedder:
+    """The process-wide model, loaded on the first test search of the process (seconds; backlog B96)."""
+    from app.ml import (
+        loader,  # imported here: importing the API never loads a machine-learning library
+    )
+
+    return retrieval.QueryEmbedder.from_embedder(await loader.get_embedder_async())
+
+
+def get_query_embedder() -> QueryEmbedderLoader:
+    """FastAPI dependency: HOW to get the query embedder, not the embedder itself, so the model is only loaded
+    after the permission, scope, rate-limit and query checks. Tests override it."""
+    return _process_query_embedder
+
+
+async def _test_search_scope(db: AsyncSession, user: User, body: TestSearchRequest) -> retrieval.RetrievalScope:
+    """The caller's manage scope, narrowed by the ids (never widened); anything outside it is the generic 404.
+    A module-level name, so a prove-it test can replace it with one that trusts the request and show the leak."""
+    return await retrieval.build_retrieval_scope(
+        db, user, purpose="manage", class_id=body.class_id, subject_id=body.subject_id,
+        include_drafts=body.include_drafts,
+    )
+
+
+async def _guarded_query_embedder(load: QueryEmbedderLoader) -> retrieval.QueryEmbedder:
+    """The loaded embedder, with every failure (loading or embedding) turned into search_unavailable. Only the
+    exception class is logged: never a path, a library message or the query."""
+    try:
+        loaded = await load()
+    except Exception as exc:
+        logger.error("test_search_embedder_unavailable", stage="load", error=type(exc).__name__)
+        raise api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "search_unavailable") from None
+
+    async def embed(query: str) -> list[float]:
+        try:
+            return await loaded.embed(query)
+        except Exception as exc:
+            logger.error("test_search_embedder_unavailable", stage="embed", error=type(exc).__name__)
+            raise retrieval.SearchUnavailable("search_unavailable") from None
+
+    return retrieval.QueryEmbedder(model_key=loaded.model_key, dim=loaded.dim, embed=embed)
+
+
+def _hit_response(hit: retrieval.Hit, scanned: dict[str, bool]) -> TestSearchHit:
+    def flagged(value: str) -> bool:
+        if value not in scanned:
+            scanned[value] = bool(injection_scan.scan_text(value))
+        return scanned[value]
+
+    return TestSearchHit(
+        rank=hit.rank,
+        chunk_id=hit.chunk_id,
+        document_id=hit.document_id,
+        document_title=hit.document_title,
+        version_id=hit.version_id,
+        version_no=hit.version_no,
+        version_status=hit.version_status,
+        page_start=hit.page_start,
+        page_end=hit.page_end,
+        heading_path=hit.heading_path,
+        content=hit.content,
+        vector_rank=hit.vector_rank,
+        vector_similarity=hit.vector_similarity,
+        keyword_rank=hit.keyword_rank,
+        keyword_matched_terms=hit.keyword_matched_terms,
+        fused_score=hit.fused_score,
+        flagged=hit.flagged,
+        injection_flags=list(hit.injection_flags),
+        title_flagged=flagged(hit.document_title),
+        filename_flagged=flagged(hit.original_filename),
+    )
+
+
+@router.post("/test-search", response_model=TestSearchResponse)
+async def test_search(
+    body: TestSearchRequest,
+    user: Annotated[User, Depends(require("document:view"))],
+    load_query_embedder: Annotated[QueryEmbedderLoader, Depends(get_query_embedder)],
+) -> TestSearchResponse:
+    """
+    Search the caller's material with scores, for teachers and admins (plan section 6). Checks, in order:
+    permission (403), scope (generic 404 for a class, subject or pair the caller does not teach), the rate
+    limit (429 test_search_rate_limit_exceeded; 503 when Redis is down outside development), the query (422
+    invalid_query / query_too_long), the model (503 search_unavailable), then the search (503 search_timeout).
+    include_drafts adds READY versions (never queued, processing, failed or archived). Hits are returned even
+    when the material is not sufficient: this is the teacher's view, not the chat. Not audited (a read); the
+    query is never logged.
+    """
+    started = time.perf_counter()
+    tid = user.tenant_id
+    config = retrieval.RetrievalConfig.from_settings()
+    async with tenant_session_context(str(tid)) as db:
+        scope = await _test_search_scope(db, user, body)
+        await document_upload.check_test_search_rate(user.id)
+        try:
+            query = retrieval.normalize_query(body.query, config.max_query_chars)
+            await retrieval.query_lexemes(db, query)
+        except retrieval.QueryError as exc:
+            raise api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
+    # The model is loaded with no transaction open (the first load takes seconds).
+    query_embedder = await _guarded_query_embedder(load_query_embedder)
+    try:
+        async with tenant_session_context(str(tid)) as db:
+            result = await retrieval.search(db, scope, query, query_embedder, config, k=body.k)
+    except retrieval.QueryError as exc:
+        raise api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
+    except retrieval.SearchUnavailable as exc:
+        logger.warning("test_search_unavailable", tenant_id=str(tid), code=exc.code)
+        raise api_error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code) from None
+
+    scanned: dict[str, bool] = {}
+    hits = [_hit_response(h, scanned) for h in result.hits]
+    logger.info(  # counts and timings only: never the query, a title or chunk text
+        "test_search",
+        tenant_id=str(tid),
+        hits=len(hits),
+        flagged_hits=sum(1 for h in hits if h.flagged),
+        candidate_count=result.candidate_count,
+        path=result.path,
+        reason=result.reason,
+        k=body.k,
+        include_drafts=body.include_drafts,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+    )
+    return TestSearchResponse(
+        sufficient=result.sufficient,
+        reason=result.reason,
+        message=result.message,
+        threshold=result.threshold,
+        threshold_calibrated=result.threshold_calibrated,
+        keyword_coverage_threshold=result.keyword_coverage_threshold,
+        model=result.model,
+        candidate_count=result.candidate_count,
+        hits=hits,
+    )
+
+
+MAX_FLAGS_PAGE = 200
+
+
+@router.get("/{document_id}/versions/{version_id}/flags", response_model=VersionFlagsResponse)
+async def get_version_flags(
+    document_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: TenantDB,
+    user: Annotated[User, Depends(require("document:view"))],
+    after_ordinal: Annotated[int | None, Query(ge=-1)] = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_FLAGS_PAGE)] = 50,
+) -> VersionFlagsResponse:
+    """
+    The flagged chunks of one version, in ordinal order and paged (`after_ordinal`, `limit`), with their codes
+    and an excerpt of at most 300 characters around the first match: what a teacher acknowledges before
+    publishing. Read-only and not audited. Excerpts, headings and titles are UNTRUSTED text. The title and
+    the file name are scanned now (a title can change after ingest).
+    """
+    scoped = await document_scope.load_document_for(db, user, document_id, action="view")
+    v = await _load_version(db, user.tenant_id, document_id, version_id)
+    stmt = (
+        select(
+            Chunk.id, Chunk.ordinal, Chunk.page_start, Chunk.page_end, Chunk.heading_path, Chunk.content,
+            Chunk.injection_flags, Chunk.excluded,
+        )
+        .where(
+            Chunk.tenant_id == user.tenant_id,
+            Chunk.document_version_id == v.id,
+            func.cardinality(Chunk.injection_flags) > 0,
+        )
+        .order_by(Chunk.ordinal)
+        .limit(limit + 1)
+    )
+    if after_ordinal is not None:
+        stmt = stmt.where(Chunk.ordinal > after_ordinal)
+    rows = (await db.execute(stmt)).all()
+    page, more = rows[:limit], len(rows) > limit
+    items = [
+        FlaggedChunk(
+            chunk_id=r.id,
+            ordinal=r.ordinal,
+            page_start=r.page_start,
+            page_end=r.page_end,
+            heading_path=r.heading_path,
+            injection_flags=list(r.injection_flags),
+            excluded=r.excluded,
+            excerpt=await asyncio.to_thread(injection_scan.review_excerpt, r.content),
+        )
+        for r in page
+    ]
+    return VersionFlagsResponse(
+        document_id=v.document_id,
+        version_id=v.id,
+        version_no=v.version_no,
+        version_status=v.status,
+        flagged_chunk_count=v.flagged_chunk_count,
+        flags_acknowledged=v.flags_acknowledged_by is not None,
+        title_flagged=bool(injection_scan.scan_text(scoped.document.title)),
+        filename_flagged=bool(injection_scan.scan_text(v.original_filename)),
+        items=items,
+        next_after_ordinal=page[-1].ordinal if more and page else None,
+    )
 
 
 # ── Admin: usage and purge ───────────────────────────────────────────────────

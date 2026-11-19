@@ -8,6 +8,7 @@ routes, shared by app/api/v1/documents.py and the admin usage endpoint:
                         fails closed with 503 when Redis is down outside development);
   - check_retry_rate / count_manual_retries: the limits of the retry route (hourly windows per user and
                         per version, and a total cap of manual retries per version);
+  - check_test_search_rate: the per-user window of the test-search route (5d-2);
   - tenant_usage / lock_quota / check_quota: the quota check, run inside the upload transaction
                         under pg_advisory_xact_lock(hashtext('doc_quota:' || tenant_id));
   - active_duplicate / in_flight_version: the duplicate and one-in-flight rules (the partial unique
@@ -41,9 +42,11 @@ USER_RATE_KEY_PREFIX = "ratelimit:doc_upload:user:"
 TENANT_RATE_KEY_PREFIX = "ratelimit:doc_upload:tenant:"
 RETRY_USER_RATE_KEY_PREFIX = "ratelimit:doc_retry:user:"
 RETRY_VERSION_RATE_KEY_PREFIX = "ratelimit:doc_retry:version:"
+TEST_SEARCH_USER_RATE_KEY_PREFIX = "ratelimit:doc_test_search:user:"
 RETRY_ACTION = "document:retry"
 RATE_WINDOW_SECONDS = 3600
 UNAVAILABLE_MESSAGE = "Document upload is temporarily unavailable. Please try again in a few minutes."
+SEARCH_UNAVAILABLE_MESSAGE = "Search is temporarily unavailable. Please try again in a few minutes."
 
 # Pages count while a version is active (it is, or will be, searchable). Storage counts every
 # version of a live document, because each one still has its file.
@@ -70,6 +73,11 @@ ERROR_MESSAGES: dict[str, str] = {
     "version_not_ready": "Only a version that has finished processing (status ready) can be published.",
     "flags_acknowledgement_required": "This version has flagged passages. Review them and publish again with acknowledge_flags set to true.",
     "publish_conflict": "Another version of this document was published at the same time. Reload and try again.",
+    # Test search (5d-2). Fixed texts: never the query, SQL or a library message.
+    "invalid_query": "Type a question with at least one word.",
+    "query_too_long": "The question is too long. Shorten it and try again.",
+    "search_unavailable": SEARCH_UNAVAILABLE_MESSAGE,
+    "search_timeout": "The search took too long. Please try again.",
 }
 
 
@@ -143,6 +151,27 @@ async def check_retry_rate(user_id: uuid.UUID, version_id: uuid.UUID) -> None:
         raise _too_many(
             "retry_version_rate_limit_exceeded",
             "This file was retried too often just now. Please wait a while and try again.",
+            rej.retry_after_seconds,
+        ) from None
+
+
+async def check_test_search_rate(user_id: uuid.UUID) -> None:
+    """
+    Record one test search in the user's window (DOC_TEST_SEARCH_RATE_USER per
+    DOC_TEST_SEARCH_RATE_WINDOW_SECONDS). The route calls it AFTER the scope check, so a probe of foreign ids
+    never uses up the window. 429 with Retry-After, or 503 (fail closed) when Redis is unreachable outside
+    development.
+    """
+    limit, window = settings.DOC_TEST_SEARCH_RATE_USER, settings.DOC_TEST_SEARCH_RATE_WINDOW_SECONDS
+    try:
+        await _slots().acquire(
+            [slots.SlotLimit(f"{TEST_SEARCH_USER_RATE_KEY_PREFIX}{user_id}", limit, window)],
+            unavailable_message=SEARCH_UNAVAILABLE_MESSAGE,
+        )
+    except slots.SlotRejected as rej:
+        raise _too_many(
+            "test_search_rate_limit_exceeded",
+            f"You can run {limit} test searches every {max(1, window // 60)} minutes. Please wait and try again.",
             rej.retry_after_seconds,
         ) from None
 

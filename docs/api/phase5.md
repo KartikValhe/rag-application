@@ -119,6 +119,8 @@ Implemented in `app/api/v1/documents.py`; scope in `app/services/document_scope.
 | `POST .../versions/{version_id}/publish` | `document:publish` + manage on all classes | JSON `PublishRequest` `{acknowledge_flags?: boolean}` (the body may be omitted) | `200` `DocumentVersionResponse` | 403 manage; 404; 409 `version_not_ready`, `flags_acknowledgement_required`, `publish_conflict`; 422 (a non-boolean `acknowledge_flags`, an unknown key) |
 | `DELETE .../versions/{version_id}` | `document:upload` + manage on all classes | | `204` | 403 manage; 404; 409 `version_not_deletable` |
 | `GET .../versions/{version_id}/download` | `document:view` | | `200` file stream | 404 (also when the file is missing) |
+| `GET .../versions/{version_id}/flags` (5d-2) | `document:view` | query: `after_ordinal` (-1 or more), `limit` (1-200, default 50) | `200` `VersionFlagsResponse` | 404; 422 (paging values) |
+| `POST /api/v1/documents/test-search` (5d-2) | `document:view` | JSON `TestSearchRequest` | `200` `TestSearchResponse` | 404; 422 `invalid_query`, `query_too_long` and schema errors; 429 `test_search_rate_limit_exceeded`; 503 `service_unavailable`, `search_unavailable`, `search_timeout` |
 | `GET /api/v1/admin/documents/usage` | `settings:manage` | | `200` `DocumentUsageResponse` | |
 | `POST /api/v1/admin/documents/{document_id}/purge` | `settings:manage` | | `204` | 404; 409 `document_not_deleted` |
 | `PATCH /api/v1/platform/tenants/{tenant_id}/limits` | platform superadmin | JSON object of limit overrides (section 6) | `200` `TenantDocumentLimitsResponse` | 401; 404; 422 `unknown_limit`, `invalid_limit_value`, `limit_above_ceiling` |
@@ -133,7 +135,7 @@ Implemented in `app/api/v1/documents.py`; scope in `app/services/document_scope.
 - **DELETE (soft), one transaction:** tombstone (`deleted_at`, `deleted_by`); chunks deleted; versions `archived`; queued or running jobs `failed` with `last_error_code = "document_deleted"`; every file into the storage outbox (due now); audit `document:delete`. The document then answers 404 to everyone, and the subject cannot be deleted (`409 subject_has_documents`) until the tombstone is purged.
 - **Purge:** only for a soft-deleted document. Deletes the tombstone and its versions (chunks, links and jobs cascade) and its files now; a file that cannot be deleted right now stays in the outbox for the sweeper. Audited as `document:purge`.
 - **Retry:** only a `failed` version whose `error_code` is transient (`processing_failed`, `worker_crash`). The version goes back to `queued`; the job to `queued` with `attempts = 0`, `run_after = now()` and no error. Audited as `document:retry`.
-- **Publish (step 5c-2)**, one transaction: the document row is locked, the version must be `ready` (`409 version_not_ready`) and, when it has flagged passages (`flagged_chunk_count > 0`), the request must carry `acknowledge_flags: true` (`409 flags_acknowledgement_required`; the acknowledging user is stored as `flags_acknowledged_by` and audited as `document:flags_acknowledged`). Then the previous published version becomes `archived` (its chunks and vectors are deleted; its file waits in the storage outbox for `DOC_ARCHIVE_FILE_RETENTION_DAYS`, default 30, from the moment of publishing), the new version becomes `published` with `published_at` and `published_by`, archived versions beyond the newest `DOC_MAX_ARCHIVED_VERSIONS` (default 5) are pruned (rows deleted, files queued for deletion at once; audited as `document:prune_archived`), and `document:publish` is audited (`details.auto = false`; the worker's auto-publish writes `true`). A reader never sees zero or two published versions of a document. A teacher needs an assignment in EVERY linked class (403 `document_manage_requires_all_classes` otherwise, generic 404 out of scope); students and a role with only `document:view` get 403. Concurrent publishes serialise on the document row: the loser gets `409 version_not_ready`. A unique violation on the one-published-version index (it cannot happen while the row lock is held) is the stable `409 publish_conflict`. **Auto-publish is OFF** (`DOC_AUTO_PUBLISH_ENABLED=false`) until the injection scanner of 5d exists; today a version that finishes processing stays `ready` until someone publishes it. Replacing a published document leaves the old version published (and searchable) until the new one is published.
+- **Publish (step 5c-2)**, one transaction: the document row is locked, the version must be `ready` (`409 version_not_ready`) and, when it has flagged passages (`flagged_chunk_count > 0`), the request must carry `acknowledge_flags: true` (`409 flags_acknowledgement_required`; the acknowledging user is stored as `flags_acknowledged_by` and audited as `document:flags_acknowledged`). Then the previous published version becomes `archived` (its chunks and vectors are deleted; its file waits in the storage outbox for `DOC_ARCHIVE_FILE_RETENTION_DAYS`, default 30, from the moment of publishing), the new version becomes `published` with `published_at` and `published_by`, archived versions beyond the newest `DOC_MAX_ARCHIVED_VERSIONS` (default 5) are pruned (rows deleted, files queued for deletion at once; audited as `document:prune_archived`), and `document:publish` is audited (`details.auto = false`; the worker's auto-publish writes `true`). A reader never sees zero or two published versions of a document. A teacher needs an assignment in EVERY linked class (403 `document_manage_requires_all_classes` otherwise, generic 404 out of scope); students and a role with only `document:view` get 403. Concurrent publishes serialise on the document row: the loser gets `409 version_not_ready`. A unique violation on the one-published-version index (it cannot happen while the row lock is held) is the stable `409 publish_conflict`. **Auto-publish is OFF** (`DOC_AUTO_PUBLISH_ENABLED=false`) until the injection scanner of 5d exists; today a version that finishes processing stays `ready` until someone publishes it. Replacing a published document leaves the old version published (and searchable) until the new one is published. **Since 5d-2** the injection scanner sets `flagged_chunk_count` (section 11); auto-publish still defaults to off (`DOC_AUTO_PUBLISH_ENABLED=false`, plan Q5) because the scanner is a tripwire whose false-positive rate on real files is not yet measured.
 - **Version delete:** only `ready` (draft) or `failed` versions. The row goes and its file goes into the outbox. Audited as `document:version_delete`.
 - **Download headers:** `Content-Disposition: attachment` (built by `attachment_header()` from the stored, sanitized file name), `Content-Type: application/octet-stream`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'`, `Cache-Control: private, no-store`, `Content-Length`. The file is found through the database row; the store refuses any key outside the caller's tenant. A file that vanishes during the download aborts the response. Audited as `document:download`.
 
@@ -151,6 +153,10 @@ All models have `extra="forbid"`, and **every key is always present** (`null` wh
 - `PublishRequest` (publish body): `{acknowledge_flags?: boolean}`, default `false`. It must be a real boolean (`"yes"`, `1` and `null` are a 422); any other key is a 422.
 - `DocumentUpdateRequest` (PATCH body): `{title?: string (1-200), class_ids?: uuid[] (1-50)}`. Any other key is a 422.
 - `TenantDocumentLimitsResponse`: `{tenant_id, overrides: {key: integer}, effective: DocumentLimits, ceilings: DocumentLimits}`.
+- `TestSearchRequest` (5d-2): `{query: string, class_id?: uuid, subject_id?: uuid, include_drafts?: boolean (default false), k?: integer 1-10 (default 6)}`. `query` must be a JSON string of at most 4,000 characters (schema); the contract limits (1-500 characters after cleaning) give the stable codes of section 11. `include_drafts` must be a real boolean and `k` a real integer. Any other key (for example `tenant_id`) is a 422.
+- `TestSearchResponse` (5d-2): `{sufficient, reason, message: string | null, threshold, threshold_calibrated, keyword_coverage_threshold: number | null, model, candidate_count, hits: TestSearchHit[]}`.
+- `TestSearchHit` (5d-2): `{rank, chunk_id, document_id, document_title, version_id, version_no, version_status, page_start, page_end, heading_path, content, vector_rank, vector_similarity, keyword_rank, keyword_matched_terms, fused_score, flagged: boolean, injection_flags: string[], title_flagged: boolean, filename_flagged: boolean}`. Numbers that a side did not produce are `null`.
+- `VersionFlagsResponse` (5d-2): `{document_id, version_id, version_no, version_status, flagged_chunk_count: integer | null, flags_acknowledged: boolean, title_flagged: boolean, filename_flagged: boolean, items: FlaggedChunk[], next_after_ordinal: integer | null}`; `FlaggedChunk`: `{chunk_id, ordinal, page_start, page_end, heading_path, injection_flags: string[], excluded: boolean, excerpt: string}`.
 
 ## 6. Per-tenant limits (`PATCH /api/v1/platform/tenants/{tenant_id}/limits`)
 
@@ -210,7 +216,7 @@ Unchanged for comparison: `processing_failed` (the transient attempts ran out: r
 
 **Chunking, embedding and indexing (5c-2).** The stages after the parser add no new error code. `no_text_found` is also raised by the chunker when nothing is left to chunk (a document with headings only). `quota_pages_exceeded` is checked again, bindingly, inside the index transaction with the page count found by parsing (`page_count` of a PDF or PPTX; 1 for DOCX, TXT and MD): the version ends `failed` and nothing is written. Anything unexpected in these stages (a model or database error) is the transient `worker_crash` or `db_unavailable`: the job is retried within the attempt budgets below, and a version whose attempts run out ends `processing_failed`.
 
-**Statuses written by the worker.** A version moves `queued` -> `processing` (with `stage` `parsing`, `chunking`, `embedding` or `indexing`) -> `ready` (the index transaction sets `page_count`, `chunk_count`, `embedding_model` and `flagged_chunk_count = 0`; the scanner of 5d will own that last column) and the job to `done`, all in one transaction. A worker killed at any point before that commit leaves no chunk and no vector, and the next worker produces exactly one set.
+**Statuses written by the worker.** A version moves `queued` -> `processing` (with `stage` `parsing`, `chunking`, `embedding` or `indexing`) -> `ready` (the index transaction sets `page_count`, `chunk_count`, `embedding_model` and `flagged_chunk_count`, the number of chunks the injection scanner flagged, section 11) and the job to `done`, all in one transaction. A worker killed at any point before that commit leaves no chunk and no vector, and the next worker produces exactly one set.
 
 ## 9. Parser error codes and quality gates (5b-3)
 
@@ -240,17 +246,17 @@ The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_
 
 **Hidden text** (`stats.hidden_text_chars`): DOCX hidden characters are **counted and NOT extracted**: `w:vanish` or `w:specVanish` (on the run, its character style, its paragraph style or the document defaults), tracked deletions, runs of 1 pt or less (`w:sz` of 2 half-points or fewer, also through styles), and white runs (`FFFFFF`, also through styles) unless something behind them is shaded (the run's `w:shd` or highlight, the paragraph's, the cell's, or any table that uses a table style: white on a dark fill is a header). Known gaps: PDF invisible text (render mode 3, white fill, off-page) is extracted and not counted (backlog B56); style-inherited shading from a conditional table-style row is approximated by "any table style". PPTX hidden slides are extracted AND counted.
 
-## 10. Retrieval service (5d-1, hardened in 5d-1b; no route yet)
+## 10. Retrieval service (5d-1, hardened in 5d-1b)
 
-`app/services/retrieval.py` finds and ranks chunks; the test-search route (5d-2) and the chat layer (Phase 6) will call it. Plan: `docs/phase5d-plan.md` sections 3-5 and 14.
+`app/services/retrieval.py` finds and ranks chunks; the test-search route (5d-2, section 11) calls it and the chat layer (Phase 6) will. Plan: `docs/phase5d-plan.md` sections 3-5 and 14.
 
 **Entry points.** `search(db, scope, ...)` serves test search (read or manage scope; scores shown to a teacher). `search_for_chat(db, scope, ...)` is the only entry point for the chat layer: it accepts only a read scope of published versions, and when the result is not sufficient it returns **no hits and no ranked ids**, so nothing reaches a model. A scope comes only from `build_retrieval_scope` (API) or `RetrievalScope.for_operator` (operator scripts); `scope.narrow(class_id, subject_id)` can only shrink it.
 
 **Every text field of a hit is untrusted.** `content`, `heading_path`, `document_title` and `original_filename` were written by an uploader and may contain instructions aimed at a model. The chat layer must treat all four as data, never as instructions. `flagged = false` does **not** mean safe: the injection scanner (5d-2, which scans the content, the heading path, the title and the file name) is a tripwire with certain false negatives.
 
-**Errors of the service** (5d-2 maps them to HTTP):
+**Errors of the service** (the test-search route maps them to HTTP, section 11):
 
-| Error | Code | HTTP (5d-2) | When |
+| Error | Code | HTTP | When |
 |---|---|---|---|
 | `QueryError` | `invalid_query` | 422 | Empty after cleaning, or no word at all (`???`); nothing is embedded |
 | `QueryError` | `query_too_long` | 422 | Longer than `RETRIEVAL_MAX_QUERY_CHARS` after cleaning |
@@ -259,3 +265,69 @@ The validation codes of section 2 (`xml_entity_expansion_forbidden`, `file_type_
 | `ValueError` | (bug) | 500 | `k` outside 1..50, or a manage scope passed to `search_for_chat` |
 
 The message of a `SearchUnavailable` is its code alone: no SQL, no parameters, no query text.
+
+## 11. Test search, injection flags and the flags route (5d-2)
+
+Plan: `docs/phase5d-plan.md` sections 6, 7 and 14. No LLM is called anywhere.
+
+### 11.1 `POST /api/v1/documents/test-search`
+
+For tenant admins and teachers (`document:view`); students get `403`, no token `401`. Checks, in this order:
+
+1. **Permission** (403).
+2. **Scope:** the caller's own (class, subject) pairs (section 4), narrowed by `class_id` and/or `subject_id`. The ids can only narrow: a class, subject or pair the caller does not teach, an unknown id or another tenant's id is the generic `404 not_found`, the same body as every other document route. The tenant always comes from the token; the request has no tenant field.
+3. **Rate limit:** `DOC_TEST_SEARCH_RATE_USER` (60) searches per user per `DOC_TEST_SEARCH_RATE_WINDOW_SECONDS` (600): `429 test_search_rate_limit_exceeded` with `Retry-After` and `retry_after_seconds`. Checked after the scope, so a probe of foreign ids never uses up the window. Redis down outside development: `503 service_unavailable` (fails closed).
+4. **Query:** cleaned like ingested text (NFC; control, zero-width and bidi characters dropped; whitespace collapsed). Empty, or no searchable word at all (`???`): `422 invalid_query`. Over `RETRIEVAL_MAX_QUERY_CHARS` (500) after cleaning: `422 query_too_long`. A JSON string with a lone surrogate (`"\ud800"`) is refused by the schema (FastAPI's `422` list, with U+FFFD echoed in place of the surrogate); before 5d-2 that case ended as a generic 500 on every JSON route.
+5. **Model:** the process-wide query embedder is loaded on the first test search of the process (seconds; backlog B96), with no database transaction open. A model that cannot load or fails, or a query vector of the wrong size, with a non-finite value or a zero norm: `503 search_unavailable`.
+6. **Search** with a manage scope (section 10). A statement over `RETRIEVAL_STATEMENT_TIMEOUT_MS`: `503 search_timeout`.
+
+`include_drafts: true` adds versions in status **`ready`** (never queued, processing, failed or archived); each hit carries `version_status`. Only this route can ask for drafts: a read scope (students, the chat layer) refuses them.
+
+**Hits are returned even when `sufficient` is false.** This is the teacher's view of what the search found; the chat entry point `search_for_chat` returns none in that case. `threshold_calibrated` stays `false` until a measured threshold replaces the default 0.85, and `model` names the embedding model the threshold belongs to.
+
+Every 503 and 422 message is a fixed text: never SQL, a file path, a library message or the query. The query is **never logged and never audited**; the route logs counts and timings only (`hits`, `flagged_hits`, `candidate_count`, `path`, `reason`, `k`, `include_drafts`, `duration_ms`). Body limit: the documents area rule (64 KB). Security headers as on every response.
+
+### 11.2 `GET /api/v1/documents/{document_id}/versions/{version_id}/flags`
+
+Read-only and not audited. Needs `document:view` and the same scope as the other version routes: one linked pair in scope. Anything else, and a version of another document, is the generic 404. The route lists the flagged chunks of the version in ordinal order:
+
+- `chunk_id`, `ordinal`, the pages, `heading_path`, the codes and `excluded`;
+- an `excerpt` of at most **300 characters**. It starts 80 characters before the first match, or at the start of the chunk when the match is in the heading.
+
+Page with `after_ordinal` set to the previous page's `next_after_ordinal`. Use it before `POST .../publish` with `acknowledge_flags: true`.
+
+**The excerpt, the heading path and the title are UNTRUSTED text** from the uploaded file and its uploader. Show them as plain text, never as HTML or Markdown, and never feed them to a model as instructions.
+
+### 11.3 Injection codes (`app/services/injection_scan.py`)
+
+The worker's index stage scans every chunk (heading path, a newline, then the content) before its transaction opens, and stores the codes in `chunks.injection_flags`. `flagged_chunk_count` is the number of chunks with at least one code.
+
+- A version with flags cannot be published without `acknowledge_flags: true` (409 `flags_acknowledgement_required`), and it is never auto-published.
+- Flagged chunks of a published version **are returned** by retrieval with `flagged: true` and their codes (flag, never drop).
+- The **document title and the original file name** are scanned when a response is built (`title_flagged`, `filename_flagged`), because a title can change after ingest. They are not stored, and they do not change `flagged_chunk_count` or the publish rule (backlog B98).
+
+| Code | What it looks for (English, Hindi, Marathi) |
+|---|---|
+| `instruction_override` | "ignore / disregard / forget all previous instructions", "override your instructions"; "पिछले निर्देशों को अनदेखा करो", "ऊपर के निर्देश भूल जाओ"; "मागील सूचना दुर्लक्ष करा", "वरील सूचना विसरा" (with and without nukta) |
+| `role_markup` | chat-template markers such as `<\|im_start\|>`, `[INST]`, `<<SYS>>`, `### system`, a line starting with `system:` or `assistant:` |
+| `role_play` | "you are now (a / DAN / ...)", "from now on you will", "act as an AI", "pretend you are", "developer mode", "jailbreak"; "अब से तुम"; "आतापासून तू" |
+| `prompt_extraction` | "reveal / show / print / repeat your (system) prompt or instructions", "what are your instructions"; "अपने निर्देश बताओ"; "तुझ्या सूचना सांग" |
+| `model_directive` | text addressed to a model ("AI: you must ...", "ChatGPT, always ..."), "if a student asks ..., say ..."; the same in Hindi and Marathi |
+| `tool_call` | `<tool_call>`, `<function_call>`, `"function_call":`, `{"name": ..., "arguments": ...}`, `<\|tool\|>` |
+| `link_directive` | a URL near an imperative ("visit", "click", "send to"; "खोलो", "भेजो"; "उघडा", "पाठवा"), or a Markdown image (it can send data out when it loads) |
+| `encoded_blob` | 200 or more base64 characters in a row with at least one digit, `+` or `/` |
+
+Matching runs on a normalised copy: format characters removed, Unicode tag characters turned into the ASCII they hide, NFKC, case folded. Full-width letters, mathematical letters, no-break spaces and case make no difference. The stored text is never changed.
+
+**Limits.** This is a tripwire, not a guarantee:
+
+- Paraphrases, other languages, text in images, a phrase split across two chunks and anything not foreseen pass **unflagged**. `flagged: false` never means safe.
+- Text that is legitimately **about** these things is flagged: a computer-science lesson on prompts, a teacher's note "if a student asks ..., answer ...", or "Visit www.example.org for the worksheet".
+- Not detectable per chunk: zero-width and bidi characters (removed at ingest), PDF hidden text (backlog B56), PPTX hidden slides (backlog B53).
+
+| Code | HTTP | Where |
+|---|---|---|
+| `invalid_query`, `query_too_long` | 422 | test search |
+| `test_search_rate_limit_exceeded` | 429 + `Retry-After` | test search; the body also has `retry_after_seconds` |
+| `search_unavailable`, `search_timeout` | 503 | test search |
+| `service_unavailable` | 503 | test search: Redis is down outside development |

@@ -1,6 +1,6 @@
 # Phase 5d plan: retrieval, test search, injection scanner, retrieval-only evaluation
 
-Status: APPROVED 2026-11-19 · 5d-1 built, review fixes 5d-1b built (section 14) · 5d-2 and 5d-3 not started.
+Status: APPROVED 2026-11-19 · 5d-1 built, review fixes 5d-1b built, 5d-2 built (section 14) · 5d-3 not started.
 Read with: `docs/phase5-design.md` A4-A6 and C2, `docs/backlog.md`, `CLAUDE.md`.
 There is no LLM call anywhere in 5d.
 
@@ -287,3 +287,40 @@ Each batch ends with `run_tests gate`, `ruff check .` and `mypy app`, the exact 
 - **Statements per search:** tenant check, read and set `statement_timeout`, lexemes, count, extension schema and version, (HNSW: one settings statement with the read-back), search, restore `statement_timeout`.
 - **Tests:** leak checks now cover the hits and both ranked lists and assert that neither list was cut. Every leak scope has 8 keyword-only distractors that fill the six hits. Prove-it 7 says what RLS, the tenant filter and the pair scope each add; 7b switches off only the tenant filter (RLS bypassed, broken pair scope); 8 catches a leak at vector rank 9. New files: `test_retrieval_negative.py` (revoking an assignment, an enrollment and an offered pair; hostile input; the same model key with another dimension on both paths; v1 published + v2 ready; a scope used in another tenant's session) and `test_retrieval_limits.py` (timeout with prove-it, keyword cap with prove-it, NaN distances, HNSW read-back and planner).
 - **Accepted, in the backlog:** the cold-start model load holds a pooled connection (B96).
+
+**5d-2 (2026-11-19): test search, flags route, injection scanner, index-stage flag write.** No migration, no grant, no new dependency, no LLM call, no student route, no model warm-up (B96 stays for Phase 8). API reference: `docs/api/phase5.md` section 11.
+
+- **Scanner** (`app/services/injection_scan.py`): the eight codes of section 7 in that order, with English, Hindi and Marathi examples for every rule. Matching runs on a copy: format characters (Cf) removed, Unicode tag characters (U+E0020-E007E) turned back into the ASCII they hide ("ASCII smuggling"; an addition), then NFKC, casefold and NFKC. The text is never changed (tested with a deep copy and byte comparison).
+- **Linear time, shown without a clock (B79).** Each rule is a set of alternatives that start with a literal trigger (`ignore`, `<|`, `http`, `पिछल` ...). A pure-literal trigger pattern finds the next trigger, the rule is matched anchored there and may read at most 528 characters, and the next trigger search starts one character later. A test records every regex call of a 2 MB scan: the trigger searches cover disjoint parts of the text and every anchored match stays within the bound. A structural test checks that every repetition is bounded (at most 200) and every match is at most 512 characters long. `encoded_blob` (no literal start) only starts at the beginning of a base64 run. Nine 2 MB hostile inputs are scanned for real, each with one real phrase at the end that must still be found. The scanner test file takes about 12 s.
+- **Rule refinements against false positives** (all inside the plan's rule table):
+  - `role_play`: "you are now" fires only when a role word follows (a, an, the, DAN, free, "in developer mode" ...), so "you are now ready to solve" is not flagged.
+  - `prompt_extraction`: "print / show **the** prompt" needs system, initial, hidden ... in between, because Python lessons say "input() prints the prompt"; "your prompt / instructions" always fires. In Marathi only the informal तुझ्या / तुझे fires, because "तुमच्या सूचना सांगा" means "tell us your suggestions".
+  - `encoded_blob` needs at least one digit, `+` or `/`, so a DNA sequence is not flagged.
+  - `role_markup`: `system:` / `assistant:` fire only at column 0 of a line, and `##...system` fires after any whitespace.
+  - `model_directive`: Hindi and Marathi alternatives added (the plan listed English only).
+- **Index stage:** `scan_chunks` runs in `asyncio.to_thread` before the transaction opens (tested: in a worker thread, with no index statement run yet). The codes travel in the existing chunk INSERT as one comma-joined text per chunk (`string_to_array`), so the statement count is still **exactly 14** for 100 and 1,000 flagged chunks. That is now asserted; the earlier test only checked `< 25`. `flagged_chunk_count` is the number of chunks with codes. `document:ingested` details gain `flagged_chunk_count`, a count only. Auto-publish skips any version with flags (tested with real hostile text instead of a hand-set count), and `DOC_AUTO_PUBLISH_ENABLED` stays false.
+- **Title and file name** are scanned when a test-search or flags response is built (`title_flagged`, `filename_flagged`). No column; a PATCHed title changes the answer (tested). They do not affect publish or auto-publish (backlog B98).
+- **Test search** (`POST /api/v1/documents/test-search`), in this order: permission, scope (`build_retrieval_scope(purpose="manage")` plus `narrow`, the generic 404), rate limit (`check_test_search_rate`), query (`normalize_query` plus a new public `retrieval.query_lexemes`, so `???` is a 422 before the model loads), model, search. Three short steps:
+  1. scope, rate limit and query checks in one transaction;
+  2. the model load with **no transaction open** (this route no longer holds a connection during a cold load; `retrieval.search` and the chat path are unchanged, B96 updated);
+  3. the search in a second transaction.
+
+  `get_query_embedder` returns a loader, not the model, so the model cannot load before the checks. Any load or embed failure is `503 search_unavailable` (only the exception class is logged). `search_timeout` is a 503 with a fixed message. Logs carry counts and timings only. Not audited.
+- **Schema:** `query` is a strict string capped at 4,000 characters (FastAPI's own 422). The contract limits (1-500 after cleaning) are checked by the route with `invalid_query` / `query_too_long`, after the scope and the rate limit, as section 6 orders. `include_drafts` is a strict boolean and `k` a strict integer from 1 to 10.
+- **Bug found by the hostile-query test (fixed, regression-tested):** a JSON string with a lone surrogate (`"\ud800"`) ended as a generic **500** on every JSON route. Pydantic refuses it (`string_unicode`), and FastAPI's default 422 handler then failed to encode the echoed input. `app/main.py` now has a validation handler with the same body shape that puts U+FFFD in place of the surrogate, so the answer is a 422 (also checked on `/auth/login`). A lone surrogate is therefore a 422, not a cleaned query as section 5 assumed.
+- **Flags route** (`GET .../versions/{version_id}/flags`): as planned in Q4. Added: paging (`after_ordinal`, `limit` 1-200, default 50, `next_after_ordinal`), `excluded` per item and `flags_acknowledged` per version. The excerpt (at most 300 characters) starts 80 characters before the first match (`first_match_offset` maps back to the original text) or at the chunk start.
+- **Route matrix:** both rows, and the "every route needs a row" guard failed first. Test search's T' asks for 10-A Math, a pair T2 does not teach.
+- **Settings:** `DOC_TEST_SEARCH_RATE_USER=60`, `DOC_TEST_SEARCH_RATE_WINDOW_SECONDS=600` (`config.py`, `.env.example`, bounds tested).
+- **Real corpus** (`tests/fixtures/real_corpus`, parsed in-process and chunked with the FakeEmbedder's word counter, so real-tokenizer chunk counts differ): `en-01.pdf` 0 of 6 chunks flagged, `hi-01.docx` 0 of 38, `mr-01.pptx` 0 of 12; no file name flagged. Three files are far too few to judge the false-positive rate (B99).
+- **Not detectable per chunk** (B53 and B56 updated): hidden PPTX slides and hidden PDF text are scanned like visible text. A matching line is flagged, but nothing marks it as hidden.
+- **Tests first.**
+  - Scanner: 93 failed against a do-nothing stub; 9 passed by design (clean texts, the empty input, the zero-width characterisation).
+  - Index stage: 4 failed, for these reasons: a flagged version was auto-published, no flags were stored, and the scanner was never called. The 14-statement test and the default-off test passed (guards).
+  - Routes: the matrix guard failed with "matrix rows without a route", the flags tests got 404, and the test-search tests got 405 (38 failed). Passing before the routes existed: prove-it 1-2 (the scanner existed by then), the out-of-class student test, and the body-limit registry check (the area rule already covered the path).
+  - New files: `test_injection_scan.py` (fast, security), `test_test_search_route.py`, `test_document_flags_route.py`, `test_retrieval_flags.py`, `security/test_prove_it_fails_scanner.py` (db, security). Additions to `test_index_stage.py`, `test_document_route_matrix.py` and `test_ingest_settings.py`. Helpers: `tests/security/scanner_assertions.py` and `tests/fixtures/search_api.py` (the dependency override).
+- **Prove-it** (each protection off, the same helper raises):
+  1. the scanner returns nothing: `assert_flags_written`;
+  2. a scanner that edits chunk text: `assert_chunk_text_unchanged`;
+  3. test search builds the scope from the request ids: `assert_no_foreign_canary`;
+  4. the rate limit is removed: `assert_rate_limited`;
+  5. the flags route skips `load_document_for`'s scope: `assert_foreign_version_hidden`.

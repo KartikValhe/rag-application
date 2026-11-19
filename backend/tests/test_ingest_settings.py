@@ -84,3 +84,21 @@ def test_the_new_settings_are_documented_with_placeholders_only() -> None:
         assert f"\n{name}=" in example, f"{name} is missing from backend/.env.example"
     assert "EMBEDDING_BATCH_SIZE=8" in example
     assert "DOC_AUTO_PUBLISH_ENABLED=false" in example
+
+
+# ── Test search (step 5d-2) ──────────────────────────────────────────────────
+
+TEST_SEARCH_SETTINGS = ("DOC_TEST_SEARCH_RATE_USER", "DOC_TEST_SEARCH_RATE_WINDOW_SECONDS")
+
+
+def test_test_search_rate_defaults_bounds_and_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in TEST_SEARCH_SETTINGS:
+        monkeypatch.delenv(name, raising=False)
+    s = fresh(monkeypatch)
+    assert (s.DOC_TEST_SEARCH_RATE_USER, s.DOC_TEST_SEARCH_RATE_WINDOW_SECONDS) == (60, 600)  # design A5
+    for bad in ({"DOC_TEST_SEARCH_RATE_USER": 0}, {"DOC_TEST_SEARCH_RATE_WINDOW_SECONDS": 0}):
+        with pytest.raises(ValueError):
+            fresh(monkeypatch, **bad)
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "\nDOC_TEST_SEARCH_RATE_USER=60\n" in example
+    assert "\nDOC_TEST_SEARCH_RATE_WINDOW_SECONDS=600\n" in example

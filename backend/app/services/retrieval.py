@@ -677,6 +677,16 @@ def _finite_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+async def query_lexemes(db: AsyncSession, query: str) -> list[str]:
+    """The distinct words of a CLEANED query, from the same 'simple' parser as chunks.content_tsv. None at
+    all ("???") is invalid_query: there is nothing to search, so nothing is embedded. The test-search route
+    calls this before it loads the model; search() calls it again as its own first step."""
+    lexemes = unique_lexemes(list((await db.execute(text(LEXEMES_SQL), {"q": query})).scalar_one() or []))
+    if not lexemes:
+        raise QueryError("invalid_query")
+    return lexemes
+
+
 async def search(
     db: AsyncSession,
     scope: RetrievalScope,
@@ -715,9 +725,7 @@ async def _search_in_transaction(
     final_k: int,
 ) -> RetrievalResult:
     model = query_embedder.model_key
-    lexemes = unique_lexemes(list((await db.execute(text(LEXEMES_SQL), {"q": query})).scalar_one() or []))
-    if not lexemes:
-        raise QueryError("invalid_query")  # no word at all ("???"): nothing to search, nothing is embedded
+    lexemes = await query_lexemes(db, query)
     if not scope.pairs:
         return _result(config, model, has_scope=False, lexeme_count=len(lexemes))
 

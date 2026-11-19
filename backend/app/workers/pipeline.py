@@ -29,9 +29,13 @@ index   ONE short transaction (design A3 step 8). In order: the document row is 
         audited with the system actor; and, when DOC_AUTO_PUBLISH_ENABLED is on and nothing is flagged, the SAME
         publish function the route uses runs in this same transaction. Statements grow with batches, not chunks.
 
-flagged_chunk_count: the injection scanner (5d) will own this column. It is 0 here unless a scanner stage put a
-number in ctx.results["flagged_chunk_count"]. Until the scanner exists every version counts as unflagged, which is
-why DOC_AUTO_PUBLISH_ENABLED defaults to false.
+Injection flags (5d-2): BEFORE the index transaction opens, services/injection_scan.scan_chunks runs in a worker
+thread (pure; it reads the chunks and never changes them). Each chunk's codes travel inside the existing chunk
+INSERT (one comma-joined text per chunk, split again with string_to_array), so the statement count does not
+change, and flagged_chunk_count is the number of chunks with at least one code. The scanner is a tripwire, not a
+guarantee: auto-publish of an unflagged version means "nothing was detected", which is why
+DOC_AUTO_PUBLISH_ENABLED still defaults to false (plan Q5). The document title and the file name are not
+judged here: a title can change later, so the API scans both when it shows them.
 """
 
 import asyncio
@@ -47,7 +51,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ml.embedder import Embedder
-from app.services import chunker, document_lifecycle, document_store
+from app.services import chunker, document_lifecycle, document_store, injection_scan
 from app.services.audit import record_audit_event
 from app.services.chunker import ChunkingConfig, TextChunk
 from app.workers import errors
@@ -70,6 +74,7 @@ RESULT_VECTORS = "vectors"  # list[str], pgvector text, aligned with the chunks
 RESULT_REUSED = "vectors_reused"
 RESULT_COMPUTED = "vectors_computed"
 RESULT_FLAGGED = "flagged_chunk_count"
+RESULT_FLAGS = "injection_flags"  # list[tuple[str, ...]], aligned with the chunks
 
 
 @dataclass(frozen=True)
@@ -218,13 +223,14 @@ VECTOR_SCHEMA_SQL = (
 
 INSERT_CHUNKS_SQL = """
 INSERT INTO app.chunks (tenant_id, id, document_version_id, document_id, subject_id, ordinal, page_start, page_end,
-                        heading_path, content, content_sha256, token_count, script)
+                        heading_path, content, content_sha256, token_count, script, injection_flags)
 SELECT CAST(:t AS uuid), u.id, CAST(:v AS uuid), CAST(:d AS uuid), CAST(:s AS uuid), u.ordinal, u.page_start, u.page_end,
-       NULLIF(u.heading_path, ''), u.content, u.sha, u.tokens, u.script
+       NULLIF(u.heading_path, ''), u.content, u.sha, u.tokens, u.script,
+       CAST(string_to_array(u.flags, ',') AS text[])
 FROM unnest(CAST(:ids AS uuid[]), CAST(:ordinals AS integer[]), CAST(:page_starts AS integer[]),
             CAST(:page_ends AS integer[]), CAST(:headings AS text[]), CAST(:contents AS text[]),
-            CAST(:shas AS text[]), CAST(:tokens AS integer[]), CAST(:scripts AS text[]))
-     AS u(id, ordinal, page_start, page_end, heading_path, content, sha, tokens, script)
+            CAST(:shas AS text[]), CAST(:tokens AS integer[]), CAST(:scripts AS text[]), CAST(:flags AS text[]))
+     AS u(id, ordinal, page_start, page_end, heading_path, content, sha, tokens, script, flags)
 """
 
 # {schema} is the quoted schema of the vector extension, read from pg_extension (never hardcoded)
@@ -257,9 +263,14 @@ async def write_index(
     vectors: list[str] = ctx.results[RESULT_VECTORS]
     parsed = ctx.results["parsed"]
     tenant, version = ctx.job.tenant_id, ctx.version
-    flagged = int(ctx.results.get(RESULT_FLAGGED, 0))
+    flags: list[tuple[str, ...]] = ctx.results[RESULT_FLAGS]
     if len(vectors) != len(chunks):
         raise RuntimeError("the embed stage did not produce one vector per chunk")
+    if len(flags) != len(chunks):
+        raise RuntimeError("the scanner did not produce one set of flags per chunk")
+    if any("," in code for codes in flags for code in codes):
+        raise RuntimeError("an injection code contains a comma")  # they are joined with commas below
+    flagged = sum(1 for codes in flags if codes)
 
     schema = (await db.execute(text(VECTOR_SCHEMA_SQL))).scalar_one_or_none()
     if schema is None:
@@ -293,6 +304,7 @@ async def write_index(
                 "shas": [c.content_sha256 for c in part],
                 "tokens": [c.token_count for c in part],
                 "scripts": [c.script for c in part],
+                "flags": [",".join(codes) for codes in flags[start : start + step]],
             },
         )
     for start in range(0, len(chunks), step):
@@ -343,6 +355,7 @@ async def write_index(
         "vectors_computed": int(ctx.results.get(RESULT_COMPUTED, 0)),
         "embedding_model": embedder.model_id,
         "auto_published": auto_published,
+        "flagged_chunk_count": flagged,
     }
     await record_audit_event(
         tenant_id=tenant, action="document:ingested", target_type="document", target_id=str(version.document_id),
@@ -353,6 +366,11 @@ async def write_index(
 
 def make_index_stage(embedder: Embedder, settings: PipelineSettings) -> Stage:
     async def index(ctx: StageContext) -> None:
+        # The scan is pure and can take a moment on a large document: a worker thread, and no transaction open yet.
+        chunks: list[TextChunk] = ctx.results[RESULT_CHUNKS]
+        flags = await asyncio.to_thread(injection_scan.scan_chunks, chunks)
+        ctx.results[RESULT_FLAGS] = flags
+        ctx.results[RESULT_FLAGGED] = sum(1 for codes in flags if codes)
         # Document row first (see active_version_session), then the version and job rows: one lock order.
         async with stages_module.active_version_session(
             ctx.tenant_sessions, ctx.job, lock_document=ctx.version.document_id

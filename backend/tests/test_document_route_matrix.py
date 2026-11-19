@@ -30,6 +30,7 @@ from app.db.models.document import Document
 from app.main import app
 from tests.fixtures.academic_world import AcademicWorld, WorldTenant
 from tests.fixtures.documents import auth, make_document
+from tests.fixtures.search_api import EmbedderSwitch
 from tests.security.upload_assertions import assert_anonymous_upload_not_consumed
 from tests.test_document_store import all_app_routes
 
@@ -55,6 +56,10 @@ EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, int, int, int, int]]] = {
         "document:upload", (204, 204, 404, 403, 401)),
     ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/download"): (
         "document:view", (200, 200, 404, 403, 401)),
+    ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/flags"): (
+        "document:view", (200, 200, 404, 403, 401)),
+    # T' asks for a (class, subject) pair it does not teach (10-A Math): the generic 404
+    ("POST", "/api/v1/documents/test-search"): ("document:view", (200, 200, 404, 403, 401)),
     ("GET", "/api/v1/admin/documents/usage"): ("settings:manage", (200, 403, 403, 403, 401)),
     ("POST", "/api/v1/admin/documents/{document_id}/purge"): ("settings:manage", (204, 403, 403, 403, 401)),
 }
@@ -89,6 +94,9 @@ async def _prepare(
 ) -> Prepared:
     """A fresh state for one call: the concrete path and the request body."""
     method, path = key
+    if key == ("POST", "/api/v1/documents/test-search"):
+        return path, {"json": {"query": "matrix waves", "class_id": str(w.classes["10-A"].id),
+                               "subject_id": str(w.subjects["Math"].id)}}
     if key == ("POST", "/api/v1/documents"):
         files = {"file": ("m.txt", uuid.uuid4().hex.encode(), "text/plain")}
         data = {"title": "Matrix", "subject_id": str(w.subjects["Math"].id), "class_ids": [str(w.classes["10-A"].id)]}
@@ -98,7 +106,7 @@ async def _prepare(
     status, error = "failed", "processing_failed"
     if path.endswith("/download"):
         status, error = "published", None
-    if path.endswith("/publish"):
+    if path.endswith("/publish") or path.endswith("/flags"):
         status, error = "ready", None
     made = await make_document(
         raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, status=status, error_code=error,
@@ -121,7 +129,7 @@ async def _prepare(
 @pytest.mark.parametrize("key", list(EXPECTED), ids=[f"{m} {p}" for m, p in EXPECTED])
 async def test_route_role_matrix(
     key: tuple[str, str], client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession,
-    document_store_root: Path,
+    document_store_root: Path, query_embedder: EmbedderSwitch,
 ) -> None:
     w = academic_world.a
     users = {"admin": w.admin, "teacher": w.t1, "teacher_out": w.t2, "student": w.s1}

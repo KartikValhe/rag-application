@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     DOC_RETRY_RATE_USER: int = 10  # manual retries per user per hour
     DOC_RETRY_RATE_VERSION: int = 3  # manual retries per version per hour
     DOC_RETRY_MAX_PER_VERSION: int = 5  # manual retries of one version, in total (then retry_limit_reached)
+    # Test search (POST /api/v1/documents/test-search, step 5d-2, design A5): searches per user per window
+    DOC_TEST_SEARCH_RATE_USER: int = Field(default=60, ge=1, le=10_000)
+    DOC_TEST_SEARCH_RATE_WINDOW_SECONDS: int = Field(default=600, ge=1, le=86_400)
 
     # ── Ingestion worker (design A3, step 5b-2) ─────────────────────────────
     INGEST_GLOBAL_CONCURRENCY: int = 2  # jobs running at once on the whole platform

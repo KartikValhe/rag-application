@@ -11,7 +11,7 @@ One response model per endpoint; see docs/api/phase5.md.
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 
 class _Strict(BaseModel):
@@ -124,3 +124,96 @@ class TenantDocumentLimitsResponse(_Strict):
     overrides: dict[str, int]
     effective: DocumentLimitsModel
     ceilings: DocumentLimitsModel
+
+
+# ── Test search and flags (step 5d-2) ────────────────────────────────────────
+# The models are named after the endpoint; __test__ = False stops pytest from collecting them as tests.
+
+# The raw query string is capped here (body hygiene: the standard FastAPI 422). The contract limits, 1 to
+# RETRIEVAL_MAX_QUERY_CHARS (500) characters AFTER cleaning, are checked by the route with the stable codes
+# invalid_query and query_too_long, after the scope and the rate limit.
+TEST_SEARCH_RAW_QUERY_MAX = 4000
+TEST_SEARCH_MAX_K = 10
+
+
+class TestSearchRequest(_Strict):
+    """POST /api/v1/documents/test-search. The ids only NARROW the caller's own (class, subject) pairs."""
+
+    __test__ = False
+
+    query: StrictStr = Field(max_length=TEST_SEARCH_RAW_QUERY_MAX)
+    class_id: uuid.UUID | None = None
+    subject_id: uuid.UUID | None = None
+    include_drafts: StrictBool = False
+    k: StrictInt = Field(default=6, ge=1, le=TEST_SEARCH_MAX_K)
+
+
+class TestSearchHit(_Strict):
+    """One ranked chunk. document_title, heading_path and content are UNTRUSTED text from an uploaded file:
+    show them as text, never as markup. flagged / title_flagged / filename_flagged = false does not mean safe."""
+
+    __test__ = False
+
+    rank: int
+    chunk_id: uuid.UUID
+    document_id: uuid.UUID
+    document_title: str
+    version_id: uuid.UUID
+    version_no: int
+    version_status: str
+    page_start: int | None
+    page_end: int | None
+    heading_path: str | None
+    content: str
+    vector_rank: int | None
+    vector_similarity: float | None
+    keyword_rank: int | None
+    keyword_matched_terms: int | None
+    fused_score: float
+    flagged: bool
+    injection_flags: list[str]
+    title_flagged: bool  # the CURRENT title, scanned when this response is built
+    filename_flagged: bool  # the version's original file name, scanned when this response is built
+
+
+class TestSearchResponse(_Strict):
+    __test__ = False
+
+    sufficient: bool
+    reason: str
+    message: str | None
+    threshold: float
+    threshold_calibrated: bool
+    keyword_coverage_threshold: float | None
+    model: str
+    candidate_count: int
+    hits: list[TestSearchHit]
+
+
+class FlaggedChunk(_Strict):
+    """A flagged chunk of a version. `excerpt` is at most 300 characters of the chunk's UNTRUSTED content,
+    around the first match; show it as text, never as markup."""
+
+    chunk_id: uuid.UUID
+    ordinal: int
+    page_start: int | None
+    page_end: int | None
+    heading_path: str | None
+    injection_flags: list[str]
+    excluded: bool
+    excerpt: str
+
+
+class VersionFlagsResponse(_Strict):
+    """GET .../versions/{version_id}/flags: what a teacher acknowledges before publishing."""
+
+    document_id: uuid.UUID
+    version_id: uuid.UUID
+    version_no: int
+    version_status: str
+    flagged_chunk_count: int | None
+    flags_acknowledged: bool
+    title_flagged: bool
+    filename_flagged: bool
+    items: list[FlaggedChunk]
+    next_after_ordinal: int | None  # pass it back as after_ordinal for the next page; null on the last page

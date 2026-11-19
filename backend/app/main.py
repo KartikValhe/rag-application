@@ -12,9 +12,13 @@ Startup order:
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.v1.router import router as v1_router
 from app.core.authz import public_endpoint
@@ -96,6 +100,27 @@ app.add_middleware(
     ],
     expose_headers=["X-Request-ID"],
 )
+
+# ── Request validation errors ─────────────────────────────────────────────────
+
+
+def _json_safe(value: Any) -> Any:
+    """Strings with a lone surrogate (valid as a JSON escape, but not as UTF-8 text) get U+FFFD in its place."""
+    if isinstance(value, str):
+        return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    if isinstance(value, dict):
+        return {_json_safe(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's own 422 (the same body: {"detail": [errors]}), except that the echoed input can always be
+    encoded. The default handler failed on a lone surrogate and the request ended as a 500 (5d-2)."""
+    return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
