@@ -33,7 +33,11 @@ Search (all statements in the caller's tenant transaction, as app_tenant, so RLS
        the keyword side (an OR of the query's lexemes over at most RETRIEVAL_KEYWORD_MAX_CANDIDATES
        matching chunks, ranked by ts_rank_cd) and every detail of those chunks. It reads one snapshot, so
        a publish that commits during a search shows the old version or the new one, never a mix.
-    Fusion is reciprocal rank fusion in Python. The top vector-ranked chunk is always kept in the hits,
+    Step 5d-4 (all off by default): with RETRIEVAL_KEYWORD_MAX_DF below 1 the statement of step 2 also returns,
+    for each query lexeme, how many candidate chunks contain it (no extra round trip), and a lexeme found in
+    more than that share of them is left out of the keyword query; if none is left the keyword side is not run.
+    RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS makes a chunk enter the keyword ranking only with that many matches.
+    Fusion is reciprocal rank fusion in Python, weighted per side (RETRIEVAL_RRF_VECTOR_WEIGHT / _KEYWORD_WEIGHT). The top vector-ranked chunk is always kept in the hits,
     and sufficiency is decided on the RETURNED hits only: the best vector similarity against
     RETRIEVAL_MIN_SIMILARITY (UNCALIBRATED until the 5d-3 sweep), plus an optional keyword-coverage clause.
 
@@ -136,6 +140,11 @@ class RetrievalConfig:
     hnsw_ef_search: int = 100
     statement_timeout_ms: int = 5000
     keyword_max_candidates: int = 2000
+    # Step 5d-4. The defaults are today's behaviour (nothing pruned, equal weights, one matched term is enough).
+    keyword_max_df: float = 1.0  # a keyword lexeme in more than this share of the candidates is dropped; 1.0 = off
+    rrf_vector_weight: float = 1.0
+    rrf_keyword_weight: float = 1.0  # 0 = the vector side alone
+    keyword_min_matched_terms: int = 1
     # False until a value measured by the 5d-3 sweep replaces the default; shown in every response.
     threshold_calibrated: bool = False
 
@@ -148,6 +157,17 @@ class RetrievalConfig:
             raise ValueError("keyword_max_candidates must be at least keyword_k")
         if self.statement_timeout_ms < 1:
             raise ValueError("statement_timeout_ms must be at least 1 (0 would switch the timeout off)")
+        if not 0.0 <= self.keyword_max_df <= 1.0:
+            raise ValueError("keyword_max_df must be between 0 and 1 (1 switches pruning off)")
+        if not (math.isfinite(self.rrf_vector_weight) and self.rrf_vector_weight > 0):
+            raise ValueError("rrf_vector_weight must be above 0 (the sufficiency decision reads the vector side)")
+        if not (math.isfinite(self.rrf_keyword_weight) and self.rrf_keyword_weight >= 0):
+            raise ValueError("rrf_keyword_weight must be 0 or more")
+        if (
+            not isinstance(self.keyword_min_matched_terms, int)
+            or not 1 <= self.keyword_min_matched_terms <= MAX_QUERY_LEXEMES
+        ):
+            raise ValueError(f"keyword_min_matched_terms must be an int between 1 and {MAX_QUERY_LEXEMES}")
 
     @classmethod
     def from_settings(cls, s: Any = None) -> RetrievalConfig:
@@ -164,6 +184,10 @@ class RetrievalConfig:
             hnsw_ef_search=s.RETRIEVAL_HNSW_EF_SEARCH,
             statement_timeout_ms=s.RETRIEVAL_STATEMENT_TIMEOUT_MS,
             keyword_max_candidates=s.RETRIEVAL_KEYWORD_MAX_CANDIDATES,
+            keyword_max_df=s.RETRIEVAL_KEYWORD_MAX_DF,
+            rrf_vector_weight=s.RETRIEVAL_RRF_VECTOR_WEIGHT,
+            rrf_keyword_weight=s.RETRIEVAL_RRF_KEYWORD_WEIGHT,
+            keyword_min_matched_terms=s.RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS,
         )
 
 
@@ -350,27 +374,71 @@ def _ranks(ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
     return ranks
 
 
-def rrf_fuse(vector_ids: Sequence[uuid.UUID], keyword_ids: Sequence[uuid.UUID], rrf_k: int) -> list[Fused]:
-    """Reciprocal rank fusion: score = sum of 1 / (rrf_k + rank) over the sides that list the chunk.
-    Ties: the better single rank first, then the smaller id (deterministic)."""
+def rrf_fuse(
+    vector_ids: Sequence[uuid.UUID],
+    keyword_ids: Sequence[uuid.UUID],
+    rrf_k: int,
+    vector_weight: float = 1.0,
+    keyword_weight: float = 1.0,
+) -> list[Fused]:
+    """Weighted reciprocal rank fusion: score = sum of weight_side / (rrf_k + rank) over the sides that list the
+    chunk. With both weights 1.0 these are exactly the unweighted scores of before (1.0 / x, bit for bit).
+    A side with weight 0 has no say: a chunk that only that side lists is left out, so a zero keyword weight is
+    the vector side alone and a zero vector weight the keyword side alone. Ties: the better single rank first,
+    then the smaller id (deterministic)."""
+    for weight in (vector_weight, keyword_weight):
+        if not (math.isfinite(weight) and weight >= 0):
+            raise ValueError("a fusion weight must be a finite number of 0 or more")
     vranks, kranks = _ranks(vector_ids), _ranks(keyword_ids)
     fused = []
     for chunk_id in {*vranks, *kranks}:
         v, k = vranks.get(chunk_id), kranks.get(chunk_id)
-        score = (1.0 / (rrf_k + v) if v is not None else 0.0) + (1.0 / (rrf_k + k) if k is not None else 0.0)
+        if not ((v is not None and vector_weight > 0) or (k is not None and keyword_weight > 0)):
+            continue
+        score = (vector_weight / (rrf_k + v) if v is not None else 0.0) + (
+            keyword_weight / (rrf_k + k) if k is not None else 0.0
+        )
         fused.append(Fused(chunk_id, score, v, k))
     fused.sort(key=lambda f: (-f.score, min(r for r in (f.vector_rank, f.keyword_rank) if r is not None), f.id))
     return fused
 
 
+def prune_lexemes(
+    lexemes: Sequence[str], doc_freq: Sequence[int] | None, candidate_count: int, max_df: float
+) -> list[str]:
+    """The query lexemes that stay in the keyword query. `doc_freq[i]` is the number of candidate chunks that
+    contain `lexemes[i]`. A lexeme in MORE than `max_df` of the candidates is dropped (3 of 10 is exactly 0.3
+    and stays at max_df 0.3). max_df 1.0 keeps everything and needs no frequencies. A lexeme found in no chunk
+    is kept (it matches nothing, so it costs nothing). There is no stopword list: a word is common because the
+    material says so, in any language; a rare code or name has a low frequency and survives."""
+    if max_df >= 1.0:
+        return list(lexemes)
+    if doc_freq is None or len(doc_freq) != len(lexemes):
+        raise ValueError("pruning needs one document frequency per lexeme")
+    if candidate_count <= 0:
+        return list(lexemes)
+    return [lx for lx, n in zip(lexemes, doc_freq, strict=True) if n / candidate_count <= max_df]
+
+
+def keyword_lexemes(
+    lexemes: Sequence[str], doc_freq: Sequence[int] | None, candidate_count: int, config: RetrievalConfig
+) -> list[str]:
+    """The lexemes of the keyword query after pruning, or [] when the keyword side must not run: nothing is
+    left, or fewer are left than keyword_min_matched_terms (no chunk could match enough of them)."""
+    kept = prune_lexemes(lexemes, doc_freq, candidate_count, config.keyword_max_df)
+    return kept if kept and len(kept) >= config.keyword_min_matched_terms else []
+
+
 def select_hits(fused: Sequence[Fused], vector_ids: Sequence[uuid.UUID], final_k: int) -> list[Fused]:
     """The first `final_k` fused chunks, with the top vector-ranked chunk always among them: if fusion
     ranked it lower, it replaces the lowest fused hit (it then stays last, because its fused score is
-    below every other hit's). So the similarity the sufficiency decision uses is always on screen."""
+    below every other hit's). So the similarity the sufficiency decision uses is always on screen. (If fusion
+    left the top vector chunk out altogether, which only a zero vector weight does, nothing is replaced.)"""
     top = list(fused[:final_k])
     if vector_ids and all(f.id != vector_ids[0] for f in top):
-        best = next(f for f in fused if f.id == vector_ids[0])
-        top = [*top[: final_k - 1], best]
+        best = next((f for f in fused if f.id == vector_ids[0]), None)
+        if best is not None:
+            top = [*top[: final_k - 1], best]
     return top
 
 
@@ -603,6 +671,18 @@ WITH scope(class_id, subject_id) AS (
 
 _COUNT_TAIL = "\nSELECT count(*) FROM cand"
 
+# With pruning on (step 5d-4) the statement that counts the candidates also counts, per query lexeme, the
+# candidate chunks that contain it: no extra round trip. :lexq holds each lexeme as tsquery text (quoted by
+# _quote_lexeme), in the order of the lexemes.
+_COUNT_AND_FREQUENCIES_TAIL = """
+SELECT (SELECT count(*) FROM cand) AS n,
+       ARRAY(
+           SELECT (SELECT count(*) FROM cand JOIN app.chunks c ON c.id = cand.id
+                   WHERE {t_c} AND c.content_tsv @@ CAST(u.q AS tsquery))
+           FROM unnest(CAST(:lexq AS text[])) WITH ORDINALITY AS u(q, ord)
+           ORDER BY u.ord
+       ) AS df"""
+
 # Exact path: cosine distance to every candidate vector of the active model. A zero vector has a NaN
 # distance (Postgres sorts NaN after every number); it is dropped before the limit.
 _VEC_EXACT = """, vec AS (
@@ -640,21 +720,36 @@ _VEC_HNSW = """, vec AS (
 
 # The keyword side ranks at most :kcap matching candidates (the lowest chunk ids: deterministic, and cheap
 # next to ts_rank_cd), so a query of common words cannot rank every chunk of a tenant.
-_KW_AND_DETAILS = """, kw AS (
+_KW_CTE = """, kw AS (
     SELECT y.id, row_number() OVER (ORDER BY y.score DESC, y.id) AS rnk
     FROM (
         SELECT m.id, ts_rank_cd(m.content_tsv, m.q, 1) AS score
         FROM (
             SELECT c.id, c.content_tsv, q.q
             FROM cand JOIN app.chunks c ON c.id = cand.id, (SELECT CAST(CAST(:tsq AS text) AS tsquery) AS q) q
-            WHERE {t_c} AND c.content_tsv @@ q.q
+            WHERE {t_c} AND c.content_tsv @@ q.q{min_terms}
             ORDER BY c.id
             LIMIT :kcap
         ) m
         ORDER BY score DESC, m.id
         LIMIT :kk
     ) y
-), ids AS (
+)"""
+
+# Step 5d-4: every query lexeme was pruned (or too few are left), so the keyword side has nothing to rank and
+# runs no statement at all. An empty `kw` keeps the rest of the statement unchanged.
+_KW_SKIPPED = """, kw AS (
+    SELECT CAST(NULL AS uuid) AS id, CAST(NULL AS bigint) AS rnk WHERE false
+)"""
+
+# Only with RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS above 1: a chunk must contain at least that many of the query
+# lexemes (the same count as the `matched` column). Left out of the statement at the default of 1.
+KEYWORD_MIN_TERMS_FILTER = (
+    " AND cardinality(ARRAY(SELECT unnest(tsvector_to_array(c.content_tsv)) "
+    "INTERSECT SELECT unnest(CAST(:lexemes AS text[])))) >= :min_terms"
+)
+
+_DETAILS = """, ids AS (
     SELECT id FROM vec UNION SELECT id FROM kw
 )
 SELECT c.id, c.document_id, d.title, c.document_version_id, v.version_no, v.status, v.original_filename,
@@ -689,14 +784,25 @@ def count_sql() -> str:
     return (_SCOPE_CTES + _COUNT_TAIL).format(**_filters())
 
 
-def search_sql(schema: str, *, hnsw: bool, dim: int) -> str:
-    """The search statement. `schema` comes from pg_extension (quoted by format('%I')); `dim` is an int."""
+def count_and_frequencies_sql() -> str:
+    """The candidate count and, per query lexeme, how many candidates contain it (pruning only)."""
+    return (_SCOPE_CTES + _COUNT_AND_FREQUENCIES_TAIL).format(**_filters())
+
+
+def search_sql(schema: str, *, hnsw: bool, dim: int, keyword: bool = True, min_terms: int = 1) -> str:
+    """The search statement. `schema` comes from pg_extension (quoted by format('%I')); `dim` is an int.
+    keyword=False leaves the keyword side out (every lexeme pruned); min_terms above 1 adds the matched-terms
+    filter to it (and the :min_terms bind)."""
     if not _SCHEMA_RE.match(schema):
         raise RuntimeError("unexpected pgvector schema name")
     if not isinstance(dim, int) or isinstance(dim, bool) or not 1 <= dim <= MAX_VECTOR_DIM:
         raise RuntimeError("the embedding dimension must be an int between 1 and 2000")
-    template = _SCOPE_CTES + (_VEC_HNSW if hnsw else _VEC_EXACT) + _KW_AND_DETAILS
-    return template.format(schema=schema, dim=dim, **_filters())
+    if not isinstance(min_terms, int) or isinstance(min_terms, bool) or not 1 <= min_terms <= MAX_QUERY_LEXEMES:
+        raise RuntimeError("min_terms must be an int between 1 and the lexeme cap")
+    template = _SCOPE_CTES + (_VEC_HNSW if hnsw else _VEC_EXACT) + (_KW_CTE if keyword else _KW_SKIPPED) + _DETAILS
+    return template.format(
+        schema=schema, dim=dim, min_terms=KEYWORD_MIN_TERMS_FILTER if min_terms > 1 else "", **_filters()
+    )
 
 
 def _vector_literal(vector: Sequence[float], dim: int) -> str:
@@ -818,9 +924,19 @@ async def _search_in_transaction(
         "subject_ids": [p[1] for p in pairs],
         "statuses": list(scope.statuses),
     }
-    count = int((await db.execute(text(count_sql()), scope_params)).scalar_one())
+    doc_freq: list[int] | None = None
+    if config.keyword_max_df < 1.0:  # pruning on: the same statement also counts each lexeme's chunks
+        counted = (
+            await db.execute(
+                text(count_and_frequencies_sql()), {**scope_params, "lexq": [_quote_lexeme(w) for w in lexemes]}
+            )
+        ).one()
+        count, doc_freq = int(counted[0]), [int(n) for n in counted[1]]
+    else:
+        count = int((await db.execute(text(count_sql()), scope_params)).scalar_one())
     if count == 0:
         return _result(config, model, has_scope=True, lexeme_count=len(lexemes))
+    kw_lexemes = keyword_lexemes(lexemes, doc_freq, count, config)  # [] = the keyword side does not run
 
     vector = _vector_literal(await query_embedder.embed(query), query_embedder.dim)
     extension = (await db.execute(text(VECTOR_EXTENSION_SQL))).first()
@@ -837,28 +953,32 @@ async def _search_in_transaction(
         ).one()[2]
         if applied != "relaxed_order":
             raise RuntimeError(f"hnsw.iterative_scan is {applied!r}, not relaxed_order: pgvector 0.8.0 or newer is needed")
-    rows = (
-        await db.execute(
-            text(search_sql(schema, hnsw=hnsw, dim=query_embedder.dim)),
-            {
-                **scope_params,
-                "qv": vector,
-                "model": model,
-                "dim": query_embedder.dim,
-                "vk": config.vector_k,
-                "tsq": or_tsquery_text(lexemes),
-                "lexemes": lexemes,
-                "kk": config.keyword_k,
-                "kcap": config.keyword_max_candidates,
-            },
-        )
-    ).mappings().all()
+    min_terms = config.keyword_min_matched_terms
+    sql = search_sql(schema, hnsw=hnsw, dim=query_embedder.dim, keyword=bool(kw_lexemes), min_terms=min_terms)
+    params: dict[str, Any] = {
+        **scope_params,
+        "qv": vector,
+        "model": model,
+        "dim": query_embedder.dim,
+        "vk": config.vector_k,
+        "lexemes": kw_lexemes,  # the matched-terms count of the details counts the surviving lexemes only
+        "kk": config.keyword_k,
+        "kcap": config.keyword_max_candidates,
+    }
+    if kw_lexemes:
+        params["tsq"] = or_tsquery_text(kw_lexemes)
+        if min_terms > 1:
+            params["min_terms"] = min_terms
+    rows = (await db.execute(text(sql), params)).mappings().all()
 
     by_id = {row["id"]: row for row in rows}
     on_vector_side = [r for r in rows if r["vector_rank"] is not None and _finite_or_none(r["vector_similarity"]) is not None]
     vector_ranked = tuple(r["id"] for r in sorted(on_vector_side, key=lambda r: r["vector_rank"]))
     keyword_ranked = tuple(r["id"] for r in sorted((r for r in rows if r["keyword_rank"] is not None), key=lambda r: r["keyword_rank"]))
-    chosen = select_hits(rrf_fuse(vector_ranked, keyword_ranked, config.rrf_k), vector_ranked, final_k)
+    fused = rrf_fuse(
+        vector_ranked, keyword_ranked, config.rrf_k, config.rrf_vector_weight, config.rrf_keyword_weight
+    )
+    chosen = select_hits(fused, vector_ranked, final_k)
 
     hits = []
     for position, f in enumerate(chosen, start=1):
@@ -886,7 +1006,7 @@ async def _search_in_transaction(
             )
         )
 
-    max_similarity, coverage = hit_stats(hits, len(lexemes))
+    max_similarity, coverage = hit_stats(hits, len(kw_lexemes))  # coverage of the words the keyword side used
     return _result(
         config, model, has_scope=True, candidate_count=count, path="hnsw" if hnsw else "exact",
         max_similarity=max_similarity, keyword_coverage=coverage, lexeme_count=len(lexemes),

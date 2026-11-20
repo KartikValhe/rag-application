@@ -389,6 +389,8 @@ python -m app.scripts.eval_retrieval `
 | `--golden` | The CSV (default `tests/fixtures/golden_set.csv`, relative to where you run it) |
 | `--k` | Hits per question, 1 to 50 (default 10). `hit@k` and MRR use it as the cutoff |
 | `--report` | Where to write the JSON report (required; parent folders are created) |
+| `--compare` | (5d-4) Run the golden set under many retrieval configurations and print ONE comparison table (12.8). Without it the command behaves exactly as before |
+| `--grid` | (5d-4) With `--compare` only: a smaller grid such as `--grid vw=1,2 df=off,0.3 mt=1` (12.8) |
 
 | Result | Exit code | Message |
 |---|---|---|
@@ -398,6 +400,7 @@ python -m app.scripts.eval_retrieval `
 | Unknown tenant; a pair the tenant does not offer | 2 | `error: ...` |
 | A question that cannot be searched (no searchable word, over 500 characters) | 2 | `error: golden set row N: ... (invalid_query / query_too_long)`, found before the model loads |
 | A search timeout, or a model that fails verification | 2 | `error: ...` |
+| `--grid` without `--compare`, or a grid that cannot be used | 2 | `error: --grid only works together with --compare` / `error: bad --grid: ...` (before anything is loaded) |
 
 ### 12.3 The golden CSV
 
@@ -466,4 +469,45 @@ These are starting points, not decisions. How to choose:
 
 ### 12.7 Tests
 
-`tests/test_retrieval_eval_metrics.py` (fast: loader, matcher, metrics, sweep and report on a synthetic golden set), `tests/test_eval_retrieval_script.py` (fast: skips, malformed CSV, arguments, the operator-scope guard) and `tests/test_eval_retrieval_db.py` (db: the whole command on synthetic documents with a scripted embedder, READ ONLY refused writes, skips and errors). The real golden set and the real model are never used by a test.
+`tests/test_retrieval_eval_metrics.py` (fast: loader, matcher, metrics, sweep and report on a synthetic golden set), `tests/test_eval_retrieval_script.py` (fast: skips, malformed CSV, arguments, the operator-scope guard) and `tests/test_eval_retrieval_db.py` (db: the whole command on synthetic documents with a scripted embedder, READ ONLY refused writes, skips and errors). 5d-4 adds `tests/test_retrieval_fusion_pure.py` and `tests/test_retrieval_compare_pure.py` (fast), `tests/test_retrieval_pruning.py` and `tests/test_eval_retrieval_compare_db.py` (db). The real golden set and the real model are never used by a test.
+
+### 12.8 Comparing retrieval configurations: `--compare` (5d-4)
+
+**Why it exists.** The first real run (14 questions, 100 chunks, e5-small) showed the hybrid search doing **worse** than the vector side alone: Marathi hit@1 40% hybrid against 100% vector only, overall hit@1 67% against 92%, and keyword-only Marathi hit@1 20%. The hypothesis (to be tested with this table, not assumed): the keyword query is an OR of *every* word of the question, so very common words (ची, आहेत, कोणती, काय, what, is, the) match most chunks; `ts_rank_cd` has no inverse document frequency, so those chunks rank as if they were good matches; and reciprocal rank fusion gives the noisy keyword ranks the same weight as the vector ranks. Backlog B106.
+
+**The four settings (all default to today's behaviour; nothing changes until you choose values).**
+
+| Setting | Default | What it does |
+|---|---|---|
+| `RETRIEVAL_KEYWORD_MAX_DF` | `1.0` (off) | A word of the question that appears in **more than** this share of the candidate chunks of the scope is left out of the keyword query. Frequencies are counted over the candidate chunks of that class and subject (published, not excluded), in the same statement that already counts them: **no extra round trip**. If no word is left, the keyword side is **not run at all** and the answer comes from the vector side. No stopword list: a word is "common" because the material says so, in any language; a rare code or name (an error code, a person) has a low frequency and stays. Caution on a tiny class: with 10 chunks, a word in 6 of them is 0.6 |
+| `RETRIEVAL_RRF_VECTOR_WEIGHT` | `1.0` | Weight of the vector side in the fusion: `score = sum(weight_side / (RETRIEVAL_RRF_K + rank))`. Must be above 0 (the sufficiency decision reads the vector side) |
+| `RETRIEVAL_RRF_KEYWORD_WEIGHT` | `1.0` | Weight of the keyword side. `0` = the vector side alone (a chunk that only the keyword side lists is left out of the fusion; the keyword ranking is still computed and reported) |
+| `RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS` | `1` | A chunk enters the keyword ranking only if it contains at least this many of the (remaining) question words. If fewer words remain than this, the keyword side does not run |
+
+**Defaults are neutral, and tested as such:** with the defaults the hit ids and the fused scores are the same numbers as before 5d-4 (the regression test compares them bit for bit with the unweighted formula, and was also run against the unchanged code), and the default SQL statements contain none of the new machinery. `RETRIEVAL_MIN_SIMILARITY` and `threshold_calibrated` are untouched.
+
+**What `--compare` does.** It runs the golden set once per configuration through the **same** `retrieval.search` (the configuration is overridden per run; there is no copy of the SQL), embeds every question **once**, stays **READ ONLY** and changes no setting. Rows of the table:
+
+1. `current settings`: the configuration exactly as the environment has it (the reference of every comparison);
+2. `vector only`: the keyword weight set to 0, the baseline;
+3. the grid. Default: vector weight `vw` in {1, 2, 3} × keyword max document frequency `df` in {off, 0.5, 0.3, 0.2, 0.1} × keyword min matched terms `mt` in {1, 2} = 30 rows, the keyword weight `kw` fixed at 1.
+
+A smaller grid: `--grid vw=1,2 df=off,0.3 mt=1` (names `vw`, `df` (`off` or 0 to 1), `mt`; a name that is left out stays neutral, so `--grid df=0.3` is one row; at most 200 points). Run it exactly like 12.2 with two more arguments:
+
+```powershell
+python -m app.scripts.eval_retrieval `
+  --tenant acme `
+  --class-id 469bc5e7-4382-49cb-8ad6-70d16e1639b3 `
+  --subject-id abc756c6-0234-4db6-a09f-f596bfa4afca `
+  --golden tests/fixtures/golden_set.csv --k 10 `
+  --report "$env:TEMP\retrieval-compare-acme.json" `
+  --compare
+```
+
+**Reading the table.** One line per configuration: the tag (`current settings` / `vector only`), the settings (`vw` `kw` `df` `mt`), then for `ALL` and for **each language** the columns `hit@1 hit@3 hit@5 MRR` (should-answer questions only), then `answered` (should-answer questions at or above the current threshold) and `refused` (should-not-answer questions below it), then **`hit@1 vs current`**: `+W/-L` means W questions whose right chunk became first and L that stopped being first, compared with the `current settings` row. Read the wins and losses, not only the percentages: with 14 questions one question is 7 points. Answer and refusal numbers follow the vector similarity, which no configuration here changes much, so expect them to stay close to each other.
+
+**The overfitting guard.** Above the table the command prints the number of should-answer and should-not-answer rows, and a `WARNING ... too few to trust small differences` when there are fewer than **20** should-answer or fewer than **8** should-not-answer rows. A grid of 30 configurations on a handful of questions will always show some configuration that looks better by luck. Prefer a setting that is better on **every** language and does not lose questions (`-0`), sits in the middle of a region of good rows rather than at one lucky cell, and still beats `vector only`; add questions to the golden set before trusting a small gain.
+
+**After choosing:** put the values in `backend/.env` (the environment of the API process) and restart, then run the harness without `--compare` once: its numbers must equal the `current settings` row of the comparison. The normal report now also states the four values it ran with. If the best rows are still no better than `vector only`, the answer is to use `RETRIEVAL_RRF_KEYWORD_WEIGHT=0` (or a small weight) for now and to revisit the trigram question (backlog B92) with the comparison numbers.
+
+The JSON report of a comparison holds numbers only (one entry per configuration with `overall`, `by_language`, `answered`, `refused`, `hit1_wins`, `hit1_losses`, plus `sample` with the row counts and warnings); it holds no question text and no chunk text.

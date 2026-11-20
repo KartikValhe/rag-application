@@ -172,6 +172,17 @@ class Settings(BaseSettings):
     RETRIEVAL_STATEMENT_TIMEOUT_MS: int = Field(default=5000, ge=1, le=600_000)
     # The keyword side ranks at most this many matching chunks (the lowest ids); must be >= RETRIEVAL_KEYWORD_K
     RETRIEVAL_KEYWORD_MAX_CANDIDATES: int = Field(default=2000, ge=1, le=1_000_000)
+    # Step 5d-4 (found by the first real evaluation: the keyword side added noise). All four DEFAULT TO TODAY'S
+    # BEHAVIOUR; choose values from the `eval_retrieval --compare` table (docs/api/phase5.md section 12).
+    # Keyword words that are in MORE than this share of the candidate chunks are left out of the keyword query
+    # (language independent, no stopword list). 1.0 = off. If every word is left out, only the vector side runs.
+    RETRIEVAL_KEYWORD_MAX_DF: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Reciprocal rank fusion: score = sum of weight / (RETRIEVAL_RRF_K + rank) over the two sides. The vector
+    # weight must stay above 0 (the sufficiency decision reads the vector side); the keyword weight 0 = vector only.
+    RETRIEVAL_RRF_VECTOR_WEIGHT: float = Field(default=1.0, gt=0.0, le=100.0)
+    RETRIEVAL_RRF_KEYWORD_WEIGHT: float = Field(default=1.0, ge=0.0, le=100.0)
+    # A chunk is ranked by the keyword side only if it matches at least this many of the (pruned) query words.
+    RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS: int = Field(default=1, ge=1, le=64)
     # Query embeddings running at once in one API process (a semaphore, and the size of their own thread pool).
     # A search over the cap waits up to RETRIEVAL_EMBED_QUEUE_SECONDS for a place, then gets 503 search_busy.
     RETRIEVAL_EMBED_CONCURRENCY: int = Field(default=2, ge=1, le=64)

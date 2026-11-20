@@ -6,7 +6,14 @@ chunk for a golden set of questions, on the REAL documents of ONE tenant's class
 embedding model. Retrieval only: there is no LLM call anywhere.
 
     python -m app.scripts.eval_retrieval --tenant acme --class-id <uuid> --subject-id <uuid> \
-        [--golden tests/fixtures/golden_set.csv] [--k 10] --report <path.json>
+        [--golden tests/fixtures/golden_set.csv] [--k 10] --report <path.json> [--compare [--grid vw=1,2 df=off,0.3]]
+
+With --compare (step 5d-4) the golden set runs once per retrieval configuration (fusion weights, keyword
+pruning, minimum matched terms: a grid, the current settings and a vector-only baseline) and ONE table is
+printed: hit@1, hit@3, hit@5 and MRR per language, the answer and refusal numbers at the current threshold,
+and how many questions changed their hit@1 against the current settings. Every question is embedded once;
+every configuration goes through the same retrieval.search (the config is overridden per run, no copy of the
+SQL); the run stays READ ONLY and changes no setting. docs/api/phase5.md section 12 says how to read it.
 
 What it does
   1. reads the golden CSV (columns #, Language, Question, Document, Expected location, Should answer);
@@ -38,6 +45,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import json
 import sys
 import uuid
@@ -251,10 +259,65 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--golden", default=DEFAULT_GOLDEN, help=f"the golden-set CSV (default {DEFAULT_GOLDEN})")
     parser.add_argument("--k", type=_k_type, default=10, help=f"hits per question, 1 to {MAX_K} (default 10)")
     parser.add_argument("--report", required=True, help="where to write the JSON report")
+    parser.add_argument(
+        "--compare", action="store_true",
+        help="run the golden set under many retrieval configurations and print one comparison table",
+    )
+    parser.add_argument(
+        "--grid", nargs="+", metavar="NAME=LIST", default=None,
+        help="with --compare: a smaller grid, e.g. --grid vw=1,2 df=off,0.3 mt=1 (vw = vector weight, "
+             "df = keyword max document frequency, off or 0 to 1, mt = keyword min matched terms; "
+             "a name that is left out stays neutral). Default: vw=1,2,3 df=off,0.5,0.3,0.2,0.1 mt=1,2",
+    )
     return parser
 
 
+async def run_golden_set(
+    db: AsyncSession, scope: retrieval.RetrievalScope, rows: list[ev.GoldenRow], queries: list[str],
+    query_embedders: list[retrieval.QueryEmbedder], config: retrieval.RetrievalConfig, k: int,
+    documents: list[ev.DocRef],
+) -> tuple[list[ev.QuestionResult], set[str]]:
+    """Every question through retrieval.search under ONE configuration. The query embedders already hold the
+    question vectors, so a second configuration costs no embedding. Returns the results and the search paths."""
+    results: list[ev.QuestionResult] = []
+    paths: set[str] = set()
+    for row, query, query_embedder in zip(rows, queries, query_embedders, strict=True):
+        try:
+            retrieved, result = await retrieve_one(db, scope, query, query_embedder, config, k)
+        except retrieval.SearchUnavailable as exc:
+            raise CommandError(f"golden set row {row.row}: the search failed ({exc.code})") from None
+        paths.add(result.path)
+        results.append(ev.evaluate_question(row, retrieved, documents))
+    return results, paths
+
+
+def config_for(base: retrieval.RetrievalConfig, point: ev.GridPoint) -> retrieval.RetrievalConfig:
+    """The base configuration with the four 5d-4 values of a grid point; everything else (k values, threshold,
+    cap) stays as the settings have it."""
+    try:
+        return dataclasses.replace(
+            base, rrf_vector_weight=point.vector_weight, rrf_keyword_weight=point.keyword_weight,
+            keyword_max_df=point.keyword_max_df, keyword_min_matched_terms=point.keyword_min_matched_terms,
+        )
+    except ValueError as exc:
+        raise CommandError(f"grid point {point.label}: {exc}") from None
+
+
+def point_of(config: retrieval.RetrievalConfig) -> ev.GridPoint:
+    return ev.GridPoint(
+        config.rrf_vector_weight, config.rrf_keyword_weight, config.keyword_max_df, config.keyword_min_matched_terms
+    )
+
+
 async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None) -> int:
+    grid: list[ev.GridPoint] = []
+    if args.grid is not None and not args.compare:
+        raise CommandError("--grid only works together with --compare")
+    if args.compare:
+        try:
+            grid = ev.parse_grid(args.grid) if args.grid is not None else ev.build_grid()
+        except ev.GridError as exc:
+            raise CommandError(f"bad --grid: {exc}") from None
     golden_path = Path(args.golden)
     if not golden_path.is_file():
         raise Skipped(f"golden file not found: {golden_path} (pass --golden <csv>)")
@@ -299,18 +362,36 @@ async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None)
         embedder = await asyncio.to_thread(embedder_loader or _load_real_embedder)
         base_embedder = retrieval.QueryEmbedder.from_embedder(embedder)
 
-        print(f"running {len(rows)} question(s), k = {k} ...")
-        documents = [ev.DocRef(d["title"], d["original_filename"]) for d in corpus["documents"]]
-        results: list[ev.QuestionResult] = []
-        paths: set[str] = set()
+        # Each question is embedded ONCE; the embedder object answers for that question only, however many
+        # configurations search with it.
+        query_embedders: list[retrieval.QueryEmbedder] = []
         for row, query in zip(rows, queries, strict=True):
             try:
-                query_embedder = await retrieval.embed_query(base_embedder, query)
-                retrieved, result = await retrieve_one(db, scope, query, query_embedder, config, k)
+                query_embedders.append(await retrieval.embed_query(base_embedder, query))
             except retrieval.SearchUnavailable as exc:
                 raise CommandError(f"golden set row {row.row}: the search failed ({exc.code})") from None
-            paths.add(result.path)
-            results.append(ev.evaluate_question(row, retrieved, documents))
+
+        documents = [ev.DocRef(d["title"], d["original_filename"]) for d in corpus["documents"]]
+        if args.compare:
+            current_point = point_of(config)
+            plan: list[tuple[ev.RunRole, str, ev.GridPoint]] = [
+                ("current", "current settings", current_point),
+                ("baseline", "vector only", ev.vector_only_point()),
+                *(("grid", "", point) for point in grid),
+            ]
+            print(f"comparing {len(plan)} configuration(s) on {len(rows)} question(s), k = {k} ...")
+            runs: list[ev.ConfigRun] = []
+            compared_paths: set[str] = set()
+            for role, label, point in plan:
+                run_results, run_paths = await run_golden_set(
+                    db, scope, rows, queries, query_embedders, config_for(config, point), k, documents
+                )
+                compared_paths |= run_paths
+                runs.append(ev.ConfigRun(role, label, point, tuple(run_results)))
+            return finish_compare(args, golden_path, embedder, config, corpus, runs, sorted(compared_paths), k)
+
+        print(f"running {len(rows)} question(s), k = {k} ...")
+        results, paths = await run_golden_set(db, scope, rows, queries, query_embedders, config, k, documents)
 
     meta: dict[str, Any] = {
         "tenant": args.tenant,
@@ -323,6 +404,7 @@ async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None)
         "threshold_calibrated": config.threshold_calibrated,
         "keyword_coverage_threshold": config.min_keyword_coverage or None,
         "keyword_max_candidates": config.keyword_max_candidates,
+        "fusion": fusion_settings(config),
         "search_paths": sorted(paths),
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "corpus": corpus,
@@ -332,6 +414,43 @@ async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(ev.format_console(report))
+    print(f"report written: {report_path}")
+    return 0
+
+
+def fusion_settings(config: retrieval.RetrievalConfig) -> dict[str, Any]:
+    """The four 5d-4 settings as the run used them (numbers only)."""
+    return {
+        "keyword_max_df": config.keyword_max_df, "rrf_vector_weight": config.rrf_vector_weight,
+        "rrf_keyword_weight": config.rrf_keyword_weight, "keyword_min_matched_terms": config.keyword_min_matched_terms,
+    }
+
+
+def finish_compare(
+    args: argparse.Namespace, golden_path: Path, embedder: Any, config: retrieval.RetrievalConfig,
+    corpus: dict[str, Any], runs: list[ev.ConfigRun], paths: list[str], k: int,
+) -> int:
+    """Write the comparison report (numbers only) and print the table."""
+    meta: dict[str, Any] = {
+        "kind": "compare",
+        "tenant": args.tenant,
+        "class_id": str(args.class_id),
+        "subject_id": str(args.subject_id),
+        "golden_file": golden_path.name,
+        "model": str(embedder.model_id),
+        "k": k,
+        "threshold": config.min_similarity,
+        "threshold_calibrated": config.threshold_calibrated,
+        "current_settings": fusion_settings(config),
+        "search_paths": paths,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "corpus": {"documents": len(corpus["documents"]), "chunks": corpus["chunks"], "flagged_chunks": corpus["flagged_chunks"]},
+    }
+    report = ev.build_compare_report(runs, cutoff=k, meta=meta)
+    report_path = Path(args.report)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(ev.format_compare(report))
     print(f"report written: {report_path}")
     return 0
 

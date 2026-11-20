@@ -13,7 +13,10 @@ What it does
       the keyword side alone and the vector side alone (the input for the trigram decision, backlog B92);
     * sweeps the sufficiency threshold from the STORED best similarity (no new search per threshold) and marks
       the best balanced threshold and the highest one that keeps 90% of the should-answer questions answered;
-    * builds a JSON-able report and a plain-English console summary.
+    * builds a JSON-able report and a plain-English console summary;
+    * (step 5d-4, `--compare`) builds the grid of retrieval configurations to try, counts for each one how many
+      questions changed their hit@1 against the current settings, warns when the golden set is too small to
+      trust small differences, and prints all of it as ONE table.
 
 It never sees chunk text: ChunkRef has no content field, so a report cannot leak any. Titles, file names and
 headings are untrusted text from uploaded files; the console summary cleans them with safe_text.
@@ -26,6 +29,8 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
+import math
 import re
 import unicodedata
 from collections.abc import Sequence
@@ -596,6 +601,14 @@ def format_console(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"Current setting: RETRIEVAL_MIN_SIMILARITY = {threshold} "
                  f"({'calibrated' if calibrated else 'not calibrated yet: a default, not a measured value'})")
+    fusion = meta.get("fusion")
+    if isinstance(fusion, dict):
+        df = fusion.get("keyword_max_df")
+        lines.append(
+            f"Keyword and fusion settings (step 5d-4): keyword max document frequency = {'off' if df == 1.0 else df}, "
+            f"weights vector / keyword = {fusion.get('rrf_vector_weight')} / {fusion.get('rrf_keyword_weight')}, "
+            f"min matched terms = {fusion.get('keyword_min_matched_terms')}"
+        )
 
     lines += ["", "Results by language (should-answer rows: hit@k, MRR, answer rate; should-not-answer rows: refusal accuracy)"]
     header = f"  {'Language':<14} {'ans/ref':>8}  " + "  ".join(f"{'hit@' + k:>6}" for k in ks) + \
@@ -673,4 +686,243 @@ def format_console(report: dict[str, Any]) -> str:
         lines.append("  highest threshold that keeps the answer rate at or above 90%: none between 0.70 and 0.95")
     lines.append("  Choose the threshold yourself from this table, then see docs/api/phase5.md (section 12) to set it.")
     lines.append("")
+    return "\n".join(lines)
+
+
+# ── comparing retrieval configurations (step 5d-4, `eval_retrieval --compare`) ───────────────────────────────
+
+DEFAULT_VECTOR_WEIGHTS: tuple[float, ...] = (1.0, 2.0, 3.0)
+DEFAULT_MAX_DFS: tuple[float, ...] = (1.0, 0.5, 0.3, 0.2, 0.1)  # 1.0 = pruning off
+DEFAULT_MIN_TERMS: tuple[int, ...] = (1, 2)
+MAX_GRID_POINTS = 200  # a grid is one search per question per point; more than this is a typing mistake
+MAX_MIN_TERMS = 64  # the most lexemes a query has (retrieval.MAX_QUERY_LEXEMES)
+MIN_ANSWER_ROWS = 20  # fewer should-answer rows than this: small differences are noise
+MIN_REFUSAL_ROWS = 8  # the same for should-not-answer rows
+GRID_NAMES = ("vw", "df", "mt")
+
+RunRole = Literal["current", "baseline", "grid"]
+
+
+class GridError(ValueError):
+    """The --grid argument cannot be used (the message says which part)."""
+
+
+def _num(value: float) -> str:
+    return f"{value:g}"
+
+
+@dataclass(frozen=True)
+class GridPoint:
+    """One retrieval configuration of the comparison, as plain numbers (the command turns it into a config)."""
+
+    vector_weight: float
+    keyword_weight: float
+    keyword_max_df: float  # 1.0 = pruning off
+    keyword_min_matched_terms: int
+
+    @property
+    def label(self) -> str:
+        df = "off" if self.keyword_max_df >= 1.0 else _num(self.keyword_max_df)
+        return (
+            f"vw={_num(self.vector_weight)} kw={_num(self.keyword_weight)} df={df} "
+            f"mt={self.keyword_min_matched_terms}"
+        )
+
+
+def vector_only_point() -> GridPoint:
+    """The baseline: the keyword side has weight 0, so the ranking is the vector side alone."""
+    return GridPoint(1.0, 0.0, 1.0, 1)
+
+
+def build_grid(
+    vector_weights: Sequence[float] = DEFAULT_VECTOR_WEIGHTS,
+    max_dfs: Sequence[float] = DEFAULT_MAX_DFS,
+    min_terms: Sequence[int] = DEFAULT_MIN_TERMS,
+    keyword_weight: float = 1.0,
+) -> list[GridPoint]:
+    """Every combination, vector weight outermost and minimum matched terms innermost. The default grid is
+    3 x 5 x 2 = 30 points, the first one the neutral configuration (weights 1, no pruning, one term)."""
+    return [
+        GridPoint(vw, keyword_weight, df, mt) for vw, df, mt in itertools.product(vector_weights, max_dfs, min_terms)
+    ]
+
+
+def _grid_values(name: str, raw: str) -> list[Any]:
+    parts = [p.strip() for p in raw.split(",")]
+    if not raw.strip() or any(not p for p in parts):
+        raise GridError(f"{name}= needs one or more values separated by commas")
+    try:
+        if name == "mt":
+            ints = [int(p) for p in parts]
+            if any(not 1 <= n <= MAX_MIN_TERMS for n in ints):
+                raise GridError(f"mt= values must be whole numbers from 1 to {MAX_MIN_TERMS}")
+            return list(dict.fromkeys(ints))
+        floats = [1.0 if (name == "df" and p.casefold() == "off") else float(p) for p in parts]
+    except ValueError:
+        raise GridError(f"{name}= has a value that is not a number: {safe_text(raw, 40)!r}") from None
+    if name == "vw" and any(not (math.isfinite(v) and v > 0) for v in floats):
+        raise GridError("vw= values must be numbers above 0")
+    if name == "df" and any(not 0.0 <= v <= 1.0 for v in floats):
+        raise GridError("df= values must be 'off' or numbers from 0 to 1")
+    return list(dict.fromkeys(floats))
+
+
+def parse_grid(tokens: Sequence[str]) -> list[GridPoint]:
+    """A custom grid from `vw=1,2 df=off,0.3 mt=1,2` (any of the three; a dimension that is left out stays at
+    its neutral value: vw=1, df=off, mt=1). Raises GridError, with a message the operator can act on."""
+    if not tokens:
+        raise GridError("--grid needs at least one of vw=, df=, mt= (for example: --grid vw=1,2 df=off,0.3)")
+    chosen: dict[str, list[Any]] = {}
+    for token in tokens:
+        name, sep, raw = token.partition("=")
+        if not sep or name not in GRID_NAMES:
+            raise GridError(f"{safe_text(token, 40)!r} is not one of vw=<list>, df=<list>, mt=<list>")
+        if name in chosen:
+            raise GridError(f"{name}= is given twice")
+        chosen[name] = _grid_values(name, raw)
+    size = math.prod(len(v) for v in chosen.values())
+    if size > MAX_GRID_POINTS:
+        raise GridError(f"the grid has {size} points; at most {MAX_GRID_POINTS} are allowed")
+    return build_grid(chosen.get("vw", [1.0]), chosen.get("df", [1.0]), chosen.get("mt", [1]))
+
+
+@dataclass(frozen=True)
+class ConfigRun:
+    """The results of the golden set under one configuration. `role` is "current" (the settings as they are
+    now: the reference of every comparison), "baseline" (vector only) or "grid"; `label` is the tag the table
+    shows for the first two."""
+
+    role: RunRole
+    label: str
+    point: GridPoint
+    results: tuple[QuestionResult, ...]
+
+
+def hit1_changes(reference: Sequence[QuestionResult], other: Sequence[QuestionResult]) -> tuple[int, int]:
+    """(wins, losses) among the should-answer questions: how many have the right chunk at position 1 in `other`
+    but not in `reference` (wins), and the other way round (losses). The two lists must be the same questions
+    in the same order."""
+    if len(reference) != len(other) or any(a.row != b.row for a, b in zip(reference, other, strict=True)):
+        raise ValueError("the two runs are not about the same questions")
+    wins = losses = 0
+    for a, b in zip(reference, other, strict=True):
+        if not a.should_answer:
+            continue
+        was, now = a.hit_position == 1, b.hit_position == 1
+        wins += 1 if now and not was else 0
+        losses += 1 if was and not now else 0
+    return wins, losses
+
+
+def sample_warnings(answer_rows: int, refusal_rows: int) -> list[str]:
+    """The overfitting guard: a warning for each kind of row that the golden set has too few of."""
+    warnings = []
+    if answer_rows < MIN_ANSWER_ROWS:
+        warnings.append(
+            f"only {answer_rows} should-answer row(s), fewer than {MIN_ANSWER_ROWS}: too few to trust small differences"
+        )
+    if refusal_rows < MIN_REFUSAL_ROWS:
+        warnings.append(
+            f"only {refusal_rows} should-not-answer row(s), fewer than {MIN_REFUSAL_ROWS}: "
+            "too few to trust small differences"
+        )
+    return warnings
+
+
+def build_compare_report(runs: Sequence[ConfigRun], *, cutoff: int, meta: dict[str, Any]) -> dict[str, Any]:
+    """The comparison as plain JSON-able data: one entry per configuration (numbers only, no per-question rows)
+    with its changes against the "current" run, and the sizes of the golden set with the warnings."""
+    if not runs:
+        raise ValueError("a comparison needs at least one run")
+    reference = next((r for r in runs if r.role == "current"), runs[0])
+    answers = sum(1 for q in reference.results if q.should_answer)
+    refusals = len(reference.results) - answers
+    entries = []
+    for run in runs:
+        wins, losses = hit1_changes(reference.results, run.results)
+        entries.append(
+            {
+                "role": run.role,
+                "label": run.label,
+                "point_label": run.point.label,
+                "vector_weight": run.point.vector_weight,
+                "keyword_weight": run.point.keyword_weight,
+                "keyword_max_df": run.point.keyword_max_df,
+                "keyword_min_matched_terms": run.point.keyword_min_matched_terms,
+                "overall": aggregate(run.results, cutoff),
+                "by_language": by_language(run.results, cutoff),
+                "answered": sum(1 for q in run.results if q.should_answer and q.sufficient),
+                "refused": sum(1 for q in run.results if not q.should_answer and not q.sufficient),
+                "hit1_wins": wins,
+                "hit1_losses": losses,
+            }
+        )
+    return {
+        "meta": meta,
+        "sample": {
+            "should_answer": answers,
+            "should_not_answer": refusals,
+            "warnings": sample_warnings(answers, refusals),
+        },
+        "runs": entries,
+    }
+
+
+def _cells(metrics: dict[str, Any]) -> str:
+    hits = metrics["hit_at"] or {}
+    mrr = "n/a" if metrics["mrr"] is None else f"{metrics['mrr']:.2f}"
+    return " ".join(f"{_pct(hits.get(k)):>5}" for k in ("1", "3", "5")) + f" {mrr:>5}"
+
+
+def format_compare(report: dict[str, Any]) -> str:
+    """The one table of `--compare`, with the sizes of the golden set and the warnings above it."""
+    meta = report["meta"]
+    sample = report["sample"]
+    runs = report["runs"]
+    languages = list(runs[0]["by_language"]) if runs else []
+    lines = ["", "=== Retrieval comparison ==="]
+    lines.append(
+        f"tenant {safe_text(meta.get('tenant'), 40)}, class {meta.get('class_id')}, subject {meta.get('subject_id')}, "
+        f"model {safe_text(meta.get('model'), 60)}, k = {meta.get('k')}, {len(runs)} configuration(s)"
+    )
+    lines.append(
+        f"Golden set: {sample['should_answer']} should-answer and {sample['should_not_answer']} "
+        "should-not-answer row(s)"
+    )
+    lines += [f"  WARNING: {w}" for w in sample["warnings"]]
+    calibrated = meta.get("threshold_calibrated")
+    lines.append(
+        f"Answer and refusal numbers use the current setting RETRIEVAL_MIN_SIMILARITY = {meta.get('threshold')} "
+        f"({'calibrated' if calibrated else 'not calibrated yet: a default, not a measured value'})"
+    )
+    group_names = ["ALL", *(safe_text(name, 10) for name in languages)]
+    group_head = " | ".join(f"{name:<27}" for name in group_names)
+    column_head = " | ".join(f"{'hit@1':>5} {'hit@3':>5} {'hit@5':>5} {'MRR':>5}".ljust(27) for _ in group_names)
+    head1 = f"  {'':<16} {'settings':<22} {group_head} | {'answered':>8} {'refused':>7} | {'hit@1 vs':>8}"
+    head2 = f"  {'':<16} {'':<22} {column_head} | {'':>8} {'':>7} | {'current':>8}"
+    lines += ["", head1, head2, "  " + "-" * (len(head2) - 2)]
+    for run in runs:
+        tag = run["label"] if run["role"] != "grid" else ""
+        groups = [_cells(run["overall"]), *(_cells(run["by_language"][name]) for name in languages)]
+        answered = f"{run['answered']}/{sample['should_answer']}"
+        refused = f"{run['refused']}/{sample['should_not_answer']}"
+        change = f"+{run['hit1_wins']}/-{run['hit1_losses']}"
+        lines.append(
+            f"  {safe_text(tag, 16):<16} {safe_text(run['point_label'], 22):<22} "
+            + " | ".join(f"{g:<27}" for g in groups)
+            + f" | {answered:>8} {refused:>7} | {change:>8}"
+        )
+    lines += [
+        "",
+        "How to read it",
+        "  vw / kw: fusion weight of the vector / keyword side (kw=0 is the vector-only baseline).",
+        "  df: a keyword word found in more than this share of the chunks is dropped (off = nothing dropped).",
+        "  mt: a chunk needs at least this many of the (remaining) question words to enter the keyword ranking.",
+        "  hit@k, MRR: for the should-answer questions only; ALL, then one column group per language.",
+        "  answered / refused: should-answer questions at or above the threshold / should-not-answer ones below it.",
+        "  hit@1 vs current: +W/-L = W questions whose right chunk became first, L that stopped being first,",
+        "  compared with the 'current settings' row. Many small wins and losses that cancel out are noise.",
+        "  Nothing is changed by this command: choose values yourself, then see docs/api/phase5.md (section 12).",
+        "",
+    ]
     return "\n".join(lines)
