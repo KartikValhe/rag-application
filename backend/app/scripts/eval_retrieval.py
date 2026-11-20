@@ -35,7 +35,11 @@ Safety
   * It prints and reports ids, titles, file names, pages and headings only, never chunk text. Titles and
     headings come from uploaded files, so the console copy is cleaned (retrieval_eval.safe_text).
   * It never sets a threshold. RETRIEVAL_MIN_SIMILARITY is only read and reported; the owner chooses a value
-    from the sweep (docs/api/phase5.md, section 12).
+    from the sweep (docs/api/phase5.md, section 12). Since 5d-5 the report says how the threshold was calibrated
+    (date, model, golden-set size, from retrieval.CALIBRATION) when the model is the calibrated one, and prints a
+    WARNING when it is not.
+  * With the keyword side switched off (RETRIEVAL_RRF_KEYWORD_WEIGHT 0, the default since 5d-5) the keyword-only
+    numbers are not measured (shown as n/a); `--compare` still runs hybrid rows.
   * Run it against the database you mean: it uses DATABASE_URL and PLATFORM_DATABASE_URL like the API. Tests
     run it only against the test database.
 """
@@ -400,11 +404,11 @@ async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None)
         "golden_file": golden_path.name,
         "model": str(embedder.model_id),
         "k": k,
-        "threshold": config.min_similarity,
-        "threshold_calibrated": config.threshold_calibrated,
+        **threshold_meta(str(embedder.model_id), config),
         "keyword_coverage_threshold": config.min_keyword_coverage or None,
         "keyword_max_candidates": config.keyword_max_candidates,
         "fusion": fusion_settings(config),
+        "keyword_side": "on" if retrieval.keyword_side_runs(config) else "off",
         "search_paths": sorted(paths),
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "corpus": corpus,
@@ -416,6 +420,19 @@ async def _run(args: argparse.Namespace, embedder_loader: EmbedderLoader | None)
     print(ev.format_console(report))
     print(f"report written: {report_path}")
     return 0
+
+
+def threshold_meta(model_key: str, config: retrieval.RetrievalConfig) -> dict[str, Any]:
+    """The threshold, whether it is calibrated for this model (derived, step 5d-5) and, when it is, the record
+    of how it was measured (retrieval.CALIBRATION, only when that record is about this model)."""
+    calibrated = retrieval.is_threshold_calibrated(model_key, config)
+    record = retrieval.CALIBRATION
+    return {
+        "threshold": config.min_similarity,
+        "threshold_calibrated": calibrated,
+        "calibrated_model_key": config.calibrated_model_key,
+        "calibration": dataclasses.asdict(record) if calibrated and record.model_key == model_key else None,
+    }
 
 
 def fusion_settings(config: retrieval.RetrievalConfig) -> dict[str, Any]:
@@ -439,8 +456,7 @@ def finish_compare(
         "golden_file": golden_path.name,
         "model": str(embedder.model_id),
         "k": k,
-        "threshold": config.min_similarity,
-        "threshold_calibrated": config.threshold_calibrated,
+        **threshold_meta(str(embedder.model_id), config),
         "current_settings": fusion_settings(config),
         "search_paths": paths,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),

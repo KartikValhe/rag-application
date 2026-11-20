@@ -393,7 +393,9 @@ async def test_admin_and_teacher_get_scores_and_flags_with_every_key(
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert set(body) == RESPONSE_KEYS
-        assert body["threshold_calibrated"] is False and body["model"] == fake_embedder().model_id
+        # 5d-5: the fake embedder carries the e5-small key, the model the threshold was calibrated for
+        assert body["threshold_calibrated"] is True and body["model"] == fake_embedder().model_id
+        assert body["threshold"] == 0.84
         assert body["candidate_count"] >= 2
         hits = {h["chunk_id"]: h for h in body["hits"]}
         assert {str(seeded.chunk_id(0)), str(seeded.chunk_id(1))} <= set(hits)
@@ -402,10 +404,43 @@ async def test_admin_and_teacher_get_scores_and_flags_with_every_key(
         first, flagged = hits[str(seeded.chunk_id(0))], hits[str(seeded.chunk_id(1))]
         assert (first["page_start"], first["page_end"], first["heading_path"]) == (2, 3, "Unit 1")
         assert first["version_status"] == "published" and first["fused_score"] > 0
-        assert first["keyword_rank"] is not None and first["keyword_matched_terms"] == 1
+        # 5d-5: vector only by default, so the keyword fields are empty (the keys are still there)
+        assert first["vector_rank"] is not None and first["vector_similarity"] is not None
+        assert first["keyword_rank"] is None and first["keyword_matched_terms"] is None
         assert (first["flagged"], first["injection_flags"]) == (False, [])
         assert (flagged["flagged"], flagged["injection_flags"]) == (True, ["instruction_override"])
         assert (first["title_flagged"], first["filename_flagged"]) == (False, False)
+
+
+async def test_threshold_calibrated_follows_the_active_model_key(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession, query_embedder: EmbedderSwitch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5d-5 (B105): derived, not a constant. True when the active model is RETRIEVAL_CALIBRATED_MODEL_KEY,
+    false otherwise; the threshold itself is reported either way."""
+    w = academic_world.a
+    word = canary()
+    await doc(raw_db, w, word)
+    calibrated = (await search(client, w, w.t1, query=word)).json()
+    assert (calibrated["threshold_calibrated"], calibrated["threshold"]) == (True, 0.84)
+    monkeypatch.setattr(settings, "RETRIEVAL_CALIBRATED_MODEL_KEY", "BAAI/bge-m3@" + "0" * 40)
+    other = (await search(client, w, w.t1, query=word)).json()
+    assert (other["threshold_calibrated"], other["threshold"]) == (False, 0.84)
+    assert other["model"] == calibrated["model"] == fake_embedder().model_id
+
+
+async def test_the_keyword_fields_are_filled_when_the_keyword_side_is_switched_on(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession, query_embedder: EmbedderSwitch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keyword side is off by default since 5d-5 but still works through the route when switched on."""
+    w = academic_world.a
+    word = canary()
+    seeded = await doc(raw_db, w, word)
+    monkeypatch.setattr(settings, "RETRIEVAL_RRF_KEYWORD_WEIGHT", 1.0)
+    body = (await search(client, w, w.t1, query=word)).json()
+    hit = next(h for h in body["hits"] if h["chunk_id"] == str(seeded.chunk_id(0)))
+    assert hit["keyword_rank"] == 1 and hit["keyword_matched_terms"] == 1
 
 
 async def test_the_rate_limit_counts_searches_and_answers_429_with_retry_after(

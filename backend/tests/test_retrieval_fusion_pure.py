@@ -5,7 +5,6 @@ Step 5d-4, the pure parts: weighted reciprocal rank fusion, the frequency-prunin
 query, and the new settings. No database, no model. Every new setting defaults to TODAY'S behaviour.
 """
 
-import dataclasses
 import uuid
 
 import pytest
@@ -146,19 +145,20 @@ def test_default_config_keeps_every_lexeme_without_frequencies() -> None:
 # ── settings and config: the defaults are neutral ────────────────────────────
 
 
-def test_the_new_defaults_change_nothing() -> None:
+def test_the_defaults_are_vector_only_since_5d5() -> None:
+    """Changed deliberately in 5d-5: the keyword weight default went from 1.0 (hybrid) to 0.0 (vector only); the
+    other three stay neutral. Explicit 1.0 / 1.0 still give the old hybrid (tests/test_retrieval_pruning.py)."""
     cfg = RetrievalConfig()
     assert (cfg.keyword_max_df, cfg.rrf_vector_weight, cfg.rrf_keyword_weight, cfg.keyword_min_matched_terms) == (
-        1.0, 1.0, 1.0, 1,
+        1.0, 1.0, 0.0, 1,
     )
     fresh = Settings(_env_file=None)  # type: ignore[call-arg]
     assert fresh.RETRIEVAL_KEYWORD_MAX_DF == 1.0
     assert fresh.RETRIEVAL_RRF_VECTOR_WEIGHT == 1.0
-    assert fresh.RETRIEVAL_RRF_KEYWORD_WEIGHT == 1.0
+    assert fresh.RETRIEVAL_RRF_KEYWORD_WEIGHT == 0.0
     assert fresh.RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS == 1
-    assert fresh.RETRIEVAL_MIN_SIMILARITY == 0.85, "this step does not touch the threshold"
-    from_settings = RetrievalConfig.from_settings(fresh)
-    assert dataclasses.replace(from_settings, threshold_calibrated=False) == RetrievalConfig()
+    assert fresh.RETRIEVAL_MIN_SIMILARITY == 0.84, "calibrated in 5d-5"
+    assert RetrievalConfig.from_settings(fresh) == RetrievalConfig()
 
 
 def test_the_config_validates_the_new_values() -> None:

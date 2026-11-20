@@ -1,5 +1,41 @@
-﻿Observation,Where seen,Why it matters,Action
-PPTX chunks have empty heading_path,React deck (49 chunks),Retrieval and citations lose the slide title as context,Fix only if the evaluation shows harm
-Some chunks are very small,React deck,Tiny chunks give weak embeddings and can crowd out better ones,Fix only if the evaluation shows harm
-Table-of-contents slide becomes a chunk,React deck,A TOC chunk can match many queries without answering any,Fix only if the evaluation shows harm
-Devanagari keyword search,Marathi DOCX,Keyword half of hybrid search may tokenise Devanagari poorly,Check in the 5d evaluation
+﻿#,Language,Question,Document,Expected location,Should answer,Verified by me,Notes
+1,English,What is React?,React_JS_Detailed_Notes_English.pptx,slide 2,Yes,FALSE,
+2,English,Why should I use React?,React_JS_Detailed_Notes_English.pptx,slide 3,Yes,FALSE,
+3,English,How does React work with the DOM?,React_JS_Detailed_Notes_English.pptx,slide 4-5,Yes,FALSE,"Answer spans two slides, so both chunks should be retrieved"
+4,English,How do I create a new React project?,React_JS_Detailed_Notes_English.pptx,slide 6,Yes,FALSE,
+5,English,What is JSX?,React_JS_Detailed_Notes_English.pptx,slide 8,Yes,FALSE,
+6,English,What are props in React?,React_JS_Detailed_Notes_English.pptx,slide 11,Yes,FALSE,
+7,English,What does the children prop do?,React_JS_Detailed_Notes_English.pptx,slide 12,Yes,FALSE,
+8,Marathi,Java ची वैशिष्ट्ये कोणती आहेत?,Java_Detailed_Notes_Marathi.docx,heading: Java ची ओळख आणि वैशिष्ट्ये,Yes,FALSE,Devanagari keyword search risk
+9,Marathi,"JDK, JRE आणि JVM मध्ये काय फरक आहे?",Java_Detailed_Notes_Marathi.docx,"heading: JDK, JRE आणि JVM",Yes,FALSE,
+10,Marathi,Java प्रोग्राम कसा चालवला जातो?,Java_Detailed_Notes_Marathi.docx,heading: Java प्रोग्राम चालण्याची प्रक्रिया,Yes,FALSE,
+11,Marathi,Type casting म्हणजे काय?,Java_Detailed_Notes_Marathi.docx,heading: Type Casting,Yes,FALSE,Mixed English and Marathi query
+12,Marathi,Variable चे प्रकार कोणते?,Java_Detailed_Notes_Marathi.docx,heading: Variable चे प्रकार,Yes,FALSE,
+13,English,What is the capital of France?,(none),(none),No,FALSE,Must be refused: out of scope
+14,English,Explain Angular routing,(none),(none),No,FALSE,Must be refused: React deck does not cover Angular
+15,English,How do I use Redux Toolkit?,(none),(none),No,FALSE,Hard negative: related to React. Check the deck really does not cover Redux
+16,English,What is Vue.js and how is it different?,(none),(none),No,FALSE,Hard negative: another frontend framework. Check the deck does not cover Vue
+17,English,What is photosynthesis?,(none),(none),No,FALSE,Off-topic
+18,English,How do I deploy a Django app?,(none),(none),No,FALSE,"Hard negative: web framework, not in the published documents"
+19,Marathi,Spring Boot म्हणजे काय?,(none),(none),No,FALSE,Hard negative: Java topic. Check the Marathi notes do not cover Spring Boot
+20,Marathi,Python मध्ये list कशी तयार करतात?,(none),(none),No,FALSE,Hard negative: the Python notes are not published for this class
+21,Marathi,भारताची राजधानी कोणती आहे?,(none),(none),No,FALSE,"Off-topic, Marathi"
+22,English,Who won the last cricket world cup?,(none),(none),No,FALSE,Off-topic
+23,Marathi,Java मध्ये class आणि object म्हणजे काय?,Java_Detailed_Notes_Marathi.docx,heading: Class आणि Object,Yes,FALSE,Mixed English and Marathi
+24,Marathi,Encapsulation म्हणजे काय?,Java_Detailed_Notes_Marathi.docx,heading: Encapsulation,Yes,FALSE,Exact term
+25,Marathi,Java मध्ये loops चे प्रकार कोणते?,Java_Detailed_Notes_Marathi.docx,heading: Loops,Yes,FALSE,
+26,Marathi,Method कसा तयार करतात आणि recursion म्हणजे काय?,Java_Detailed_Notes_Marathi.docx,heading: Methods आणि Recursion,Yes,FALSE,
+27,Marathi,Exception handling म्हणजे काय?,Java_Detailed_Notes_Marathi.docx,heading: Exception Handling,Yes,FALSE,Exact term
+28,Marathi,Garbage Collection कसे काम करते?,Java_Detailed_Notes_Marathi.docx,heading: JVM Memory आणि Garbage Collection,Yes,FALSE,Exact term
+29,Marathi,Scanner ने input कसे घेतात?,Java_Detailed_Notes_Marathi.docx,heading: Input/Output आणि Scanner,Yes,FALSE,Exact term
+30,English,How do I make a component remember a value between renders?,React_JS_Detailed_Notes_English.pptx,slide 13,Yes,FALSE,Paraphrase: shares few words with the slide
+31,English,What does useState return?,React_JS_Detailed_Notes_English.pptx,slide 13,Yes,FALSE,Exact term. Check whether useState is on slide 13 or 14
+32,English,How do I run code after a component renders?,React_JS_Detailed_Notes_English.pptx,slide 20,Yes,FALSE,Paraphrase
+33,English,What is the dependency array in useEffect for?,React_JS_Detailed_Notes_English.pptx,slide 20,Yes,FALSE,Exact term. Check the dependency array is on slide 20
+34,English,What is a component in React?,React_JS_Detailed_Notes_English.pptx,slide 10,Yes,FALSE,
+35,English,How do I render a list of items and what is the key prop for?,React_JS_Detailed_Notes_English.pptx,slide 17,Yes,FALSE,Exact term
+36,English,How do I show something only when a condition is true?,React_JS_Detailed_Notes_English.pptx,slide 16,Yes,FALSE,Paraphrase
+37,English,How do I handle a click event in React?,React_JS_Detailed_Notes_English.pptx,slide 15,Yes,FALSE,Exact term (onClick)
+38,English,What are React hooks?,React_JS_Detailed_Notes_English.pptx,slide 19,Yes,FALSE,
+39,English,How do I get data from an API in a React app?,React_JS_Detailed_Notes_English.pptx,slide 27,Yes,FALSE,Paraphrase
+40,English,How do I move between pages in a React app?,React_JS_Detailed_Notes_English.pptx,slide 26,Yes,FALSE,Paraphrase of routing

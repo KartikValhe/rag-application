@@ -35,6 +35,7 @@ from tests.test_eval_retrieval_db import (
     never_load,
     scripted_embedder,
     seed_world,
+    use_the_shipped_defaults,
 )
 
 
@@ -90,7 +91,7 @@ async def test_compare_runs_every_configuration_through_one_read_only_session_an
     assert out.count("too few to trust small differences") == 2
     assert "5 should-answer" in out and "3 should-not-answer" in out
     for fragment in ("current settings", "vector only", "vw=2 kw=1 df=0.5 mt=1", "English", "Marathi", "hit@1", "MRR",
-                     "answered", "refused", "RETRIEVAL_MIN_SIMILARITY = 0.85", "not calibrated"):
+                     "answered", "refused", "RETRIEVAL_MIN_SIMILARITY = 0.85", "calibrated on 2026-11-20"):
         assert fragment in out, fragment
     # ids, titles and numbers only
     written = (tmp_path / "report.json").read_text(encoding="utf-8")
@@ -149,7 +150,8 @@ async def test_compare_reads_the_current_settings_and_changes_none(
     report = read(tmp_path)
     current = report["runs"][0]
     assert (current["keyword_max_df"], current["vector_weight"], current["keyword_weight"]) == (0.5, 2.0, 1.0)
-    assert report["meta"]["threshold"] == 0.85 and report["meta"]["threshold_calibrated"] is False
+    # the scripted embedder carries the e5-small key, the model the threshold was calibrated for (5d-5)
+    assert report["meta"]["threshold"] == 0.85 and report["meta"]["threshold_calibrated"] is True
     assert settings.RETRIEVAL_KEYWORD_MAX_DF == 0.5 and settings.RETRIEVAL_RRF_VECTOR_WEIGHT == 2.0
     assert settings.RETRIEVAL_MIN_SIMILARITY == 0.85
 
@@ -180,3 +182,23 @@ async def test_a_normal_run_is_unchanged_and_still_prints_the_old_report(
     assert await eval_retrieval.run(args(w, tmp_path), embedder_loader=scripted_embedder) == 0
     out = capsys.readouterr().out
     assert "=== Retrieval evaluation ===" in out and "Threshold sweep" in out and "runs" not in read(tmp_path)
+
+
+async def test_with_the_shipped_defaults_the_current_row_is_the_vector_only_row(
+    academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5d-5: "current settings" uses the new defaults (keyword weight 0), so it ranks exactly like the
+    vector-only baseline; the grid rows still try the hybrid (keyword weight 1)."""
+    w, _, _ = await seed_world(raw_db, academic_world)
+    use_the_shipped_defaults(monkeypatch)
+    assert await eval_retrieval.run(args(w, tmp_path, "--compare", *SMALL_GRID), embedder_loader=scripted_embedder) == 0
+    out = capsys.readouterr().out
+    report = read(tmp_path)
+    current, baseline = report["runs"][0], report["runs"][1]
+    assert (current["keyword_weight"], current["vector_weight"], current["keyword_max_df"]) == (0.0, 1.0, 1.0)
+    assert report["meta"]["current_settings"]["rrf_keyword_weight"] == 0.0
+    assert current["overall"] == baseline["overall"] and (baseline["hit1_wins"], baseline["hit1_losses"]) == (0, 0)
+    assert all(r["keyword_weight"] == 1.0 for r in report["runs"][2:])
+    assert report["meta"]["threshold"] == 0.84 and report["meta"]["threshold_calibrated"] is True
+    assert "calibrated on 2026-11-20 for" in out and "not calibrated" not in out

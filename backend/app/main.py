@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
 from app.core.redis_client import close_redis, get_redis
+from app.services import retrieval
 
 try:
     import email_validator
@@ -42,6 +43,8 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Run startup and shutdown tasks."""
+    # One line with the retrieval threshold and whether it was calibrated for the configured model (5d-5).
+    retrieval.log_threshold_calibration()
     # Warm up Redis connection pool.
     await get_redis()
     yield

@@ -11,8 +11,14 @@ Step 5d-4 on SYNTHETIC documents (the test database, the academic_world fixture,
     candidates (no extra round trip);
   * when every lexeme is pruned the keyword side is skipped entirely (no keyword statement is even run);
   * RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS and the RRF weights do what they say;
-  * the DEFAULTS reproduce today's ids and scores exactly;
-  * prove-it: with pruning switched off, or the weights ignored, the same checks FAIL.
+  * explicit weights 1.0 / 1.0 still reproduce the OLD hybrid ids and scores exactly;
+  * step 5d-5: the DEFAULTS are vector only (keyword weight 0): no keyword statement and no frequency count is
+    executed, and the hits equal the old "keyword weight 0" results exactly (same ids, same scores);
+  * prove-it: with pruning switched off, the weights ignored, or the keyword side run at weight 0, the same
+    checks FAIL.
+
+The keyword machinery is switched OFF by default since 5d-5, so `config()` below starts from the settings with
+the keyword weight set to 1.0: these tests are about that machinery.
 
 The corpus (one document, 10 chunks, vector similarity to the query given in the comments):
   0  target   "A thing called inertia ..."            0.95   one "thing"
@@ -65,7 +71,14 @@ Check = Callable[[], Awaitable[None]]
 
 
 def config(**changes: Any) -> retrieval.RetrievalConfig:
+    """The settings with the keyword side ON (weight 1.0, the hybrid of 5d-4), plus `changes`."""
+    changes.setdefault("rrf_keyword_weight", 1.0)
     return dataclasses.replace(retrieval.RetrievalConfig.from_settings(), **changes)
+
+
+def production_defaults() -> retrieval.RetrievalConfig:
+    """The settings exactly as the API and the harness read them (vector only since 5d-5)."""
+    return retrieval.RetrievalConfig.from_settings()
 
 
 async def seed_corpus(raw_db: AsyncSession, w: WorldTenant) -> tuple[SeededDocument, ScriptedEmbedder]:
@@ -274,60 +287,134 @@ async def test_the_weights_change_the_fusion(academic_world: AcademicWorld, raw_
     await weights_decide_the_order(w, doc, embedder)
 
 
-async def test_a_zero_keyword_weight_is_the_vector_only_baseline_with_the_keyword_ranking_still_reported(
+async def test_a_zero_keyword_weight_is_the_vector_only_baseline_and_runs_no_keyword_side(
     academic_world: AcademicWorld, raw_db: AsyncSession
 ) -> None:
+    """Changed deliberately in 5d-5: before, the keyword side still ran at weight 0 (9 chunks ranked, no say).
+    Now a side without a say is not run at all, so nothing is ranked or reported for it."""
     w = academic_world.a
     doc, embedder = await seed_corpus(raw_db, w)
     result = await run_search(w, w.t1, "thing plank", embedder, config=config(rrf_keyword_weight=0.0))
     assert order(doc, result) == [0, 1, 2, 3, 4, 5]
-    assert len(result.keyword_ranked) == 9, "the keyword side still runs and is reported; it just has no say"
+    assert result.keyword_ranked == ()
+    assert all(h.keyword_rank is None and h.keyword_matched_terms is None for h in result.hits)
 
 
-# ── the defaults change nothing ──────────────────────────────────────────────
+# ── explicit 1.0 / 1.0 still reproduce the old hybrid ────────────────────────
 
-# What the unchanged code returned on this corpus (captured before 5d-4): chunk indexes in hit order.
+# What the code returned on this corpus with the old defaults (captured before 5d-4, kept through 5d-5):
+# chunk indexes in hit order with both weights 1.0.
 TODAY_THING_PLANK = [1, 2, 3, 0, 4, 5]
 TODAY_THING_CODE = [1, 2, 3, 0, 4, 5]
 
 
 @pytest.mark.parametrize(("query", "today"), [("thing plank", TODAY_THING_PLANK), ("thing zx9qk", TODAY_THING_CODE)])
-async def test_the_defaults_reproduce_todays_ids_and_scores_exactly(
+async def test_explicit_weights_one_and_one_reproduce_the_old_hybrid_ids_and_scores_exactly(
     academic_world: AcademicWorld, raw_db: AsyncSession, query: str, today: list[int]
 ) -> None:
+    """Regression for 5d-5: the old default (hybrid) is still one setting away, bit for bit."""
     w = academic_world.a
     doc, embedder = await seed_corpus(raw_db, w)
-    default = await run_search(w, w.t1, query, embedder)
-    assert order(doc, default) == today
-    for h in default.hits:  # the unweighted formula, bit for bit
+    hybrid = await run_search(
+        w, w.t1, query, embedder,
+        config=dataclasses.replace(production_defaults(), rrf_vector_weight=1.0, rrf_keyword_weight=1.0),
+    )
+    assert order(doc, hybrid) == today
+    assert len(hybrid.keyword_ranked) == 9, "the keyword side ran"
+    for h in hybrid.hits:  # the unweighted formula, bit for bit
         v, k = h.vector_rank, h.keyword_rank
         assert h.fused_score == (1.0 / (60 + v) if v else 0.0) + (1.0 / (60 + k) if k else 0.0)
     neutral = await run_search(
         w, w.t1, query, embedder,
         config=config(keyword_max_df=1.0, rrf_vector_weight=1.0, rrf_keyword_weight=1.0, keyword_min_matched_terms=1),
     )
-    assert neutral == default, "explicit neutral values are the same as not setting them"
-    assert default.keyword_coverage == neutral.keyword_coverage
+    assert neutral == hybrid, "explicit neutral values are the same as the old defaults"
 
 
-async def test_the_default_statements_carry_no_new_machinery(academic_world: AcademicWorld, raw_db: AsyncSession) -> None:
+# ── step 5d-5: the defaults are vector only ──────────────────────────────────
+
+# What the code returned BEFORE 5d-5 with the keyword weight set to 0 (the "vector only" row of --compare):
+# chunk indexes in hit order; each fused score was 1.0 / (60 + vector rank) + 0.0.
+TODAY_VECTOR_ONLY = [0, 1, 2, 3, 4, 5]
+
+
+@pytest.mark.parametrize("query", ["thing plank", "thing zx9qk", "thing"])
+async def test_the_defaults_equal_the_old_keyword_weight_zero_results_exactly(
+    academic_world: AcademicWorld, raw_db: AsyncSession, query: str
+) -> None:
+    """Same ids and same scores as the old code at keyword weight 0. The old code ran the keyword side and
+    gave it no say; fusing the keyword ranking of a hybrid run with weight 0 is exactly that computation."""
+    w = academic_world.a
+    doc, embedder = await seed_corpus(raw_db, w)
+    default = await run_search(w, w.t1, query, embedder, config=production_defaults())
+    assert order(doc, default) == TODAY_VECTOR_ONLY
+    assert [h.fused_score for h in default.hits] == [1.0 / (60 + p) + 0.0 for p in range(1, 7)]
+
+    hybrid = await run_search(w, w.t1, query, embedder, config=config())
+    assert hybrid.vector_ranked == default.vector_ranked, "the vector side is the same statement either way"
+    old = retrieval.select_hits(
+        retrieval.rrf_fuse(hybrid.vector_ranked, hybrid.keyword_ranked, 60, 1.0, 0.0), hybrid.vector_ranked, 6
+    )
+    assert [(h.chunk_id, h.fused_score, h.vector_rank) for h in default.hits] == [
+        (f.id, f.score, f.vector_rank) for f in old
+    ]
+    hybrid_sims = {h.chunk_id: h.vector_similarity for h in hybrid.hits}
+    shared = [h for h in default.hits if h.chunk_id in hybrid_sims]
+    assert shared and all(h.vector_similarity == hybrid_sims[h.chunk_id] for h in shared)
+    assert (default.sufficient, default.reason, default.max_similarity) == (
+        hybrid.sufficient, hybrid.reason, hybrid.max_similarity,
+    )
+
+
+async def default_runs_no_keyword_statement(w: WorldTenant, embedder: ScriptedEmbedder) -> None:
+    """The check the prove-it test runs with the keyword side forced on at weight 0."""
+    for cfg in (production_defaults(), dataclasses.replace(production_defaults(), keyword_max_df=0.3)):
+        assert cfg.rrf_keyword_weight == 0.0
+        joined = "\n".join(await recorded(w, embedder, "thing zx9qk", cfg))
+        assert "ts_rank_cd" not in joined, "no keyword statement is executed at weight 0"
+        assert ":tsq" not in joined and ":kcap" not in joined, "no keyword cap work"
+        assert "lexq" not in joined, "no per-word frequency count either (pruning has nothing to prune for)"
+        assert "content_tsv @@" not in joined
+
+
+async def test_the_default_runs_no_keyword_statement_at_all(academic_world: AcademicWorld, raw_db: AsyncSession) -> None:
     w = academic_world.a
     _, embedder = await seed_corpus(raw_db, w)
-    statements = await recorded(w, embedder, "thing plank", config())
-    joined = "\n".join(statements)
-    assert "lexq" not in joined and "min_terms" not in joined and joined.count("ts_rank_cd") == 1
+    await default_runs_no_keyword_statement(w, embedder)
+    hybrid = "\n".join(await recorded(w, embedder, "thing plank", config()))
+    assert hybrid.count("ts_rank_cd") == 1 and "lexq" not in hybrid and "min_terms" not in hybrid, (
+        "with the keyword weight 1.0 the statements are the old hybrid ones, with none of the 5d-4 machinery"
+    )
+
+
+async def test_prove_it_running_the_keyword_side_at_weight_zero_fails_the_check(
+    academic_world: AcademicWorld, raw_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = academic_world.a
+    _, embedder = await seed_corpus(raw_db, w)
+
+    async def check() -> None:
+        await default_runs_no_keyword_statement(w, embedder)
+
+    def always(cfg: retrieval.RetrievalConfig) -> bool:
+        return True
+
+    await on_then_off(check, lambda: monkeypatch.setattr(retrieval, "keyword_side_runs", always))
 
 
 async def test_settings_changes_reach_the_search(
     academic_world: AcademicWorld, raw_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RetrievalConfig.from_settings reads the four new settings (the API and the harness use it)."""
+    """RetrievalConfig.from_settings reads the 5d-4 settings (the API and the harness use it)."""
     from app.core.config import settings
 
     w = academic_world.a
     doc, embedder = await seed_corpus(raw_db, w)
+    monkeypatch.setattr(settings, "RETRIEVAL_RRF_KEYWORD_WEIGHT", 1.0)
+    noisy = await run_search(w, w.t1, "thing plank", embedder, config=production_defaults())
+    assert noisy.hits[0].chunk_id == doc.chunk_id(NOISE), "the keyword weight setting reached the search"
     monkeypatch.setattr(settings, "RETRIEVAL_KEYWORD_MAX_DF", 0.5)
-    result = await run_search(w, w.t1, "thing plank", embedder)
+    result = await run_search(w, w.t1, "thing plank", embedder, config=production_defaults())
     assert result.hits[0].chunk_id == doc.chunk_id(TARGET)
 
 

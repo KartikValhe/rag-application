@@ -291,7 +291,7 @@ The route's own two transactions (steps 2-4 and step 7) are closed while the mod
 
 `include_drafts: true` adds versions in status **`ready`** (never queued, processing, failed or archived); each hit carries `version_status`. Only this route can ask for drafts: a read scope (students, the chat layer) refuses them.
 
-**Hits are returned even when `sufficient` is false.** This is the teacher's view of what the search found; the chat entry point `search_for_chat` returns none in that case. `threshold_calibrated` stays `false` until a measured threshold replaces the default 0.85, and `model` names the embedding model the threshold belongs to.
+**Hits are returned even when `sufficient` is false.** This is the teacher's view of what the search found; the chat entry point `search_for_chat` returns none in that case. `model` names the active embedding model and `threshold` the setting (default `0.84`). Since 5d-5 `threshold_calibrated` is **derived**: `true` only when `model` equals `RETRIEVAL_CALIBRATED_MODEL_KEY` exactly (the model the threshold was measured for, section 12.9), `false` for any other model; the chat entry point `search_for_chat` reports it the same way. Since 5d-5 the search is **vector only** by default, so `keyword_rank` and `keyword_matched_terms` are `null` in every hit unless `RETRIEVAL_RRF_KEYWORD_WEIGHT` is set above 0 (the keys are always present).
 
 Every 503 and 422 message is a fixed text: never SQL, a file path, a library message or the query. The query is **never logged and never audited**; the route logs counts and timings only (`hits`, `flagged_hits`, `candidate_count`, `path`, `reason`, `k`, `include_drafts`, `duration_ms`). Body limit: the documents area rule (64 KB). Security headers as on every response.
 
@@ -363,6 +363,7 @@ FastAPI's `422` keeps its shape, `{"detail": [errors]}`, but an error now carrie
 - Every question goes through `retrieval.search`, the same service the API uses, with the settings of the environment it runs in (`RETRIEVAL_*`).
 - It prints and reports **ids, titles, file names, pages and headings only. Never chunk text.** (`ChunkRef` has no content field; a test checks the output and the report.) Titles and headings are untrusted text from uploaded files, so the console copy is cleaned of control characters.
 - It never sets a threshold. `RETRIEVAL_MIN_SIMILARITY` is read and shown; only `sufficient` follows it. The sweep (12.5) does not depend on it.
+- (5d-5) It says how the threshold was calibrated: `calibrated on <date> for <model key> using <N> should-answer / <M> should-not-answer questions` (from the record `retrieval.CALIBRATION`, 12.9) when the active model is the calibrated one, otherwise `WARNING: the threshold is not calibrated for this model`. With the keyword side off (the default) the keyword-only numbers are `n/a` (not measured, never shown as 0%).
 
 ### 12.2 How to run it
 
@@ -460,35 +461,38 @@ These are starting points, not decisions. How to choose:
 
 ### 12.6 Turning the chosen value into the setting (by hand; the harness never does)
 
+Done once in 5d-5 (12.9). For the next calibration:
+
 1. **Local run:** set `RETRIEVAL_MIN_SIMILARITY=<value>` in `backend/.env` (the environment of the API process) and restart the API. `.env` is never committed.
-2. **The default:** change `RETRIEVAL_MIN_SIMILARITY` in `backend/app/core/config.py` (default `0.85`) and the same line, with its UNCALIBRATED comment, in `backend/.env.example`; say in that comment which model, which date and how many golden questions the value comes from.
-3. **`threshold_calibrated=true`:** today this flag is **not a setting**. `RetrievalConfig.threshold_calibrated` (`app/services/retrieval.py`) is a dataclass default of `False` that `RetrievalConfig.from_settings` does not set, and the test-search response copies it. To report `true`, add a setting (for example `RETRIEVAL_THRESHOLD_CALIBRATED`, default `false`, with `.env.example` and a bounds test) and pass it in `from_settings`, or flip the dataclass default once the value is the default. This is a small follow-up step and was **not done in 5d-3** (backlog B105).
-4. **Tests that pin the uncalibrated default** change with it: `tests/test_retrieval_pure.py` (`cfg.min_similarity == settings.RETRIEVAL_MIN_SIMILARITY == 0.85` and `threshold_calibrated is False`), `tests/test_retrieval_quality.py` (`result.threshold == 0.85`) and `tests/test_test_search_contract.py` (`threshold_calibrated is False`).
-5. **The value belongs to the model** (`EMBEDDING_MODEL_ID`, response field `model`). A different model, or a different `query:` / `passage:` prefix, needs a new run and a new value. Record the model key, the date and the golden-set size next to the number.
-6. Run the harness again with the new setting: the answer rate and refusal accuracy at the current setting should match its row in the table, and the questions that fail should be the ones you accepted.
+2. **The default:** change `RETRIEVAL_MIN_SIMILARITY` in `backend/app/core/config.py` and `RetrievalConfig.min_similarity` in `app/services/retrieval.py`, and the same line with its comment in `backend/.env.example` (model, date, golden-set size).
+3. **The model:** `RETRIEVAL_CALIBRATED_MODEL_KEY` (config, `.env.example`, `RetrievalConfig.calibrated_model_key`) names the exact model key the value was measured for. `threshold_calibrated` is derived from it (`retrieval.is_threshold_calibrated`): `true` only when the active model key is that key. There is no flag to flip by hand (backlog B105, closed in 5d-5).
+4. **The record:** update `retrieval.CALIBRATION` (date, model key, threshold, should-answer / should-not-answer counts, documents, chunks) from the run. The harness prints it and `tests/test_retrieval_calibration.py` checks that it agrees with the defaults. Add the run to 12.9.
+5. **Tests that pin the default** change with it: `tests/test_retrieval_calibration.py`, `tests/test_retrieval_fusion_pure.py`, `tests/test_retrieval_pure.py`, `tests/test_retrieval_quality.py`, `tests/test_retrieval_calibration_db.py` and `tests/test_test_search_contract.py` (all assert `0.84`).
+6. **The value belongs to the model.** A different model, or a different `query:` / `passage:` prefix, needs a new run and a new value. Until then every response reports `threshold_calibrated: false`, the API logs a warning at startup (`retrieval_threshold ... calibrated=false`) and the harness prints a WARNING.
+7. Run the harness again with the new setting: the answer rate and refusal accuracy at the current setting should match its row in the table, and the questions that fail should be the ones you accepted.
 
 ### 12.7 Tests
 
-`tests/test_retrieval_eval_metrics.py` (fast: loader, matcher, metrics, sweep and report on a synthetic golden set), `tests/test_eval_retrieval_script.py` (fast: skips, malformed CSV, arguments, the operator-scope guard) and `tests/test_eval_retrieval_db.py` (db: the whole command on synthetic documents with a scripted embedder, READ ONLY refused writes, skips and errors). 5d-4 adds `tests/test_retrieval_fusion_pure.py` and `tests/test_retrieval_compare_pure.py` (fast), `tests/test_retrieval_pruning.py` and `tests/test_eval_retrieval_compare_db.py` (db). The real golden set and the real model are never used by a test.
+`tests/test_retrieval_eval_metrics.py` (fast: loader, matcher, metrics, sweep and report on a synthetic golden set), `tests/test_eval_retrieval_script.py` (fast: skips, malformed CSV, arguments, the operator-scope guard) and `tests/test_eval_retrieval_db.py` (db: the whole command on synthetic documents with a scripted embedder, READ ONLY refused writes, skips and errors). 5d-4 adds `tests/test_retrieval_fusion_pure.py` and `tests/test_retrieval_compare_pure.py` (fast), `tests/test_retrieval_pruning.py` and `tests/test_eval_retrieval_compare_db.py` (db). 5d-5 adds `tests/test_retrieval_calibration.py` and `tests/test_golden_set_fixture.py` (fast: the defaults, the derived flag, the startup line, the harness wording; the committed golden set parses with the harness parser, has at least 20 / 8 rows, both languages and only supported locations) and `tests/test_retrieval_calibration_db.py` (db: the derived flag at both entry points). No test runs the real model; the golden-set test only parses the file.
 
 ### 12.8 Comparing retrieval configurations: `--compare` (5d-4)
 
 **Why it exists.** The first real run (14 questions, 100 chunks, e5-small) showed the hybrid search doing **worse** than the vector side alone: Marathi hit@1 40% hybrid against 100% vector only, overall hit@1 67% against 92%, and keyword-only Marathi hit@1 20%. The hypothesis (to be tested with this table, not assumed): the keyword query is an OR of *every* word of the question, so very common words (ची, आहेत, कोणती, काय, what, is, the) match most chunks; `ts_rank_cd` has no inverse document frequency, so those chunks rank as if they were good matches; and reciprocal rank fusion gives the noisy keyword ranks the same weight as the vector ranks. Backlog B106.
 
-**The four settings (all default to today's behaviour; nothing changes until you choose values).**
+**The four settings.** In 5d-4 all four defaulted to the behaviour before 5d-4. **Since 5d-5 the keyword weight defaults to `0`** (vector only, 12.9); the other three are unchanged.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `RETRIEVAL_KEYWORD_MAX_DF` | `1.0` (off) | A word of the question that appears in **more than** this share of the candidate chunks of the scope is left out of the keyword query. Frequencies are counted over the candidate chunks of that class and subject (published, not excluded), in the same statement that already counts them: **no extra round trip**. If no word is left, the keyword side is **not run at all** and the answer comes from the vector side. No stopword list: a word is "common" because the material says so, in any language; a rare code or name (an error code, a person) has a low frequency and stays. Caution on a tiny class: with 10 chunks, a word in 6 of them is 0.6 |
 | `RETRIEVAL_RRF_VECTOR_WEIGHT` | `1.0` | Weight of the vector side in the fusion: `score = sum(weight_side / (RETRIEVAL_RRF_K + rank))`. Must be above 0 (the sufficiency decision reads the vector side) |
-| `RETRIEVAL_RRF_KEYWORD_WEIGHT` | `1.0` | Weight of the keyword side. `0` = the vector side alone (a chunk that only the keyword side lists is left out of the fusion; the keyword ranking is still computed and reported) |
+| `RETRIEVAL_RRF_KEYWORD_WEIGHT` | `0` (since 5d-5; was `1.0`) | Weight of the keyword side. `0` = the vector side alone: since 5d-5 the keyword statement is **not executed at all** (no keyword query, no keyword cap, no per-word frequency count), and the hits equal the old weight-0 results exactly (same ids, same scores). `1.0` with the vector weight `1.0` gives back the hybrid of 5d-1 to 5d-4 bit for bit (regression test) |
 | `RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS` | `1` | A chunk enters the keyword ranking only if it contains at least this many of the (remaining) question words. If fewer words remain than this, the keyword side does not run |
 
-**Defaults are neutral, and tested as such:** with the defaults the hit ids and the fused scores are the same numbers as before 5d-4 (the regression test compares them bit for bit with the unweighted formula, and was also run against the unchanged code), and the default SQL statements contain none of the new machinery. `RETRIEVAL_MIN_SIMILARITY` and `threshold_calibrated` are untouched.
+**Defaults (5d-4), then 5d-5.** In 5d-4 the defaults were neutral: the hit ids and fused scores were the numbers of before 5d-4 (compared bit for bit with the unweighted formula). Since 5d-5 the default is vector only; the old hybrid is still one setting away (`RETRIEVAL_RRF_KEYWORD_WEIGHT=1.0`), and a regression test proves that explicit weights 1.0 / 1.0 reproduce the old hybrid ids and scores exactly. A minimum keyword coverage above 0 needs the keyword side, so `RETRIEVAL_MIN_KEYWORD_COVERAGE > 0` together with keyword weight 0 is refused at startup (it would never fire).
 
 **What `--compare` does.** It runs the golden set once per configuration through the **same** `retrieval.search` (the configuration is overridden per run; there is no copy of the SQL), embeds every question **once**, stays **READ ONLY** and changes no setting. Rows of the table:
 
-1. `current settings`: the configuration exactly as the environment has it (the reference of every comparison);
+1. `current settings`: the configuration exactly as the environment has it (the reference of every comparison). With the 5d-5 defaults it is the same as `vector only`;
 2. `vector only`: the keyword weight set to 0, the baseline;
 3. the grid. Default: vector weight `vw` in {1, 2, 3} × keyword max document frequency `df` in {off, 0.5, 0.3, 0.2, 0.1} × keyword min matched terms `mt` in {1, 2} = 30 rows, the keyword weight `kw` fixed at 1.
 
@@ -511,3 +515,47 @@ python -m app.scripts.eval_retrieval `
 **After choosing:** put the values in `backend/.env` (the environment of the API process) and restart, then run the harness without `--compare` once: its numbers must equal the `current settings` row of the comparison. The normal report now also states the four values it ran with. If the best rows are still no better than `vector only`, the answer is to use `RETRIEVAL_RRF_KEYWORD_WEIGHT=0` (or a small weight) for now and to revisit the trigram question (backlog B92) with the comparison numbers.
 
 The JSON report of a comparison holds numbers only (one entry per configuration with `overall`, `by_language`, `answered`, `refused`, `hit1_wins`, `hit1_losses`, plus `sample` with the row counts and warnings); it holds no question text and no chunk text.
+
+### 12.9 Calibration record (5d-5)
+
+The value of `RETRIEVAL_MIN_SIMILARITY` and the vector-only default come from the owner's harness runs on the dev database. The same facts are in code as `retrieval.CALIBRATION` (`app/services/retrieval.py`), which the harness prints.
+
+| | |
+|---|---|
+| Date | 2026-11-20 |
+| Model key | `intfloat/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3` (`RETRIEVAL_CALIBRATED_MODEL_KEY`) |
+| Golden set | `backend/tests/fixtures/golden_set.csv`: 40 questions, **30 should-answer** (18 English, 12 Marathi) and **10 should-not-answer** (7 English, 3 Marathi) |
+| Corpus | tenant `acme`, one class and subject: 2 published documents (an English PPTX deck on React, Marathi DOCX notes on Java), 100 chunks |
+| `k` | 10 |
+
+**Retrieval (should-answer rows):**
+
+| Configuration | hit@1 | hit@3 | hit@5 | hit@10 | MRR |
+|---|---|---|---|---|---|
+| **Vector only (the new default)** | **83%** (English 78%, Marathi 92%) | 90% | 97% | 100% | **0.88** |
+| Hybrid, weights 1 / 1 (the old default) | 53% | | | | 0.69 |
+| Best hybrid with keyword pruning (`--compare` grid) | 73% | | | | 0.82 |
+| Keyword only | 17% | | | | |
+
+Empty cells were not recorded. Against the old default, vector only gained 9 questions at hit@1 and lost none (`+9/-0`). Hybrid lost on this set, so the keyword side is **switched off by default** (`RETRIEVAL_RRF_KEYWORD_WEIGHT=0`); its code and settings stay for a later exact-code search (backlog B92, B106).
+
+**Threshold sweep (vector only, best similarity of the returned hits):**
+
+| Threshold | Answer rate (of 30) | Refusal accuracy (of 10) |
+|---|---|---|
+| **0.84 (chosen)** | **97%** (29) | **70%** (7) |
+| 0.85 (the old default) | 90% (27) | 80% (8) |
+| 0.86 | 80% (24) | 90% (9) |
+
+**Decision: 0.84, on purpose.** Three valid questions score **0.840, 0.849 and 0.850** (borderline), while two hard negatives score **0.863** ("Explain Angular routing") and **0.856** ("How do I use Redux Toolkit?"). Both hard negatives score above all three borderline valid questions, so **no single threshold separates them**: refusing Redux needs about 0.86, which already drops the answer rate to 80%, and refusing Angular needs more. A refused real question is a visible failure for a student, so the threshold is set to answer (97%) and the **near-topic questions are left to the next layers**: the LLM grounding rule of Phase 6 must refuse a question the retrieved material does not answer, and the Phase 7 evaluation must test exactly these cases (backlog B108). The question at 0.840 sits on the threshold itself: a small change in the model, the chunking or the material can flip it.
+
+**Known hard negatives** (they pass the similarity gate at 0.84): "Explain Angular routing" (0.863) and "How do I use Redux Toolkit?" (0.856). Both are frameworks next to React, so the React deck is close to them in meaning without answering them.
+
+**When to recalibrate** (run 12.2 again and follow 12.6):
+
+- **a model change** (another `EMBEDDING_MODEL_ID` or revision, or other `query:` / `passage:` prefixes). Until a new value and `RETRIEVAL_CALIBRATED_MODEL_KEY` are set, every response says `threshold_calibrated: false`, the API logs a warning at startup and the harness prints a WARNING;
+- **a big new corpus**: much more material, other subjects, or other kinds of files (scanned PDFs, long notes) than the 2 documents and 100 chunks measured here;
+- **a new language** (Hindi, or more mixed-language questions): there are only 12 Marathi should-answer and 3 Marathi should-not-answer rows now;
+- **before launch**, on a larger golden set and per-tenant data (backlog B107).
+
+**How the flag is derived.** `threshold_calibrated` is `retrieval.is_threshold_calibrated(model_key, config)`: true only when the active model key equals `RETRIEVAL_CALIBRATED_MODEL_KEY` exactly (empty = no model is calibrated). It is computed in the one place every result is built, so the test search and `search_for_chat` both carry it. At startup the API logs one line, `retrieval_threshold`, with `threshold`, `calibrated_model_key`, `active_model_key` (read from `models.lock.json`; no model file is opened) and `calibrated` (a warning when false).

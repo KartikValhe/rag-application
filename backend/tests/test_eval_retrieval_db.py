@@ -144,8 +144,11 @@ def never_load() -> Any:
 
 @pytest.fixture(autouse=True)
 def _threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The numbers below were worked out for threshold 0.85 with both sides on (the 5d-3 / 5d-4 defaults), so
+    this file pins them; the 5d-5 defaults (0.84, vector only) have tests of their own at the end."""
     monkeypatch.setattr(settings, "RETRIEVAL_MIN_SIMILARITY", 0.85)
     monkeypatch.setattr(settings, "RETRIEVAL_MIN_KEYWORD_COVERAGE", 0.0)
+    monkeypatch.setattr(settings, "RETRIEVAL_RRF_KEYWORD_WEIGHT", 1.0)
 
 
 async def counts(db: AsyncSession) -> tuple[int, int, int, Any]:
@@ -186,7 +189,8 @@ async def test_the_command_runs_end_to_end_and_the_report_has_the_right_numbers(
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     meta = report["meta"]
     assert meta["tenant"] == w.tenant.slug and meta["k"] == 10
-    assert meta["threshold"] == 0.85 and meta["threshold_calibrated"] is False and meta["model"]
+    # the scripted embedder carries the e5-small key, the model the threshold was calibrated for (5d-5)
+    assert meta["threshold"] == 0.85 and meta["threshold_calibrated"] is True and meta["model"]
     assert meta["keyword_max_candidates"] == 2000 and "cannot drop a better match" in out, "B97: 5 chunks, cap 2000"
 
     # should-answer rows: 1 2 3 4 8; should-not-answer rows: 5 6 7
@@ -244,8 +248,10 @@ async def test_the_command_runs_end_to_end_and_the_report_has_the_right_numbers(
     for body in CHUNK_TEXTS:
         assert body not in out and body not in written
     for phrase in ("Biology Notes", "hit@1", "answer rate", "refusal accuracy", "best balanced threshold",
-                   "found but below the threshold", "wrong chunk", "not calibrated"):
+                   "found but below the threshold", "wrong chunk", "calibrated on 2026-11-20",
+                   "the measured value was 0.84"):
         assert phrase in out, phrase
+    assert "not calibrated" not in out
 
     assert await counts(raw_db) == before, "the harness changed nothing"
 
@@ -357,3 +363,57 @@ async def test_a_golden_question_that_cannot_be_searched_is_an_error_naming_the_
     err = capsys.readouterr().err
     assert "row 3" in err and code in err
     assert not (tmp_path / "report.json").exists()
+
+
+# ── step 5d-5: the new defaults (0.84, vector only) and the calibration line ─
+
+
+def use_the_shipped_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo this file's pins: the retrieval settings as a fresh Settings() has them (no .env)."""
+    from app.core.config import Settings
+
+    shipped = Settings(_env_file=None)  # type: ignore[call-arg]
+    for name in ("RETRIEVAL_MIN_SIMILARITY", "RETRIEVAL_RRF_KEYWORD_WEIGHT", "RETRIEVAL_RRF_VECTOR_WEIGHT",
+                 "RETRIEVAL_KEYWORD_MAX_DF", "RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS", "RETRIEVAL_CALIBRATED_MODEL_KEY"):
+        monkeypatch.setattr(settings, name, getattr(shipped, name))
+
+
+async def test_with_the_shipped_defaults_the_run_is_vector_only_and_calibrated(
+    academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    w, _, _ = await seed_world(raw_db, academic_world)
+    use_the_shipped_defaults(monkeypatch)
+    assert await eval_retrieval.run(args(w, tmp_path), embedder_loader=scripted_embedder) == 0
+    out = capsys.readouterr().out
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    meta = report["meta"]
+    assert meta["threshold"] == 0.84 and meta["threshold_calibrated"] is True
+    assert meta["fusion"]["rrf_keyword_weight"] == 0.0 and meta["keyword_side"] == "off"
+    assert meta["calibrated_model_key"] == meta["model"]
+    assert meta["calibration"] == {
+        "date": "2026-11-20", "model_key": meta["model"], "threshold": 0.84, "should_answer": 30,
+        "should_not_answer": 10, "documents": 2, "chunks": 100,
+    }
+    assert f"calibrated on 2026-11-20 for {meta['model']} using 30 should-answer / 10 should-not-answer questions" in out
+    assert "not calibrated" not in out and "measured value" not in out
+    overall = report["overall"]
+    assert overall["keyword_only_hit_at"] is None, "the keyword side did not run: not measured, not 0%"
+    assert overall["hit_at"] == overall["vector_only_hit_at"], "vector only: the hits are the vector ranking"
+    assert all(q["top"][0]["keyword_matched_terms"] is None for q in report["questions"] if q["top"])
+    assert "keyword side is switched off" in out
+
+
+async def test_another_model_than_the_calibrated_one_prints_a_warning(
+    academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    w, _, _ = await seed_world(raw_db, academic_world)
+    use_the_shipped_defaults(monkeypatch)
+    monkeypatch.setattr(settings, "RETRIEVAL_CALIBRATED_MODEL_KEY", "BAAI/bge-m3@" + "0" * 40)
+    assert await eval_retrieval.run(args(w, tmp_path), embedder_loader=scripted_embedder) == 0
+    out = capsys.readouterr().out
+    meta = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))["meta"]
+    assert meta["threshold_calibrated"] is False and meta["calibration"] is None
+    assert "WARNING: the threshold is not calibrated for this model" in out
+    assert "calibrated on" not in out

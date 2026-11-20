@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.ml.model_keys import E5_SMALL_MODEL_KEY
 from app.services import retrieval
 from app.services.retrieval import QueryError, RetrievalConfig
 
@@ -143,7 +144,8 @@ def test_sufficiency_reasons() -> None:
     assert decide(max_similarity=None) == (False, "below_threshold")
     # The keyword clause is OFF by default: full coverage alone is not enough
     assert decide(max_similarity=0.1, keyword_coverage=1.0) == (False, "below_threshold")
-    on = dataclasses.replace(CONFIG, min_keyword_coverage=0.6)
+    # the clause needs the keyword side switched on (off by default since 5d-5)
+    on = dataclasses.replace(CONFIG, min_keyword_coverage=0.6, rrf_keyword_weight=1.0)
     assert decide(max_similarity=0.1, keyword_coverage=0.6, config=on) == (True, "keyword_coverage")
     assert decide(max_similarity=0.1, keyword_coverage=0.59, config=on) == (False, "below_threshold")
     assert decide(max_similarity=0.9, keyword_coverage=1.0, config=on) == (True, "similarity")
@@ -159,13 +161,14 @@ def test_config_comes_from_settings_with_the_planned_defaults() -> None:
     assert cfg.final_k == settings.RETRIEVAL_FINAL_K == 6
     assert cfg.rrf_k == settings.RETRIEVAL_RRF_K == 60
     assert cfg.max_query_chars == settings.RETRIEVAL_MAX_QUERY_CHARS == 500
-    assert cfg.min_similarity == settings.RETRIEVAL_MIN_SIMILARITY == 0.85
+    assert cfg.min_similarity == settings.RETRIEVAL_MIN_SIMILARITY == 0.84  # calibrated in 5d-5
     assert cfg.min_keyword_coverage == settings.RETRIEVAL_MIN_KEYWORD_COVERAGE == 0.0
     assert cfg.exact_max_candidates == settings.RETRIEVAL_EXACT_MAX_CANDIDATES == 50_000
     assert cfg.hnsw_ef_search == settings.RETRIEVAL_HNSW_EF_SEARCH == 100
     assert cfg.statement_timeout_ms == settings.RETRIEVAL_STATEMENT_TIMEOUT_MS == 5000
     assert cfg.keyword_max_candidates == settings.RETRIEVAL_KEYWORD_MAX_CANDIDATES == 2000
-    assert cfg.threshold_calibrated is False, "the 0.85 default is not calibrated until the 5d-3 sweep replaces it"
+    # 5d-5: calibrated for one model; whether a result is calibrated is derived from its model key
+    assert cfg.calibrated_model_key == settings.RETRIEVAL_CALIBRATED_MODEL_KEY == E5_SMALL_MODEL_KEY
 
 
 def test_read_purpose_can_never_include_drafts() -> None:

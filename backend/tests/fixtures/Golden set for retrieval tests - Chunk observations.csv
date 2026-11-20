@@ -1,0 +1,5 @@
+﻿Observation,Where seen,Why it matters,Action
+PPTX chunks have empty heading_path,React deck (49 chunks),Retrieval and citations lose the slide title as context,Fix only if the evaluation shows harm
+Some chunks are very small,React deck,Tiny chunks give weak embeddings and can crowd out better ones,Fix only if the evaluation shows harm
+Table-of-contents slide becomes a chunk,React deck,A TOC chunk can match many queries without answering any,Fix only if the evaluation shows harm
+Devanagari keyword search,Marathi DOCX,Keyword half of hybrid search may tokenise Devanagari poorly,Check in the 5d evaluation

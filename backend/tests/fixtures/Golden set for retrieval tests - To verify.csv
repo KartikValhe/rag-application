@@ -1,0 +1,11 @@
+﻿#,Language,Question,Document,Search the file for,Expected location (you fill in),Covered? (Yes/No),Notes
+30,English,How do I make a component remember a value between renders?,React_JS_Detailed_Notes_English.pptx,"state, useState",,,Paraphrase: shares few words with the slide
+31,English,What does useState return?,React_JS_Detailed_Notes_English.pptx,useState,,,Exact term
+32,English,How do I run code after a component renders?,React_JS_Detailed_Notes_English.pptx,"useEffect, effect",,,Paraphrase
+33,English,What is the dependency array in useEffect for?,React_JS_Detailed_Notes_English.pptx,"dependency, array",,,Exact term
+34,English,What is the virtual DOM?,React_JS_Detailed_Notes_English.pptx,virtual DOM,,,"Probably slide 4-5, same as #3. Check"
+35,English,What is a component in React?,React_JS_Detailed_Notes_English.pptx,component,,,
+36,English,How do I render a list of items and what is the key prop for?,React_JS_Detailed_Notes_English.pptx,"key, list, map",,,Exact term
+37,English,How do I show something only when a condition is true?,React_JS_Detailed_Notes_English.pptx,conditional,,,Paraphrase
+38,English,How do I handle a click event in React?,React_JS_Detailed_Notes_English.pptx,"onClick, event",,,Exact term
+39,English,What are React hooks?,React_JS_Detailed_Notes_English.pptx,hooks,,,

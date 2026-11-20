@@ -160,10 +160,16 @@ class Settings(BaseSettings):
     RETRIEVAL_FINAL_K: int = Field(default=6, ge=1, le=50)  # chunks kept after fusion
     RETRIEVAL_RRF_K: int = Field(default=60, ge=1, le=1000)  # reciprocal rank fusion constant
     RETRIEVAL_MAX_QUERY_CHARS: int = Field(default=500, ge=1, le=4000)  # measured after cleaning
-    # UNCALIBRATED. Cosine similarity of the best vector hit needed to call the material sufficient. It belongs to
-    # the active embedding model (a model change needs a new value); the 5d-3 threshold sweep replaces it.
-    RETRIEVAL_MIN_SIMILARITY: float = Field(default=0.85, ge=0.0, le=1.0)
+    # Cosine similarity of the best vector hit needed to call the material sufficient. CALIBRATED in step 5d-5
+    # (2026-11-20) for RETRIEVAL_CALIBRATED_MODEL_KEY on a golden set of 30 should-answer / 10 should-not-answer
+    # questions: 0.84 answers 97% and refuses 70% (docs/api/phase5.md section 12). It belongs to that model: another
+    # model needs a new sweep, and until then every response says threshold_calibrated = false.
+    RETRIEVAL_MIN_SIMILARITY: float = Field(default=0.84, ge=0.0, le=1.0)
+    # The embedding model RETRIEVAL_MIN_SIMILARITY was measured for. threshold_calibrated is true only when the
+    # active model key equals this one exactly; empty means no model is calibrated.
+    RETRIEVAL_CALIBRATED_MODEL_KEY: str = "intfloat/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3"
     # Share of the query's words found in one keyword hit that also counts as sufficient. 0 switches it off.
+    # Above 0 it needs the keyword side (RETRIEVAL_RRF_KEYWORD_WEIGHT above 0), or nothing would measure it.
     RETRIEVAL_MIN_KEYWORD_COVERAGE: float = Field(default=0.0, ge=0.0, le=1.0)
     # Up to this many candidate chunks the vector side is an exact scan; above it the HNSW index is used.
     RETRIEVAL_EXACT_MAX_CANDIDATES: int = Field(default=50_000, ge=0)
@@ -172,15 +178,17 @@ class Settings(BaseSettings):
     RETRIEVAL_STATEMENT_TIMEOUT_MS: int = Field(default=5000, ge=1, le=600_000)
     # The keyword side ranks at most this many matching chunks (the lowest ids); must be >= RETRIEVAL_KEYWORD_K
     RETRIEVAL_KEYWORD_MAX_CANDIDATES: int = Field(default=2000, ge=1, le=1_000_000)
-    # Step 5d-4 (found by the first real evaluation: the keyword side added noise). All four DEFAULT TO TODAY'S
-    # BEHAVIOUR; choose values from the `eval_retrieval --compare` table (docs/api/phase5.md section 12).
+    # Step 5d-4 (found by the first real evaluation: the keyword side added noise); step 5d-5 switched the keyword
+    # side OFF by default, because hybrid lost to vector only on the golden set (hit@1 53-73% against 83%). The
+    # keyword code stays, switched off, for later (exact-code search); `eval_retrieval --compare` still tries it.
     # Keyword words that are in MORE than this share of the candidate chunks are left out of the keyword query
     # (language independent, no stopword list). 1.0 = off. If every word is left out, only the vector side runs.
     RETRIEVAL_KEYWORD_MAX_DF: float = Field(default=1.0, ge=0.0, le=1.0)
     # Reciprocal rank fusion: score = sum of weight / (RETRIEVAL_RRF_K + rank) over the two sides. The vector
-    # weight must stay above 0 (the sufficiency decision reads the vector side); the keyword weight 0 = vector only.
+    # weight must stay above 0 (the sufficiency decision reads the vector side). Keyword weight 0 (the default) =
+    # vector only: the keyword statement is then not run at all. 1.0 / 1.0 is the hybrid of 5d-1 to 5d-4.
     RETRIEVAL_RRF_VECTOR_WEIGHT: float = Field(default=1.0, gt=0.0, le=100.0)
-    RETRIEVAL_RRF_KEYWORD_WEIGHT: float = Field(default=1.0, ge=0.0, le=100.0)
+    RETRIEVAL_RRF_KEYWORD_WEIGHT: float = Field(default=0.0, ge=0.0, le=100.0)
     # A chunk is ranked by the keyword side only if it matches at least this many of the (pruned) query words.
     RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS: int = Field(default=1, ge=1, le=64)
     # Query embeddings running at once in one API process (a semaphore, and the size of their own thread pool).
@@ -266,6 +274,10 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_HNSW_EF_SEARCH must be at least RETRIEVAL_VECTOR_K")
         if self.RETRIEVAL_KEYWORD_MAX_CANDIDATES < self.RETRIEVAL_KEYWORD_K:
             raise ValueError("RETRIEVAL_KEYWORD_MAX_CANDIDATES must be at least RETRIEVAL_KEYWORD_K")
+        if self.RETRIEVAL_MIN_KEYWORD_COVERAGE > 0 and self.RETRIEVAL_RRF_KEYWORD_WEIGHT == 0:
+            raise ValueError(
+                "RETRIEVAL_MIN_KEYWORD_COVERAGE above 0 needs the keyword side: set RETRIEVAL_RRF_KEYWORD_WEIGHT above 0"
+            )
         return self
 
     @model_validator(mode="after")

@@ -22,7 +22,8 @@ It never sees chunk text: ChunkRef has no content field, so a report cannot leak
 headings are untrusted text from uploaded files; the console summary cleans them with safe_text.
 
 It decides nothing: no threshold is hard-coded here (the sweep range 0.70 to 0.95 is only the range of the
-table). The owner reads the table and sets RETRIEVAL_MIN_SIMILARITY.
+table). The owner reads the table and sets RETRIEVAL_MIN_SIMILARITY. How the current value was calibrated comes in
+through the meta (retrieval.CALIBRATION, step 5d-5) and is printed by calibration_note.
 """
 
 from __future__ import annotations
@@ -517,11 +518,17 @@ def _sweep_section(results: Sequence[QuestionResult], signal: str) -> dict[str, 
 
 def build_report(results: Sequence[QuestionResult], *, cutoff: int, meta: dict[str, Any]) -> dict[str, Any]:
     """Everything, as plain JSON-able data. `meta` is the caller's description of the run (tenant, ids, model,
-    the configured threshold, the corpus); it is copied in as given."""
+    the configured threshold, the corpus); it is copied in as given. With meta["keyword_side"] == "off" the
+    keyword-only hit rates are None (the keyword side did not run, so they were not measured)."""
+    overall = aggregate(results, cutoff)
+    languages = by_language(results, cutoff)
+    if meta.get("keyword_side") == "off":  # nothing ran on that side: not measured, which is not 0%
+        for group in (overall, *languages.values()):
+            group["keyword_only_hit_at"] = None
     return {
         "meta": meta,
-        "overall": aggregate(results, cutoff),
-        "by_language": by_language(results, cutoff),
+        "overall": overall,
+        "by_language": languages,
         "questions": [r.to_dict() for r in results],
         "sweep": _sweep_section(results, "similarity"),
         "keyword_coverage_sweep": _sweep_section(results, "keyword_coverage"),
@@ -569,6 +576,40 @@ def _hit_columns(metrics: dict[str, Any], ks: Sequence[str]) -> str:
     return "  ".join(f"{_pct(hits[k]) if hits else 'n/a':>6}" for k in ks)
 
 
+def calibration_note(meta: dict[str, Any]) -> str:
+    """How the threshold of this run was calibrated (step 5d-5), from the run's meta: the record (date, model,
+    golden-set size) when the model is the calibrated one, or why it is not calibrated."""
+    threshold = meta.get("threshold")
+    record = meta.get("calibration")
+    if meta.get("threshold_calibrated") and isinstance(record, dict):
+        note = (
+            f"calibrated on {record.get('date')} for {safe_text(str(record.get('model_key')), 100)} using "
+            f"{record.get('should_answer')} should-answer / {record.get('should_not_answer')} should-not-answer questions"
+        )
+        if threshold != record.get("threshold"):
+            note += f"; the measured value was {record.get('threshold')}, this run uses {threshold}"
+        return note
+    if meta.get("threshold_calibrated"):
+        return (
+            f"calibrated for {safe_text(str(meta.get('model')), 100)} (RETRIEVAL_CALIBRATED_MODEL_KEY); "
+            "no calibration record for this model in the code"
+        )
+    return (
+        "not calibrated for this model: the threshold was calibrated for "
+        f"{safe_text(str(meta.get('calibrated_model_key') or 'no model'), 100)}"
+    )
+
+
+def _calibration_lines(meta: dict[str, Any], prefix: str) -> list[str]:
+    lines = [f"{prefix}RETRIEVAL_MIN_SIMILARITY = {meta.get('threshold')} ({calibration_note(meta)})"]
+    if not meta.get("threshold_calibrated"):
+        lines.append(
+            f"  WARNING: the threshold is not calibrated for this model ({safe_text(str(meta.get('model')), 100)}); "
+            "answer and refusal numbers at it are not a measured setting (docs/api/phase5.md section 12)"
+        )
+    return lines
+
+
 def format_console(report: dict[str, Any]) -> str:
     """The summary the command prints at the end: what was measured, what the numbers mean, which questions
     failed and why, and the threshold sweep. Titles and headings come from uploaded files and are cleaned."""
@@ -590,17 +631,18 @@ def format_console(report: dict[str, Any]) -> str:
         lines.append(f"  - {safe_text(d['title'], 60)} ({safe_text(d['original_filename'], 40)}): "
                      f"{d['chunks']} chunks, {d['flagged']} flagged")
     cap = meta.get("keyword_max_candidates")
-    if isinstance(cap, int) and corpus:
+    keyword_off = meta.get("keyword_side") == "off"
+    if keyword_off:
+        lines.append("Keyword cap (backlog B97): not used, the keyword side is switched off")
+    elif isinstance(cap, int) and corpus:
         chunks = corpus.get("chunks", 0)
         lines.append(
             f"Keyword cap (backlog B97): the keyword side ranks at most {cap} matching chunks; this scope has "
             f"{chunks}, so the cap {'CAN' if chunks > cap else 'cannot'} drop a better match here"
             + (" (check the keyword-only numbers below)" if chunks > cap else "")
         )
-    calibrated = meta.get("threshold_calibrated")
     lines.append("")
-    lines.append(f"Current setting: RETRIEVAL_MIN_SIMILARITY = {threshold} "
-                 f"({'calibrated' if calibrated else 'not calibrated yet: a default, not a measured value'})")
+    lines += _calibration_lines(meta, "Current setting: ")
     fusion = meta.get("fusion")
     if isinstance(fusion, dict):
         df = fusion.get("keyword_max_df")
@@ -640,8 +682,12 @@ def format_console(report: dict[str, Any]) -> str:
         kw_cols = "  ".join(f"{_pct(kw[k]) if kw else 'n/a':>9}" for k in ks)
         vec_cols = "  ".join(f"{_pct(vec[k]) if vec else 'n/a':>8}" for k in ks)
         lines.append(f"  {safe_text(name, 14):<14} {kw_cols}  {vec_cols}")
-    lines.append("  If a language's keyword-only hit rate is far below its vector-only rate, inflected words are being")
-    lines.append("  missed by the keyword side; that is the case for the trigram proposal (B92).")
+    if keyword_off:
+        lines.append("  The keyword side is switched off (RETRIEVAL_RRF_KEYWORD_WEIGHT = 0), so its numbers were not")
+        lines.append("  measured (n/a); the hits above are the vector ranking. `--compare` still runs hybrid rows.")
+    else:
+        lines.append("  If a language's keyword-only hit rate is far below its vector-only rate, inflected words are being")
+        lines.append("  missed by the keyword side; that is the case for the trigram proposal (B92).")
 
     failed = [q for q in report["questions"] if q["outcome"] not in (OK, REFUSED_CORRECTLY)]
     lines += ["", f"Questions that failed: {len(failed)} of {len(report['questions'])}"]
@@ -890,11 +936,7 @@ def format_compare(report: dict[str, Any]) -> str:
         "should-not-answer row(s)"
     )
     lines += [f"  WARNING: {w}" for w in sample["warnings"]]
-    calibrated = meta.get("threshold_calibrated")
-    lines.append(
-        f"Answer and refusal numbers use the current setting RETRIEVAL_MIN_SIMILARITY = {meta.get('threshold')} "
-        f"({'calibrated' if calibrated else 'not calibrated yet: a default, not a measured value'})"
-    )
+    lines += _calibration_lines(meta, "Answer and refusal numbers use the current setting ")
     group_names = ["ALL", *(safe_text(name, 10) for name in languages)]
     group_head = " | ".join(f"{name:<27}" for name in group_names)
     column_head = " | ".join(f"{'hit@1':>5} {'hit@3':>5} {'hit@5':>5} {'MRR':>5}".ljust(27) for _ in group_names)

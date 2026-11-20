@@ -17,6 +17,7 @@ from app.core.tenant_db import tenant_session_context
 from app.services import retrieval
 from tests.fixtures.academic_world import AcademicWorld
 from tests.fixtures.retrieval_world import fake_embedder, seed_document
+from tests.security.retrieval_assertions import search_config
 
 HOSTILE = [
     "'; DROP TABLE app.chunks; --",
@@ -44,7 +45,7 @@ async def _recorded_search(w: Any, query: str) -> tuple[retrieval.RetrievalResul
         db.execute = recording_execute  # type: ignore[method-assign]
         result = await retrieval.search(
             db, scope, query, retrieval.QueryEmbedder.from_embedder(fake_embedder()),
-            retrieval.RetrievalConfig.from_settings(),
+            search_config(),
         )
     return result, statements
 

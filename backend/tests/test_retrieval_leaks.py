@@ -43,6 +43,7 @@ from tests.security.retrieval_assertions import (
     assert_canary_present,
     assert_only_chunks,
     run_search,
+    search_config,
 )
 
 FINAL_K = retrieval.RetrievalConfig.from_settings().final_k
@@ -221,7 +222,7 @@ async def test_a_publish_committed_between_the_count_and_the_search_shows_one_ve
         db.execute = execute_then_publish  # type: ignore[method-assign]
         result = await retrieval.search(
             db, scope, f"{old} {new}", retrieval.QueryEmbedder.from_embedder(fake_embedder()),
-            retrieval.RetrievalConfig.from_settings(),
+            search_config(),
         )
     assert published == [True], "the publish ran between the two statements"
     assert result.candidate_count == 1, "the count statement saw v1 (one chunk)"

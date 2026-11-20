@@ -10,8 +10,13 @@ keyword side's ranked list. A chunk below the final cut (rank 7 and lower) is st
 also asserts that neither ranked list was cut at its limit (vector_k / keyword_k), so a leaked chunk can
 not hide below the ranked lists either: the vector side then lists every candidate with an active-model
 vector, and the keyword side every candidate that matches a query word.
+
+Since step 5d-5 the keyword side is OFF by default (vector only), but its SQL stays in the code. So the helpers
+here search with BOTH sides on unless a test passes its own config (search_config): a leak through either side
+is still caught, and the default (vector-only) statement is a subset of the hybrid one.
 """
 
+import dataclasses
 import uuid
 from collections.abc import Iterable
 from typing import Any
@@ -23,6 +28,11 @@ from app.db.models.user import User
 from app.services import retrieval
 from tests.fixtures.academic_world import WorldTenant
 from tests.fixtures.retrieval_world import SeededDocument
+
+
+def search_config() -> retrieval.RetrievalConfig:
+    """The settings with the keyword side switched ON (weight 1.0), so both sides run (see the module docstring)."""
+    return dataclasses.replace(retrieval.RetrievalConfig.from_settings(), rrf_keyword_weight=1.0)
 
 
 async def run_search(
@@ -38,14 +48,15 @@ async def run_search(
     config: retrieval.RetrievalConfig | None = None,
     k: int | None = None,
 ) -> retrieval.RetrievalResult:
-    """Build the caller's scope and search, both in ONE tenant transaction as app_tenant (RLS on)."""
+    """Build the caller's scope and search, both in ONE tenant transaction as app_tenant (RLS on). Without a
+    config both sides run (search_config)."""
     async with tenant_session_context(str(wt.id)) as db:
         scope = await retrieval.build_retrieval_scope(
             db, user, purpose=purpose, class_id=class_id, subject_id=subject_id, include_drafts=include_drafts
         )
         return await retrieval.search(
             db, scope, query, retrieval.QueryEmbedder.from_embedder(embedder),
-            config or retrieval.RetrievalConfig.from_settings(), k=k,
+            config or search_config(), k=k,
         )
 
 
@@ -55,7 +66,7 @@ async def search_in_session(
 ) -> retrieval.RetrievalResult:
     """Search in a session the caller opened (the prove-it test passes a privileged session here)."""
     return await retrieval.search(
-        db, scope, query, retrieval.QueryEmbedder.from_embedder(embedder), config or retrieval.RetrievalConfig.from_settings()
+        db, scope, query, retrieval.QueryEmbedder.from_embedder(embedder), config or search_config()
     )
 
 
@@ -76,7 +87,7 @@ def _ids(chunks: Iterable[uuid.UUID] | SeededDocument) -> set[uuid.UUID]:
 
 def assert_nothing_hidden(result: retrieval.RetrievalResult, config: retrieval.RetrievalConfig | None = None) -> None:
     """Neither ranked list reached its limit, so every chunk the search could reach is in one of them."""
-    cfg = config or retrieval.RetrievalConfig.from_settings()
+    cfg = config or search_config()
     assert len(result.vector_ranked) < cfg.vector_k, "the vector side was cut: a leaked chunk could hide below it"
     assert len(result.keyword_ranked) < cfg.keyword_k, "the keyword side was cut: a leaked chunk could hide below it"
 

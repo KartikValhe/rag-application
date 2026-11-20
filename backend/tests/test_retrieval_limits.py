@@ -34,7 +34,7 @@ from tests.fixtures.retrieval_world import (
     fake_embedder,
     seed_document,
 )
-from tests.security.retrieval_assertions import run_search
+from tests.security.retrieval_assertions import run_search, search_config
 
 SLOW_COUNT_TAIL = "\nSELECT (SELECT count(*) FROM cand) FROM pg_sleep(0.4)"
 HNSW_INDEX = "ix_chunk_embeddings_hnsw_e5_small"
@@ -49,7 +49,7 @@ async def _seed(raw_db: AsyncSession, w: WorldTenant, n: int = 3) -> None:
 
 
 async def _slow_search(w: WorldTenant, timeout_ms: int) -> retrieval.RetrievalResult:
-    cfg = dataclasses.replace(retrieval.RetrievalConfig.from_settings(), statement_timeout_ms=timeout_ms)
+    cfg = dataclasses.replace(search_config(), statement_timeout_ms=timeout_ms)
     return await run_search(w, w.t1, "fractions secretquerytext", fake_embedder(), config=cfg)
 
 
@@ -97,7 +97,7 @@ async def test_the_timeout_is_set_before_the_count_and_restored_after_the_search
             return await real_execute(statement, *args, **kwargs)
 
         db.execute = spy  # type: ignore[method-assign]
-        cfg = dataclasses.replace(retrieval.RetrievalConfig.from_settings(), statement_timeout_ms=1234)
+        cfg = dataclasses.replace(search_config(), statement_timeout_ms=1234)
         await retrieval.search(db, scope, "fractions", retrieval.QueryEmbedder.from_embedder(fake_embedder()), cfg)
         db.execute = real_execute  # type: ignore[method-assign]
         after = (await db.execute(text("SELECT current_setting('statement_timeout')"))).scalar_one()
@@ -124,7 +124,7 @@ async def test_the_keyword_side_ranks_at_most_the_capped_candidates(
             *(ChunkSpec(f"capword capword capword {i}", id=i_d) for i, i_d in enumerate(high)),
         ],
     )
-    base = retrieval.RetrievalConfig.from_settings()
+    base = search_config()
     capped = await run_search(w, w.t1, "capword", embedder, config=dataclasses.replace(base, keyword_k=3, keyword_max_candidates=3))
     assert set(capped.keyword_ranked) == set(low)
     uncapped = await run_search(w, w.t1, "capword", embedder, config=dataclasses.replace(base, keyword_k=3))
@@ -145,7 +145,7 @@ async def test_a_zero_stored_vector_never_reaches_the_vector_side(
         chunks=[ChunkSpec("Zero vector chunk nanword.", vector=[0.0] * E5_SMALL_DIM),
                 ChunkSpec("A normal chunk.", vector=axis_vector(0.5, 1))],
     )
-    cfg = retrieval.RetrievalConfig.from_settings()
+    cfg = search_config()
     if hnsw:
         cfg = dataclasses.replace(cfg, exact_max_candidates=0)
     result = await run_search(w, w.t1, "nanword", embedder, config=cfg)
@@ -160,7 +160,7 @@ async def test_a_zero_stored_vector_never_reaches_the_vector_side(
 
 
 def _hnsw_config() -> retrieval.RetrievalConfig:
-    return dataclasses.replace(retrieval.RetrievalConfig.from_settings(), exact_max_candidates=0)
+    return dataclasses.replace(search_config(), exact_max_candidates=0)
 
 
 async def test_the_hnsw_settings_are_read_back_and_stay_transaction_local(

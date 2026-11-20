@@ -37,7 +37,12 @@ from tests.fixtures.retrieval_world import (
     seed_distractors,
     seed_document,
 )
-from tests.security.retrieval_assertions import assert_absent, assert_present, run_search
+from tests.security.retrieval_assertions import (
+    assert_absent,
+    assert_present,
+    run_search,
+    search_config,
+)
 
 
 def _canary() -> str:
@@ -183,7 +188,7 @@ async def test_vectors_of_the_same_model_key_with_another_dimension_are_ignored(
     (the partial HNSW index makes an e5-small row of another dimension impossible to store). (2) Under a
     custom key with rows of two dimensions, each query dimension sees only its own rows."""
     w = academic_world.a
-    cfg = dataclasses.replace(retrieval.RetrievalConfig.from_settings(), exact_max_candidates=0 if hnsw else 50_000)
+    cfg = dataclasses.replace(search_config(), exact_max_candidates=0 if hnsw else 50_000)
     e5 = await seed_document(raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, embedder=fake_embedder(),
                              chunks=["Dimension test fractions."])
     small = ScriptedEmbedder({}, dim=8, model_id=E5_SMALL_MODEL_KEY)

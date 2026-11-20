@@ -29,7 +29,7 @@ from tests.fixtures.retrieval_world import (
     fake_embedder,
     seed_document,
 )
-from tests.security.retrieval_assertions import run_search
+from tests.security.retrieval_assertions import run_search, search_config
 
 ENGLISH_CHUNKS = [
     "Osmosis is the movement of water across a semi permeable membrane from low to high solute concentration.",
@@ -145,12 +145,13 @@ async def test_below_the_threshold_the_result_is_insufficient(academic_world: Ac
     w = academic_world.a
     embedder = ScriptedEmbedder({})
     await seed_document(raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, embedder=embedder,
-                        chunks=[ChunkSpec("Unrelated text.", vector=axis_vector(0.84, 1))])
+                        chunks=[ChunkSpec("Unrelated text.", vector=axis_vector(0.83, 1))])
     result = await run_search(w, w.t1, "anything at all", embedder)
     assert result.sufficient is False and result.reason == "below_threshold"
     assert result.message == retrieval.INSUFFICIENT_MESSAGE
-    assert result.max_similarity is not None and abs(result.max_similarity - 0.84) < 1e-4
-    assert result.threshold == 0.85 and result.threshold_calibrated is False
+    assert result.max_similarity is not None and abs(result.max_similarity - 0.83) < 1e-4
+    # 5d-5: the default is 0.84, calibrated for the e5-small key the scripted embedder carries
+    assert result.threshold == 0.84 and result.threshold_calibrated is True
     assert result.hits, "the hits are still shown to the teacher with their scores"
 
 
@@ -199,7 +200,7 @@ async def test_the_hnsw_path_returns_the_same_top_hits_as_the_exact_path(
     marker = uuid.uuid4().hex[:8]
     await seed_document(raw_db, w, subject="Math", classes=("10-A",), uploader=w.t1, embedder=embedder,
                         chunks=[f"{c} ({marker})" for c in ENGLISH_CHUNKS])
-    exact_cfg = retrieval.RetrievalConfig.from_settings()
+    exact_cfg = search_config()
     hnsw_cfg = dataclasses.replace(exact_cfg, exact_max_candidates=0)
     query = "What is osmosis across a membrane?"
     exact = await run_search(w, w.t1, query, embedder, config=exact_cfg)

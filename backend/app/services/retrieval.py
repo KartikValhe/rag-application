@@ -33,13 +33,18 @@ Search (all statements in the caller's tenant transaction, as app_tenant, so RLS
        the keyword side (an OR of the query's lexemes over at most RETRIEVAL_KEYWORD_MAX_CANDIDATES
        matching chunks, ranked by ts_rank_cd) and every detail of those chunks. It reads one snapshot, so
        a publish that commits during a search shows the old version or the new one, never a mix.
+    Step 5d-5: the keyword side is OFF by default (RETRIEVAL_RRF_KEYWORD_WEIGHT 0, vector only; it lost to vector
+    only on the golden set). With weight 0 no keyword statement runs at all: the `kw` CTE is the empty one and no
+    lexeme is counted (keyword_side_runs). Its code and settings stay for later (exact-code search).
     Step 5d-4 (all off by default): with RETRIEVAL_KEYWORD_MAX_DF below 1 the statement of step 2 also returns,
     for each query lexeme, how many candidate chunks contain it (no extra round trip), and a lexeme found in
     more than that share of them is left out of the keyword query; if none is left the keyword side is not run.
     RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS makes a chunk enter the keyword ranking only with that many matches.
-    Fusion is reciprocal rank fusion in Python, weighted per side (RETRIEVAL_RRF_VECTOR_WEIGHT / _KEYWORD_WEIGHT). The top vector-ranked chunk is always kept in the hits,
-    and sufficiency is decided on the RETURNED hits only: the best vector similarity against
-    RETRIEVAL_MIN_SIMILARITY (UNCALIBRATED until the 5d-3 sweep), plus an optional keyword-coverage clause.
+    Fusion is reciprocal rank fusion in Python, weighted per side (RETRIEVAL_RRF_VECTOR_WEIGHT / _KEYWORD_WEIGHT).
+    The top vector-ranked chunk is always kept in the hits, and sufficiency is decided on the RETURNED hits only:
+    the best vector similarity against RETRIEVAL_MIN_SIMILARITY (calibrated in 5d-5 for one model, see
+    CALIBRATION), plus an optional keyword-coverage clause. threshold_calibrated in every result is derived:
+    true only when the active model key is RETRIEVAL_CALIBRATED_MODEL_KEY (is_threshold_calibrated).
 
 HNSW settings: hnsw.iterative_scan and hnsw.ef_search are set with set_config(..., true), so they last until
 the end of the caller's transaction and never leak to the next user of the pooled connection. The value of
@@ -70,6 +75,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, NoReturn
 
+import structlog
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,8 +84,12 @@ from app.core.config import settings
 from app.db.models.academic import ClassSubject
 from app.db.models.document import VERSION_STATUS_PUBLISHED, VERSION_STATUS_READY
 from app.db.models.user import User
+from app.ml.lock import DEFAULT_LOCK_PATH, ModelLoadError, load_lock
+from app.ml.model_keys import E5_SMALL_MODEL_KEY
 from app.services import document_scope
 from app.services.document_text import clean_text
+
+logger = structlog.get_logger(__name__)
 
 Pair = tuple[uuid.UUID, uuid.UUID]  # (class_id, subject_id)
 Purpose = Literal["manage", "read"]
@@ -134,19 +144,21 @@ class RetrievalConfig:
     final_k: int = 6
     rrf_k: int = 60
     max_query_chars: int = 500
-    min_similarity: float = 0.85
+    min_similarity: float = 0.84  # calibrated in 5d-5 for calibrated_model_key (see CALIBRATION)
     min_keyword_coverage: float = 0.0  # 0 = the keyword clause is off
     exact_max_candidates: int = 50_000
     hnsw_ef_search: int = 100
     statement_timeout_ms: int = 5000
     keyword_max_candidates: int = 2000
-    # Step 5d-4. The defaults are today's behaviour (nothing pruned, equal weights, one matched term is enough).
+    # Step 5d-4 (pruning off, one matched term is enough) and 5d-5 (keyword weight 0: vector only, the keyword
+    # statement is not run). Weights 1.0 / 1.0 give back the hybrid of 5d-1 to 5d-4 exactly.
     keyword_max_df: float = 1.0  # a keyword lexeme in more than this share of the candidates is dropped; 1.0 = off
     rrf_vector_weight: float = 1.0
-    rrf_keyword_weight: float = 1.0  # 0 = the vector side alone
+    rrf_keyword_weight: float = 0.0  # 0 = the vector side alone
     keyword_min_matched_terms: int = 1
-    # False until a value measured by the 5d-3 sweep replaces the default; shown in every response.
-    threshold_calibrated: bool = False
+    # The model min_similarity was measured for. Every result reports threshold_calibrated = (active model key ==
+    # this key); see is_threshold_calibrated. Empty: no model is calibrated.
+    calibrated_model_key: str = E5_SMALL_MODEL_KEY
 
     def __post_init__(self) -> None:
         if not 1 <= self.final_k <= MAX_FINAL_K:
@@ -168,6 +180,9 @@ class RetrievalConfig:
             or not 1 <= self.keyword_min_matched_terms <= MAX_QUERY_LEXEMES
         ):
             raise ValueError(f"keyword_min_matched_terms must be an int between 1 and {MAX_QUERY_LEXEMES}")
+        if self.min_keyword_coverage > 0 and self.rrf_keyword_weight == 0:
+            # Without the keyword side nothing measures coverage, so the clause would silently never fire.
+            raise ValueError("min_keyword_coverage above 0 needs the keyword side (rrf_keyword_weight above 0)")
 
     @classmethod
     def from_settings(cls, s: Any = None) -> RetrievalConfig:
@@ -188,7 +203,74 @@ class RetrievalConfig:
             rrf_vector_weight=s.RETRIEVAL_RRF_VECTOR_WEIGHT,
             rrf_keyword_weight=s.RETRIEVAL_RRF_KEYWORD_WEIGHT,
             keyword_min_matched_terms=s.RETRIEVAL_KEYWORD_MIN_MATCHED_TERMS,
+            calibrated_model_key=s.RETRIEVAL_CALIBRATED_MODEL_KEY,
         )
+
+
+def keyword_side_runs(config: RetrievalConfig) -> bool:
+    """Whether a search runs the keyword side at all. A side with weight 0 has no say in the fusion, so it is
+    not run: no keyword statement, no keyword cap work, no per-word frequency count (step 5d-5)."""
+    return config.rrf_keyword_weight > 0
+
+
+# ── Calibration (step 5d-5, docs/api/phase5.md section 12) ───────────────────
+
+
+@dataclass(frozen=True)
+class CalibrationRecord:
+    """How RETRIEVAL_MIN_SIMILARITY was chosen: the measured facts, copied from the owner's harness run. The
+    evaluation harness prints them; a test checks they agree with the settings defaults."""
+
+    date: str
+    model_key: str
+    threshold: float
+    should_answer: int  # golden-set rows that should be answered
+    should_not_answer: int  # golden-set rows that should be refused
+    documents: int  # published documents of the evaluated class and subject
+    chunks: int
+
+
+CALIBRATION = CalibrationRecord(
+    date="2026-11-20",
+    model_key=E5_SMALL_MODEL_KEY,
+    threshold=0.84,
+    should_answer=30,
+    should_not_answer=10,
+    documents=2,
+    chunks=100,
+)
+
+
+def is_threshold_calibrated(model_key: str, config: RetrievalConfig) -> bool:
+    """True only when the active embedding model is exactly the one the threshold was measured for."""
+    return bool(config.calibrated_model_key) and model_key == config.calibrated_model_key
+
+
+def active_model_key(s: Any = None) -> str | None:
+    """The key of the configured embedding model from the lock file (no model files are read), or None when the
+    model is unknown or has no pinned revision."""
+    s = s or settings
+    try:
+        return load_lock(DEFAULT_LOCK_PATH).get(s.EMBEDDING_MODEL_ID).model_key
+    except ModelLoadError:
+        return None
+
+
+def log_threshold_calibration(s: Any = None) -> bool:
+    """The startup line: the threshold, the model it was calibrated for, the active model, and whether they
+    match (a warning when they do not). Returns the match."""
+    s = s or settings
+    active = active_model_key(s)
+    calibrated = active is not None and is_threshold_calibrated(active, RetrievalConfig.from_settings(s))
+    log = logger.info if calibrated else logger.warning
+    log(
+        "retrieval_threshold",
+        threshold=s.RETRIEVAL_MIN_SIMILARITY,
+        calibrated_model_key=s.RETRIEVAL_CALIBRATED_MODEL_KEY,
+        active_model_key=active,
+        calibrated=calibrated,
+    )
+    return calibrated
 
 
 # ── Scope ────────────────────────────────────────────────────────────────────
@@ -736,8 +818,8 @@ _KW_CTE = """, kw AS (
     ) y
 )"""
 
-# Step 5d-4: every query lexeme was pruned (or too few are left), so the keyword side has nothing to rank and
-# runs no statement at all. An empty `kw` keeps the rest of the statement unchanged.
+# Step 5d-4: every query lexeme was pruned (or too few are left), or (5d-5) the keyword weight is 0, so the
+# keyword side has nothing to rank and runs no statement at all. An empty `kw` keeps the rest of the statement unchanged.
 _KW_SKIPPED = """, kw AS (
     SELECT CAST(NULL AS uuid) AS id, CAST(NULL AS bigint) AS rnk WHERE false
 )"""
@@ -844,7 +926,7 @@ def _result(
         reason=reason,
         message=None if sufficient else INSUFFICIENT_MESSAGE,
         threshold=config.min_similarity,
-        threshold_calibrated=config.threshold_calibrated,
+        threshold_calibrated=is_threshold_calibrated(model, config),
         keyword_coverage_threshold=config.min_keyword_coverage or None,
         model=model,
         candidate_count=candidate_count,
@@ -924,8 +1006,9 @@ async def _search_in_transaction(
         "subject_ids": [p[1] for p in pairs],
         "statuses": list(scope.statuses),
     }
+    keyword_on = keyword_side_runs(config)  # weight 0: no keyword statement and no frequency count at all
     doc_freq: list[int] | None = None
-    if config.keyword_max_df < 1.0:  # pruning on: the same statement also counts each lexeme's chunks
+    if keyword_on and config.keyword_max_df < 1.0:  # pruning on: the same statement also counts each lexeme's chunks
         counted = (
             await db.execute(
                 text(count_and_frequencies_sql()), {**scope_params, "lexq": [_quote_lexeme(w) for w in lexemes]}
@@ -936,7 +1019,8 @@ async def _search_in_transaction(
         count = int((await db.execute(text(count_sql()), scope_params)).scalar_one())
     if count == 0:
         return _result(config, model, has_scope=True, lexeme_count=len(lexemes))
-    kw_lexemes = keyword_lexemes(lexemes, doc_freq, count, config)  # [] = the keyword side does not run
+    # [] = the keyword side does not run (switched off, or every lexeme pruned)
+    kw_lexemes = keyword_lexemes(lexemes, doc_freq, count, config) if keyword_on else []
 
     vector = _vector_literal(await query_embedder.embed(query), query_embedder.dim)
     extension = (await db.execute(text(VECTOR_EXTENSION_SQL))).first()

@@ -72,6 +72,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_retrieval_pure.py": ("fast",),
     "test_retrieval_fusion_pure.py": ("fast",),
     "test_retrieval_compare_pure.py": ("fast",),
+    "test_retrieval_calibration.py": ("fast",),  # 5d-5: defaults, derived threshold_calibrated, startup line
+    "test_golden_set_fixture.py": ("fast",),  # 5d-5: the committed golden set parses and is large enough
     "test_review_5b3_text.py": ("fast",),
     "test_review_5b3_upload_scan.py": ("fast", "security"),
     "test_run_tests.py": ("fast",),
@@ -134,6 +136,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_retrieval_quality.py": ("db",),
     "test_eval_retrieval_db.py": ("db",),
     "test_retrieval_pruning.py": ("db",),
+    "test_retrieval_calibration_db.py": ("db",),  # 5d-5: threshold_calibrated derived at both entry points
     "test_eval_retrieval_compare_db.py": ("db",),
     "test_retrieval_scope.py": ("db", "security"),
     "test_retrieval_sql_safety.py": ("db", "security"),
