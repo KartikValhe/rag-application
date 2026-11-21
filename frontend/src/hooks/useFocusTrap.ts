@@ -72,6 +72,10 @@ export function useFocusTrap(
     if (focusables.length > 0 && focusables[0]) {
       // Focus the requested element (or the first one) after browser render cycle
       requestAnimationFrame(() => {
+        // On a slow device this frame can run after the user already clicked a field
+        // inside the dialog; do not pull focus away from it.
+        const active = document.activeElement;
+        if (active && active !== document.body && container.contains(active)) return;
         (initialFocusRefRef.current?.current ?? focusables[0])?.focus();
       });
     }

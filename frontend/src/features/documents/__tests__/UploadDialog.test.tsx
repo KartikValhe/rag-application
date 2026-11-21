@@ -82,6 +82,28 @@ const mockClasses: MyClassItem[] = [
   },
 ];
 
+function makeLimitsApi(): DocumentsApi {
+  return {
+    retryVersion: vi.fn(),
+    uploadVersion: vi.fn(),
+    deleteDocument: vi.fn(),
+    deleteVersion: vi.fn(),
+    flags: vi.fn(),
+    list: vi.fn(),
+    get: vi.fn(),
+    limits: vi.fn().mockResolvedValue({
+      max_file_bytes: 50 * 1024 * 1024,
+      max_pdf_pages: 200,
+      max_pptx_slides: 100,
+      uploads_per_user_per_hour: 20,
+      uploads_per_tenant_per_hour: 100,
+      accepted_extensions: [".pdf", ".docx", ".pptx", ".txt", ".md"],
+    }),
+    status: vi.fn(),
+    upload: vi.fn(),
+  };
+}
+
 describe("UploadDialog and Upload flow", () => {
   let mockUser: any;
 
@@ -1134,6 +1156,46 @@ describe("UploadDialog and Upload flow", () => {
 
     // Upload was NOT sent!
     expect(fakeApi.upload).not.toHaveBeenCalled();
+  });
+
+  it("keeps the typed title when the subject and class lists resolve after the user typed", async () => {
+    const user = userEvent.setup();
+    let resolveClasses: (v: MyClassItem[]) => void = () => {};
+    vi.spyOn(academicApi, "getMyClasses").mockReturnValue(
+      new Promise<MyClassItem[]>((resolve) => {
+        resolveClasses = resolve;
+      })
+    );
+
+    renderWithProviders(<UploadDialog isOpen={true} onClose={vi.fn()} api={makeLimitsApi()} />);
+
+    await user.type(screen.getByLabelText(/title/i), "Typed before options");
+    resolveClasses(mockClasses);
+
+    expect(await screen.findByRole("option", { name: "Computer Science" })).toBeDefined();
+    expect((screen.getByLabelText(/title/i) as HTMLInputElement).value).toBe("Typed before options");
+  });
+
+  it("does not pull focus away from a field the user already focused when the opening focus runs late", async () => {
+    const user = userEvent.setup();
+    // Slow machine: the browser frame that moves focus into the dialog runs late.
+    const lateFrames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      lateFrames.push(cb);
+      return lateFrames.length;
+    });
+
+    renderWithProviders(<UploadDialog isOpen={true} onClose={vi.fn()} api={makeLimitsApi()} />);
+
+    const titleInput = screen.getByLabelText(/title/i);
+    await user.type(titleInput, "Slow machine title");
+
+    // The late frame finally runs; it must not steal focus or lose the typed text.
+    lateFrames.forEach((cb) => cb(0));
+    expect(document.activeElement).toBe(titleInput);
+
+    await user.type(titleInput, " more");
+    expect((titleInput as HTMLInputElement).value).toBe("Slow machine title more");
   });
 
   it("ties the File label with htmlFor to the FileUpload input", async () => {

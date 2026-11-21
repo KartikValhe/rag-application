@@ -176,6 +176,14 @@ const fileInput = () => document.querySelector("input[type='file']") as HTMLInpu
 const UPLOAD = ["document:view", "document:upload"];
 const ALL = ["document:view", "document:upload", "document:delete", "document:publish"];
 
+const LIMITS_OK = {
+  max_file_bytes: 50 * 1024 * 1024,
+  max_pdf_pages: 200,
+  max_pptx_slides: 100,
+  uploads_per_user_per_hour: 20,
+  uploads_per_tenant_per_hour: 100,
+  accepted_extensions: ["pdf", "docx", "pptx", "txt", "md"],
+};
 const VERSION_OK = makeVersion({ id: "v-3", version_no: 3, status: "queued", published_at: null });
 
 beforeEach(() => {
@@ -232,6 +240,16 @@ describe("UploadDialog in new-version mode", () => {
     const client = axios.create({
       baseURL: "/api/v1",
       adapter: async (config) => {
+        // The dialog also asks for the upload limits; answer each URL with its own shape.
+        if (config.url?.endsWith("/documents/limits")) {
+          return {
+            data: LIMITS_OK,
+            status: 200,
+            statusText: "OK",
+            headers: {},
+            config,
+          };
+        }
         captured = config;
         return { data: VERSION_OK, status: 202, statusText: "Accepted", headers: {}, config };
       },
