@@ -1,11 +1,18 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import axios, { type InternalAxiosRequestConfig, type AxiosResponse } from "axios";
 import { createDocumentsApi } from "../api/documentsApi.ts";
 import { SCHEMA_MISMATCH_NAME } from "../../../api/errorMessages.ts";
 
+// The real client cannot be imported under node (it uses import.meta.env), so read
+// its default baseURL straight from the source file. Stays in sync automatically.
+const clientSource = readFileSync(new URL("../../../api/client.ts", import.meta.url), "utf8");
+const BASE_URL = /baseURL:\s*import\.meta\.env\.VITE_API_URL\s*\|\|\s*"([^"]+)"/.exec(clientSource)?.[1] ?? "";
+
 function createMockAxios(handler: (config: InternalAxiosRequestConfig) => { status?: number; data: unknown }) {
   return axios.create({
+    baseURL: BASE_URL,
     adapter: async (config: InternalAxiosRequestConfig): Promise<AxiosResponse> => {
       const result = handler(config);
       return {
@@ -19,7 +26,7 @@ function createMockAxios(handler: (config: InternalAxiosRequestConfig) => { stat
   });
 }
 
-test("createDocumentsApi: list calls GET /api/v1/documents with query params", async () => {
+test("createDocumentsApi: list calls GET /documents with query params", async () => {
   let capturedConfig: InternalAxiosRequestConfig | undefined;
   const mockClient = createMockAxios((config) => {
     capturedConfig = config;
@@ -50,7 +57,8 @@ test("createDocumentsApi: list calls GET /api/v1/documents with query params", a
   const result = await api.list({ class_id: "c1", status: "published", limit: 20 });
 
   assert.ok(capturedConfig);
-  assert.equal(capturedConfig.url, "/api/v1/documents");
+  assert.equal(capturedConfig.url, "/documents");
+  assert.equal(axios.getUri(capturedConfig), "/api/v1/documents?class_id=c1&status=published&limit=20");
   assert.equal(capturedConfig.params?.class_id, "c1");
   assert.equal(capturedConfig.params?.status, "published");
   assert.equal(result.items.length, 1);
@@ -58,10 +66,12 @@ test("createDocumentsApi: list calls GET /api/v1/documents with query params", a
   assert.equal(result.next_cursor, "next-abc");
 });
 
-test("createDocumentsApi: get calls GET /api/v1/documents/:id", async () => {
+test("createDocumentsApi: get calls GET /documents/:id", async () => {
   let capturedUrl = "";
+  let finalUrl = "";
   const mockClient = createMockAxios((config) => {
     capturedUrl = config.url ?? "";
+    finalUrl = axios.getUri(config);
     return {
       data: {
         id: "doc-42",
@@ -83,16 +93,19 @@ test("createDocumentsApi: get calls GET /api/v1/documents/:id", async () => {
   const api = createDocumentsApi(mockClient);
   const result = await api.get("doc-42");
 
-  assert.equal(capturedUrl, "/api/v1/documents/doc-42");
+  assert.equal(capturedUrl, "/documents/doc-42");
+  assert.equal(finalUrl, "/api/v1/documents/doc-42");
   assert.equal(result.id, "doc-42");
   assert.equal(result.can_manage, false);
   assert.equal(result.blocked_reason, "document_manage_requires_all_classes");
 });
 
-test("createDocumentsApi: limits calls GET /api/v1/documents/limits", async () => {
+test("createDocumentsApi: limits calls GET /documents/limits", async () => {
   let capturedUrl = "";
+  let finalUrl = "";
   const mockClient = createMockAxios((config) => {
     capturedUrl = config.url ?? "";
+    finalUrl = axios.getUri(config);
     return {
       data: {
         max_file_bytes: 52428800,
@@ -108,7 +121,8 @@ test("createDocumentsApi: limits calls GET /api/v1/documents/limits", async () =
   const api = createDocumentsApi(mockClient);
   const result = await api.limits();
 
-  assert.equal(capturedUrl, "/api/v1/documents/limits");
+  assert.equal(capturedUrl, "/documents/limits");
+  assert.equal(finalUrl, "/api/v1/documents/limits");
   assert.equal(result.max_file_bytes, 52428800);
   assert.deepEqual(result.accepted_extensions, ["docx", "md", "pdf", "pptx", "txt"]);
 });
@@ -133,4 +147,31 @@ test("createDocumentsApi: throws SchemaMismatchError if response shape is invali
       return error.name === SCHEMA_MISMATCH_NAME;
     }
   );
+});
+
+test("documentsApi: baseURL is read from the real client", () => {
+  assert.equal(BASE_URL, "/api/v1");
+});
+
+test("documentsApi: every API function requests a path relative to baseURL", async () => {
+  const seen: string[] = [];
+  const mockClient = createMockAxios((config) => {
+    seen.push(config.url ?? "");
+    const final = axios.getUri(config);
+    assert.ok(!final.includes("/api/v1/api/v1"), `doubled prefix: ${final}`);
+    assert.ok(final.startsWith("/api/v1/"), `wrong final url: ${final}`);
+    return { data: {} };
+  });
+  const api = createDocumentsApi(mockClient);
+  for (const [name, fn] of Object.entries(api)) {
+    const args = Array.from({ length: fn.length }, () => "id-1");
+    // Responses are not valid payloads; only the requested path matters here.
+    await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
+    assert.ok(seen.length > 0, `${name} made no request`);
+  }
+  for (const path of seen) {
+    assert.ok(!path.startsWith("/api"), `path starts with /api: ${path}`);
+    assert.ok(!path.includes("//"), `path contains //: ${path}`);
+    assert.ok(path.startsWith("/"), `path must start with /: ${path}`);
+  }
 });

@@ -20,15 +20,15 @@ export interface DocumentListParams {
 export function createDocumentsApi(client: AxiosInstance) {
   return {
     list: async (params?: DocumentListParams): Promise<DocumentListItem> => {
-      const response = await client.get("/api/v1/documents", { params });
+      const response = await client.get("/documents", { params });
       return validateResponse(DocumentListSchema, response.data, "documents list");
     },
     get: async (documentId: string): Promise<DocumentItem> => {
-      const response = await client.get(`/api/v1/documents/${documentId}`);
+      const response = await client.get(`/documents/${documentId}`);
       return validateResponse(DocumentSchema, response.data, "document detail");
     },
     limits: async (): Promise<DocumentUploadLimitsItem> => {
-      const response = await client.get("/api/v1/documents/limits");
+      const response = await client.get("/documents/limits");
       return validateResponse(DocumentUploadLimitsSchema, response.data, "upload limits");
     },
   };
