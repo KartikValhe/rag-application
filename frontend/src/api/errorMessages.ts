@@ -25,6 +25,8 @@ const CODE_MESSAGES: Record<string, string> = {
   zip_bomb_detected: "This file is not valid and could not be read.",
   zip_member_too_large: "This file contains content that is too large.",
   pdf_active_content: "PDFs with scripts or attachments are not allowed.",
+  pdf_embedded_file:
+    "This PDF has another file attached inside it. Export or print it again without attachments, or upload a DOCX version instead.",
   pdf_too_complex: "This PDF is too large or complex. Try a simpler file.",
   scanned_pdf: "This PDF has no readable text (it looks scanned). Use a text PDF or a CSV.",
   password_protected_pdf: "Password-protected PDFs are not supported.",
@@ -56,6 +58,8 @@ const CODE_MESSAGES: Record<string, string> = {
   not_published: "This class has no published timetable.",
   timetable_conflicts_detected: "The timetable has scheduling conflicts.",
   permission_denied: "You do not have permission to do this.",
+  subject_has_documents:
+    "This subject still has course materials, including recently deleted ones. Remove them before deleting the subject.",
 };
 
 interface ErrorShape {

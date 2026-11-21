@@ -120,6 +120,10 @@ jobs:
         working-directory: ./frontend
         run: npm test -- --run
 
+      - name: Component Tests
+        working-directory: ./frontend
+        run: npm run test:components
+
       - name: Type Check
         working-directory: ./frontend
         run: npm run typecheck

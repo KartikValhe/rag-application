@@ -8,7 +8,7 @@ Multi-tenant white-label academic platform (named "RAG" but no RAG/vector code e
 
 - Source of truth: `docs/implementation_plan.md`. Follow it; if you disagree, say so before changing course.
 - Stack: FastAPI + SQLAlchemy async + Alembic + PostgreSQL (pgvector, RLS), Redis, React + TS + Tailwind.
-- Backend only unless told otherwise. Do NOT edit `frontend/` (another agent owns it).
+- Backend only unless told otherwise. Frontend/ may be edited for Phase 5f.
 - Every tenant table: `tenant_id`, RLS ENABLE+FORCE, composite FKs, covered by the isolation tests.
 - Default-deny permissions; same generic 404 for "not found" and "not yours".
 - Never read or print `.env` files, secrets or real credentials.
@@ -41,7 +41,7 @@ npm run dev | build | typecheck
 npm run lint            # eslint + check:styles
 npm test                # node --test on an explicit file list in package.json — add new test files there
 node --test --experimental-strip-types path/to/file.test.ts   # single test
-npm run test:e2e        # Playwright; needs backend + frontend running with seeded data
+npm run e2e            # Playwright; needs backend + frontend running with seeded data
 ```
 
 ## Test tiers (backend)

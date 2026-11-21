@@ -421,3 +421,16 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 | Q10 | **Where it lives in the menu:** one "Course materials" entry per portal as planned, or inside each class page only? | One entry per portal plus a link from the class page. |
 | Q11 | **Test-search access:** admins and teachers both see "Include drafts". Any reason to hide drafts from admins? | No; same for both. |
 | Q12 | **Unscanned versions.** The UI tells teachers "not checked yet, ask an administrator to run a rescan" for `flagged_chunk_count` null. Is that the wording you want, given the rescan is an operator CLI today? | Keep, and drop the sentence once no unscanned versions exist (B102). |
+
+## (j) Build record
+
+### Phase 5f-1a: Frontend foundations (2026-11-21)
+- Tooling: Vitest + jsdom + @testing-library/react + @testing-library/user-event added as devDependencies; `npm run test:components` added; `vitest.config.ts` created; `component_setup.test.tsx` verified; CI step added in `.github/workflows/ci.yml`.
+- CLAUDE.md: updated frontend edit permission for Phase 5f and updated script name `npm run e2e`.
+- ESLint: added `no-restricted-syntax` rule forbidding `dangerouslySetInnerHTML` in `src/`; verified with `eslint_dangerously_set_inner_html.test.ts`.
+- Schemas: implemented `frontend/src/features/documents/schemas/documentSchemas.ts` with lenient Zod schemas for list, document, version, status, flags, test search, usage, limits, and `validateResponse` / `SchemaMismatchError`. Verified with `documentSchemas.test.ts`.
+- API: implemented `frontend/src/features/documents/api/documentsApi.ts` with `createDocumentsApi(client)` (read-only: `list`, `get`, `limits`). Verified with `documentsApi.test.ts` using fake adapter.
+- Error mapper: updated `src/api/errorMessages.ts` with `pdf_embedded_file` and `subject_has_documents`; implemented `frontend/src/features/documents/utils/documentErrors.ts` with `getDocumentError` and `getVersionFailure`. Verified with `documentErrors.test.ts`.
+- Status chip: implemented `frontend/src/features/documents/utils/statusChip.ts` with `getStatusChip`. Verified with `statusChip.test.ts`.
+- Document policy: implemented `frontend/src/features/documents/utils/documentPolicy.ts` with `getDocumentActions`. Verified with `documentPolicy.test.ts`.
+
