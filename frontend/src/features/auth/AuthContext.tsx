@@ -9,6 +9,7 @@ export interface AuthUser {
   email?: string;
   roles?: string[];
   permissions?: string[];
+  exp?: number;
 }
 
 export interface AuthContextType {
@@ -43,6 +44,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               email: payload.email,
               roles: payload.roles || (payload.is_admin ? ["tenant_admin"] : []),
               permissions: payload.permissions || (payload.is_admin ? ["*"] : []),
+              exp: typeof payload.exp === "number" ? payload.exp : undefined,
             });
           }
         }
@@ -66,6 +68,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       let email: string | undefined;
       let roles: string[] | undefined;
       let permissions: string[] | undefined;
+      let exp: number | undefined;
 
       if (res.access_token) {
         const parts = res.access_token.split(".");
@@ -76,6 +79,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             email = tokenPayload.email;
             roles = tokenPayload.roles;
             permissions = tokenPayload.permissions;
+            exp = typeof tokenPayload.exp === "number" ? tokenPayload.exp : undefined;
           } catch {
             // ignore decode error
           }
@@ -90,6 +94,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: email || payload.email,
         roles: resolvedRoles,
         permissions: permissions || (res.is_admin ? ["*"] : []),
+        exp,
       });
       return {
         ...res,

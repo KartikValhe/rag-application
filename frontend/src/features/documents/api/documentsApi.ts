@@ -4,11 +4,13 @@ import {
   DocumentSchema,
   DocumentStatusSchema,
   DocumentUploadLimitsSchema,
+  DocumentVersionSchema,
   validateResponse,
   type DocumentListItem,
   type DocumentItem,
   type DocumentStatusItem,
   type DocumentUploadLimitsItem,
+  type DocumentVersionItem,
 } from "../schemas/documentSchemas.ts";
 
 export interface DocumentListParams {
@@ -17,6 +19,29 @@ export interface DocumentListParams {
   status?: string;
   cursor?: string;
   limit?: number;
+}
+
+export interface DocumentUploadPayload {
+  file: File;
+  title: string;
+  subject_id: string;
+  class_ids: string[];
+}
+
+export interface UploadOptions {
+  onProgress?: (progress: number) => void;
+  signal?: AbortSignal;
+}
+
+export function buildUploadFormData(payload: DocumentUploadPayload): FormData {
+  const form = new FormData();
+  form.append("file", payload.file);
+  form.append("title", payload.title);
+  form.append("subject_id", payload.subject_id);
+  for (const classId of payload.class_ids) {
+    form.append("class_ids", classId);
+  }
+  return form;
 }
 
 export function createDocumentsApi(client: AxiosInstance) {
@@ -36,6 +61,25 @@ export function createDocumentsApi(client: AxiosInstance) {
     status: async (documentId: string, versionId: string): Promise<DocumentStatusItem> => {
       const response = await client.get(`/documents/${documentId}/versions/${versionId}/status`);
       return validateResponse(DocumentStatusSchema, response.data, "document status");
+    },
+    upload: async (
+      form: FormData | DocumentUploadPayload,
+      options?: UploadOptions
+    ): Promise<DocumentVersionItem> => {
+      const data = form instanceof FormData ? form : buildUploadFormData(form);
+      const response = await client.post("/documents", data, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+        timeout: 10 * 60 * 1000,
+        signal: options?.signal,
+        onUploadProgress: (progressEvent) => {
+          if (options?.onProgress && progressEvent.total) {
+            options.onProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
+          }
+        },
+      });
+      return validateResponse(DocumentVersionSchema, response.data, "document upload");
     },
   };
 }

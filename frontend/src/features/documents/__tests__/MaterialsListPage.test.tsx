@@ -130,6 +130,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -247,6 +248,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -289,6 +291,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -320,6 +323,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -342,6 +346,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -367,6 +372,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -393,6 +399,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -431,6 +438,7 @@ describe("MaterialsListPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(

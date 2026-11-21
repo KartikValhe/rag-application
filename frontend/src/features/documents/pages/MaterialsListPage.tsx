@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { useLocation, Link, useNavigate } from "react-router-dom";
 import { AppShell, PageHeader } from "@/components/layout";
 import {
@@ -10,13 +10,17 @@ import {
   Alert,
   EmptyState,
 } from "@/components/ui";
-import { Lock, FolderArchive } from "lucide-react";
+import { Lock, FolderArchive, UploadCloud } from "lucide-react";
 import { useDocuments } from "../hooks/useDocuments";
 import { getStatusChip } from "../utils/statusChip";
 import { getDocumentError } from "../utils/documentErrors";
+import { getDocumentActions } from "../utils/documentPolicy";
+import { UploadDialog } from "../components/UploadDialog";
 import type { DocumentsApi } from "../api/documentsApi";
 import type { DocumentItem } from "../schemas/documentSchemas";
 import { useAuth } from "@/features/auth/AuthContext";
+import { usePermission } from "@/hooks/usePermission";
+import { isTeacherOnlyUser, getMaterialsBasePath } from "@/utils/roleUtils";
 
 export interface MaterialsListPageProps {
   api?: DocumentsApi;
@@ -58,8 +62,13 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const isAdmin = Boolean(user?.isAdmin || user?.roles?.includes("tenant_admin"));
-  const isTeacher = Boolean(user?.roles?.includes("teacher"));
+  const { can } = usePermission();
+  const isTeacherOnly = isTeacherOnlyUser(user);
+
+  const policyActions = useMemo(() => getDocumentActions({ can }), [can]);
+  const canUpload = policyActions.find((a) => a.id === "upload")?.visible;
+
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
 
   const {
     documents,
@@ -81,7 +90,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   } = useDocuments({ api });
 
   const isAdminRoute = location.pathname.startsWith("/admin");
-  const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
+  const baseRoute = getMaterialsBasePath(location.pathname);
   const breadcrumbs = isAdminRoute
     ? [
       { label: "Administration", href: "/admin" },
@@ -198,7 +207,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   );
 
   const emptyConfig = useMemo(() => {
-    if (isTeacher && !isAdmin && classes.length === 0) {
+    if (isTeacherOnly && classes.length === 0) {
       return {
         title: "No assigned classes",
         description: "Ask your administrator to assign you to a class to view its materials.",
@@ -221,7 +230,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
       description: "No course materials have been added yet.",
       action: undefined,
     };
-  }, [isTeacher, isAdmin, classes.length, hasActiveFilters, clearFilters]);
+  }, [isTeacherOnly, classes.length, hasActiveFilters, clearFilters]);
 
   return (
     <AppShell>
@@ -229,6 +238,18 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
         title="Course materials"
         description="Browse textbooks, syllabus guides, lecture notes, and curriculum resources."
         breadcrumbs={breadcrumbs}
+        actions={
+          canUpload ? (
+            <Button
+              variant="primary"
+              onClick={() => setIsUploadOpen(true)}
+              className="flex items-center gap-1.5"
+            >
+              <UploadCloud className="w-4 h-4" />
+              Upload material
+            </Button>
+          ) : undefined
+        }
       />
 
       {/* Filter Bar */}
@@ -318,6 +339,13 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
           )}
         </>
       )}
+
+      <UploadDialog
+        isOpen={isUploadOpen}
+        onClose={() => setIsUploadOpen(false)}
+        api={api}
+        onSuccess={() => refetch()}
+      />
     </AppShell>
   );
 };

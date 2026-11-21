@@ -489,5 +489,51 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
   - Component tests: `MaterialDetailPage.test.tsx` (7 tests covering live transition, terminal state stop, error display, failure reasons, 404 state, view-only lock note, and XSS safety). All 18 component tests passing across 3 test suites in `npm run test:components`.
   - Full quality checks: `npm run typecheck`, `npm run lint` (0 styles violations), and `npm run build` all pass cleanly with exit code 0.
 
+### Phase 5f-3: Upload a new document (2026-11-21)
+- API Client (`frontend/src/features/documents/api/documentsApi.ts`):
+  - Added `upload(form, { onProgress, signal })` with a 10-minute (600,000 ms) per-request timeout.
+  - Endpoints relative to client `/api/v1` baseURL (`POST /api/v1/documents`).
+  - Strict multipart payload builder (`buildUploadFormData`): includes `file`, `title`, `subject_id`, repeated `class_ids` (never comma-separated, never JSON-stringified, no client tenant field). Validates 202 response against `DocumentVersionSchema`.
+- File Pre-validation (`frontend/src/features/documents/utils/fileChecks.ts`):
+  - Pure functions: `validateDocumentFile(file, maxBytes)` and `sanitizeDisplayFilename(filename, maxLength)`.
+  - Allowed extensions: `.pdf`, `.docx`, `.pptx`, `.txt`, `.md` (case-insensitive).
+  - Explicit friendly rejection for spreadsheets/CSVs: "Spreadsheets are not accepted here; export it as PDF or DOCX".
+  - Empty file refusal: "The file is empty.".
+  - Disallowed file formats refusal: "Documents accept PDF, Word, PowerPoint, text and Markdown files. Spreadsheets and CSV are not accepted.".
+  - Tenant size limit enforcement (fallback to 50 MB DEFAULT_MAX_FILE_BYTES) with 50 MB boundary validation: "This file is larger than your organisation allows. Make it smaller or split it.".
+  - `sanitizeDisplayFilename`: strips Windows/Unix path separators, ASCII/Unicode control characters, and bidi override characters (e.g. \u202E RLO).
+- FileUpload Accessibility Fix (F8) (`frontend/src/components/ui/FileUpload.tsx`):
+  - Converted drop zone outer wrapper into a keyboard-focusable `<button type="button">`.
+  - Added `aria-label="Remove file"` to remove button.
+  - Connected input and button with `useId()` and linked helper / error descriptions with `aria-describedby`.
+  - Preserved backward compatibility: Timetable import wizard tests remain 100% green (`import_wizard.test.ts`: 24/24 passing).
+- Central Mutation Hook (`frontend/src/features/documents/hooks/useDocumentMutations.ts`):
+  - Implemented `useUploadDocument` via TanStack `useMutation`.
+  - Pre-upload token freshness guard (`isTokenExpiringSoon`): automatically refreshes JWT if expiration is within 60 seconds (`authApi.refreshToken`).
+  - Zero auto-retries on upload failure (`retry: false`).
+  - Network error handling in `documentErrors.ts`: maps upload drop to "The upload did not finish. Check your connection and try again".
+- Upload Dialog Component (`frontend/src/features/documents/components/UploadDialog.tsx`):
+  - Accessible modal dialog for document upload with focus trapped once on open without stealing focus on input keystrokes (`useFocusTrap` ref stabilization).
+  - Title input with 1-200 character validation and dynamic counter (`${title.length} / 200`).
+  - Tenant limits (`useDocumentLimits` fetching `GET /documents/limits`): dynamic helper text (`Max ${maxMb} MB`), client file size/format checks, with 50 MB fallback when loading/failed.
+  - Subject dropdown populated from teacher's assigned subjects via `/me/classes` (`academicApi.getMyClasses`).
+  - Classes multi-select checkboxes dynamically filtered to classes offering the selected subject; restricts selection to 1-50 classes.
+  - Native `<progress>` bar indicating upload percentage with accessible text label.
+  - Cancel button with `AbortController` signal to abort in-flight uploads.
+  - Form field errors displayed inline (`invalid_title`, `too_many_classes`, file errors); preserves form input values and selected file on submission errors; automatically focuses the first invalid field on failed submit.
+  - Conflict handling: `duplicate_version` error displays plain mapped message without invented document link.
+  - Warning notification: displays informative toast if backend returns `duplicate_content` warning in 202 response.
+- Materials List Integration (`frontend/src/features/documents/pages/MaterialsListPage.tsx`):
+  - Integrated "Upload material" button in PageHeader; visibility strictly controlled by `documentPolicy` (`canUpload = policyActions.find(a => a.id === "upload")?.visible`).
+  - Opens `UploadDialog`; invalidates documents queries upon successful upload.
+  - Portal route resolution factored into pure `roleUtils` (`getMaterialsBasePath`).
+- Architectural Guard (`frontend/src/features/documents/__tests__/source_guard.test.ts`):
+  - Pure function `findViolations(source, fileName)` scanning every `.ts`/`.tsx` file under `features/documents`. Verified with injected bad snippets (`can("x")`, `hasRole(`, `.roles.includes(`, `.permissions.includes(`, `documentsApi.upload(`, `api.upload(`, mutating calls, `import ... buildUploadFormData`) and clean snippets.
+- Tests & Verification:
+  - Unit tests: `fileChecks.test.ts` (8 tests), `documentsApi.test.ts` (upload and `buildUploadFormData` tests), `source_guard.test.ts` (findViolations pure unit tests + directory scan), `roleUtils.test.ts` (4 tests). All 190 node tests passing across 14 suites in `npm test`.
+  - Component tests: `UploadDialog.test.tsx` (21 tests), `FileUpload.test.tsx` (5 tests), `MaterialsListPage.test.tsx` (9 tests), `MaterialDetailPage.test.tsx` (7 tests), `component_setup.test.tsx` (2 tests). All 44 component tests passing across 5 suites in `npm run test:components`.
+  - Full suite check: `npm run typecheck`, `npm run lint` (0 style violations), and `npm run build` all pass cleanly with exit code 0.
+
+
 
 

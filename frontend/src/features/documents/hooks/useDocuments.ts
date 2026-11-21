@@ -14,6 +14,16 @@ export interface UseDocumentsOptions {
   api?: DocumentsApi;
 }
 
+export function useDocumentLimits(options: { api?: DocumentsApi; enabled?: boolean } = {}) {
+  const api = options.api ?? defaultDocumentsApi;
+  return useQuery({
+    queryKey: ["documentLimits"],
+    queryFn: () => api.limits(),
+    enabled: options.enabled ?? true,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
 export function useDocuments(options: UseDocumentsOptions = {}) {
   const api = options.api ?? defaultDocumentsApi;
   const [searchParams, setSearchParams] = useSearchParams();

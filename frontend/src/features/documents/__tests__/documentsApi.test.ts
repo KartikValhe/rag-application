@@ -2,7 +2,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import axios, { type InternalAxiosRequestConfig, type AxiosResponse } from "axios";
-import { createDocumentsApi } from "../api/documentsApi.ts";
+import { createDocumentsApi, buildUploadFormData } from "../api/documentsApi.ts";
 import { SCHEMA_MISMATCH_NAME } from "../../../api/errorMessages.ts";
 
 // The real client cannot be imported under node (it uses import.meta.env), so read
@@ -157,6 +157,107 @@ test("createDocumentsApi: status calls GET /documents/:docId/versions/:vid/statu
   assert.equal(result.status, "processing");
   assert.equal(result.stage, "chunking");
   assert.equal(result.retryable, false);
+});
+
+test("buildUploadFormData: builds real FormData with file, title, subject_id, repeated class_ids and no tenant", () => {
+  const fakeFile = new File(["content"], "notes.pdf", { type: "application/pdf" });
+  const payload = {
+    file: fakeFile,
+    title: "Chapter 1 Notes",
+    subject_id: "sub-1",
+    class_ids: ["cls-a", "cls-b", "cls-c"],
+  };
+
+  const formData = buildUploadFormData(payload);
+
+  assert.ok(formData instanceof FormData);
+  assert.ok(formData.get("file") instanceof File);
+  assert.equal((formData.get("file") as File).name, "notes.pdf");
+  assert.equal(formData.get("title"), "Chapter 1 Notes");
+  assert.equal(formData.get("subject_id"), "sub-1");
+
+  // class_ids repeated, one entry each, no comma-joined or JSON value
+  const classIds = formData.getAll("class_ids");
+  assert.deepEqual(classIds, ["cls-a", "cls-b", "cls-c"]);
+  assert.equal(classIds.length, 3);
+  assert.notEqual(formData.get("class_ids"), '["cls-a","cls-b","cls-c"]');
+  assert.notEqual(formData.get("class_ids"), "cls-a,cls-b,cls-c");
+
+  // No tenant field
+  assert.equal(formData.get("tenant"), null);
+});
+
+test("createDocumentsApi: upload sends exact multipart body to POST /documents with 10-minute timeout", async () => {
+  let capturedConfig: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    capturedConfig = config;
+    return {
+      status: 202,
+      data: {
+        id: "v-new",
+        document_id: "doc-new",
+        version_no: 1,
+        status: "queued",
+        stage: null,
+        error_code: null,
+        file_kind: "pdf",
+        original_filename: "test.pdf",
+        size_bytes: 12345,
+        page_count: null,
+        chunk_count: null,
+        flagged_chunk_count: null,
+        created_at: "2026-11-21T10:00:00Z",
+        published_at: null,
+        retryable: null,
+        warnings: ["duplicate_content"],
+      },
+    };
+  });
+
+  const api = createDocumentsApi(mockClient);
+
+  const fakeFile = new File(["content"], "test.pdf", { type: "application/pdf" });
+  const payload = {
+    file: fakeFile,
+    title: "Lecture 1 Notes",
+    subject_id: "sub-101",
+    class_ids: ["cls-1", "cls-2"],
+  };
+
+  const abortController = new AbortController();
+  let progressReported: number | null = null;
+
+  const result = await api.upload(payload, {
+    onProgress: (p: number) => {
+      progressReported = p;
+    },
+    signal: abortController.signal,
+  });
+
+  assert.ok(capturedConfig);
+  assert.equal(capturedConfig.method?.toLowerCase(), "post");
+  assert.equal(capturedConfig.url, "/documents");
+  assert.equal(axios.getUri(capturedConfig), "/api/v1/documents");
+  assert.equal(capturedConfig.timeout, 600000, "Must have 10-minute timeout (600,000 ms)");
+  assert.equal(capturedConfig.signal, abortController.signal);
+
+  // Verify onProgress callback triggers correctly
+  capturedConfig.onUploadProgress?.({ loaded: 50, total: 100 } as any);
+  assert.equal(progressReported, 50);
+
+  // Validate exact multipart body
+  const sentForm = capturedConfig.data as FormData;
+  assert.ok(sentForm instanceof FormData);
+  assert.ok(sentForm.get("file"));
+  assert.equal(sentForm.get("title"), "Lecture 1 Notes");
+  assert.equal(sentForm.get("subject_id"), "sub-101");
+  assert.deepEqual(sentForm.getAll("class_ids"), ["cls-1", "cls-2"]);
+  assert.equal(sentForm.get("tenant"), null, "No tenant field must be sent");
+
+  // Validate response
+  assert.equal(result.id, "v-new");
+  assert.equal(result.status, "queued");
+  assert.deepEqual(result.warnings, ["duplicate_content"]);
 });
 
 test("createDocumentsApi: throws SchemaMismatchError if response shape is invalid", async () => {

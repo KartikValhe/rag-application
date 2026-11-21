@@ -134,6 +134,7 @@ describe("MaterialDetailPage", () => {
         statusCallCount++;
         return Promise.resolve(readyStatus);
       }),
+      upload: vi.fn(),
     };
 
     render(
@@ -189,6 +190,7 @@ describe("MaterialDetailPage", () => {
       get: vi.fn().mockResolvedValue(readyDoc),
       limits: vi.fn(),
       status: statusMock,
+      upload: vi.fn(),
     };
 
     render(
@@ -219,6 +221,7 @@ describe("MaterialDetailPage", () => {
       get: vi.fn().mockResolvedValue(doc),
       limits: vi.fn(),
       status: vi.fn().mockRejectedValue(new Error("Network Error")),
+      upload: vi.fn(),
     };
 
     render(
@@ -275,6 +278,7 @@ describe("MaterialDetailPage", () => {
         get: vi.fn().mockResolvedValue(failedDoc),
         limits: vi.fn(),
         status: vi.fn(),
+        upload: vi.fn(),
       };
 
       const { unmount } = render(
@@ -312,6 +316,7 @@ describe("MaterialDetailPage", () => {
       get: vi.fn().mockRejectedValue(notFoundError),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -352,6 +357,7 @@ describe("MaterialDetailPage", () => {
       get: vi.fn(),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(
@@ -399,6 +405,7 @@ describe("MaterialDetailPage", () => {
       get: vi.fn().mockResolvedValue(maliciousDoc),
       limits: vi.fn(),
       status: vi.fn(),
+      upload: vi.fn(),
     };
 
     render(

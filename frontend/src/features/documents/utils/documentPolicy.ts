@@ -29,7 +29,7 @@ const CANNOT_MANAGE_REASON =
   "You teach this subject in only some of the linked classes, so you can only view it";
 
 export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAction[] {
-  const { can, document, version, statusInfo } = input;
+  const { can: checkPermission, document, version, statusInfo } = input;
   const activeVersion = version ?? document?.latest_version ?? null;
   const activeStatus = activeVersion?.status;
   const isManageBlocked = document !== undefined && document !== null && document.can_manage === false;
@@ -37,7 +37,7 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
   const actions: DocumentPolicyAction[] = [];
 
   // 1. View
-  const canView = can("document:view");
+  const canView = checkPermission("document:view");
   actions.push({
     id: "view",
     visible: canView,
@@ -45,7 +45,7 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
   });
 
   // 2. Upload
-  const canUpload = can("document:upload");
+  const canUpload = checkPermission("document:upload");
   actions.push({
     id: "upload",
     visible: canUpload,
@@ -119,7 +119,7 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
   });
 
   // 6. Delete Document
-  const canDelete = can("document:delete");
+  const canDelete = checkPermission("document:delete");
   const deleteDocVisible = canDelete;
   let deleteDocEnabled = deleteDocVisible;
   let deleteDocReason: string | undefined = undefined;
@@ -139,7 +139,7 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
 
   // 7. Publish
   const isReady = activeStatus === "ready";
-  const canPublish = can("document:publish");
+  const canPublish = checkPermission("document:publish");
   const publishVisible = canPublish && isReady;
   let publishEnabled = publishVisible;
   let publishReason: string | undefined = undefined;
@@ -165,7 +165,7 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
   });
 
   // 9. Usage
-  const canManageSettings = can("settings:manage");
+  const canManageSettings = checkPermission("settings:manage");
   actions.push({
     id: "usage",
     visible: canManageSettings,

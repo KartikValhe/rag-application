@@ -5,6 +5,9 @@ export interface DocumentErrorInfo {
   field?: "title" | "file" | "classes" | "query";
   retryAfterSeconds?: number;
   action?: "reload" | "login" | "none";
+  versionId?: string;
+  documentId?: string;
+  code?: string;
 }
 
 const DOCUMENT_ERROR_MESSAGES: Record<string, string> = {
@@ -289,7 +292,10 @@ export function getDocumentError(
     if (code && DOCUMENT_ERROR_MESSAGES[code]) {
       message = DOCUMENT_ERROR_MESSAGES[code];
     } else if (parsed.isNetwork) {
-      message = "Network error. Please check your connection and try again.";
+      message =
+        context === "upload"
+          ? "The upload did not finish. Check your connection and try again"
+          : "Network error. Please check your connection and try again.";
     } else if (parsed.isSchemaMismatch) {
       message = "Data format error. Please refresh or contact support.";
     } else if (status === 422) {
@@ -348,11 +354,24 @@ export function getDocumentError(
     message = `${cleanMsg} ${waitText}`;
   }
 
+  const rawData = (err as { response?: { data?: { detail?: any; version_id?: string; document_id?: string }; version_id?: string; document_id?: string } })?.response?.data;
+  const versionId =
+    typeof rawData?.detail === "object" && rawData?.detail?.version_id
+      ? rawData.detail.version_id
+      : rawData?.version_id ?? undefined;
+  const documentId =
+    typeof rawData?.detail === "object" && rawData?.detail?.document_id
+      ? rawData.detail.document_id
+      : rawData?.document_id ?? undefined;
+
   return {
     message,
     field,
     action,
     retryAfterSeconds: parsed.retryAfterSeconds ?? undefined,
+    versionId,
+    documentId,
+    code: code ?? undefined,
   };
 }
 
