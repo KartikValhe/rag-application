@@ -139,6 +139,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           icon: Palette,
           permission: "branding:manage",
         },
+        {
+          label: "Course Materials",
+          href: "/admin/materials",
+          icon: BookOpen,
+          permission: "document:view",
+        },
       ],
     },
     {
@@ -154,6 +160,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: "My Classes & Subjects",
           href: "/teacher/classes",
           icon: BookOpen,
+        },
+        {
+          label: "Course Materials",
+          href: "/teacher/materials",
+          icon: BookOpen,
+          permission: "document:view",
         },
         {
           label: "My Schedule",

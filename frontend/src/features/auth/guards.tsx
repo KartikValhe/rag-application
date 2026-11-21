@@ -1,6 +1,7 @@
 import React from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "./AuthContext";
+import { usePermission } from "@/hooks/usePermission";
 import { getPlatformToken } from "@/api/client";
 import { Spinner } from "@/components/ui";
 import { AppShell } from "@/components/layout/AppShell";
@@ -27,10 +28,12 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({
   return <>{children}</>;
 };
 
-export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => {
+export const AdminRoute: React.FC<{
+  children: React.ReactNode;
+  permission?: string;
+}> = ({ children, permission }) => {
   const { user, isAuthenticated, isLoading } = useAuth();
+  const { can } = usePermission();
   const location = useLocation();
 
   if (isLoading) {
@@ -61,13 +64,28 @@ export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({
     );
   }
 
+  if (permission && !can(permission)) {
+    return (
+      <AppShell>
+        <ForbiddenState
+          title="Administrative Access Required (403)"
+          description="You do not have permission to view or manage this section."
+          backPath="/admin"
+          backLabel="Return to Admin Overview"
+        />
+      </AppShell>
+    );
+  }
+
   return <>{children}</>;
 };
 
-export const TeacherRoute: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => {
+export const TeacherRoute: React.FC<{
+  children: React.ReactNode;
+  permission?: string;
+}> = ({ children, permission }) => {
   const { user, isAuthenticated, isLoading } = useAuth();
+  const { can } = usePermission();
   const location = useLocation();
 
   if (isLoading) {
@@ -95,6 +113,19 @@ export const TeacherRoute: React.FC<{ children: React.ReactNode }> = ({
           description="You do not have permission to access the teaching faculty portal."
           backPath="/student/dashboard"
           backLabel="Return to Student Portal"
+        />
+      </AppShell>
+    );
+  }
+
+  if (permission && !can(permission)) {
+    return (
+      <AppShell>
+        <ForbiddenState
+          title="Faculty Access Required (403)"
+          description="You do not have permission to access this section."
+          backPath="/teacher/dashboard"
+          backLabel="Return to Teacher Portal"
         />
       </AppShell>
     );

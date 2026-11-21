@@ -444,4 +444,21 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 - Schemas test: added comprehensive "every key present with null" suite across all response schemas.
 - Cleanups: component setup test uses neutral text without tool or product names; package.json trailing newline restored.
 
+### Phase 5f-1b: Read-only course materials list page (2026-11-21)
+- Client: created `frontend/src/features/documents/api/documentsClient.ts` providing standard instance of `documentsApi` using `apiClient`.
+- Hook: implemented `frontend/src/features/documents/hooks/useDocuments.ts` using `useInfiniteQuery` over `documentsApi.list` (limit 20, opaque cursor); synced filters `class`, `subject`, `status` with URL query parameters (`?class=&subject=&status=`); populated filter options dynamically via `/me/classes` (`academicApi.getMyClasses`).
+- Page: implemented `frontend/src/features/documents/pages/MaterialsListPage.tsx` used at `/teacher/materials` and `/admin/materials`. Features:
+  - PageHeader "Course materials" with route-aware breadcrumbs.
+  - Filter bar for Class, Subject, and Status.
+  - Data table with title (plain text, break-words), subject name, class badges (first 3 + count badge), status chip (from `getStatusChip`), dual version badge ("Published: vN"), formatted file size/type, and updated date.
+  - `can_manage=false` lock note using plain language from `blocked_reason`.
+  - "Load more" button with pending spinner following `next_cursor`.
+  - Three distinct empty states: no assigned classes (for teacher), no materials match (with clear filters button), and no materials yet.
+  - Error state displaying mapped error with "Try again" button, keeping loaded rows visible.
+  - Strictly read-only: no upload, retry, delete, publish, or search controls; no polling; literal rendering for untrusted text.
+- Route Guards: updated `TeacherRoute` and `AdminRoute` in `frontend/src/features/auth/guards.tsx` to support `permission?: string` prop and enforce `can(permission)`. Added guarded routes in `App.tsx`.
+- Sidebar Navigation: added "Course Materials" in `Sidebar.tsx` under Administration and Teacher Portal with `permission="document:view"`. Kept Student Portal isolated with zero materials links.
+- Class Detail Link: replaced "Coming in Phase 5" placeholder in `TeacherClassDetailPage.tsx` with a direct link to `/teacher/materials?class=${classId}`.
+- Tests: verified `student_isolation_source.test.ts` (3/3 passing in `npm test`, total 161 node tests) and `MaterialsListPage.test.tsx` (9/9 passing in `npm run test:components`). All linting, style rules, and typechecks green.
+
 

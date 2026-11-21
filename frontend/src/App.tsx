@@ -35,6 +35,7 @@ import { TeacherClassDetailPage } from "@/features/teacher/TeacherClassDetailPag
 import { StudentClassesPage } from "@/features/student/StudentClassesPage";
 import { StudentClassDetailPage } from "@/features/student/StudentClassDetailPage";
 import { TimetableEditorPage, ScheduleViewPage } from "@/features/timetable";
+import { MaterialsListPage } from "@/features/documents/pages/MaterialsListPage";
 import { ErrorBoundary } from "@/components/layout";
 
 const queryClient = new QueryClient({
@@ -184,6 +185,14 @@ export const App: React.FC = () => {
                       </AdminRoute>
                     }
                   />
+                  <Route
+                    path="/admin/materials"
+                    element={
+                      <AdminRoute permission="document:view">
+                        <MaterialsListPage />
+                      </AdminRoute>
+                    }
+                  />
 
                   {/* Member & Portal Dashboards */}
                   <Route
@@ -233,6 +242,14 @@ export const App: React.FC = () => {
                     element={
                       <TeacherRoute>
                         <TimetableEditorPage />
+                      </TeacherRoute>
+                    }
+                  />
+                  <Route
+                    path="/teacher/materials"
+                    element={
+                      <TeacherRoute permission="document:view">
+                        <MaterialsListPage />
                       </TeacherRoute>
                     }
                   />

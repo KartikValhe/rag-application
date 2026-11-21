@@ -21,8 +21,6 @@ import {
   Users,
   Calendar,
   Lock,
-  Sparkles,
-  Info,
 } from "lucide-react";
 
 export const TeacherClassDetailPage: React.FC = () => {
@@ -219,37 +217,38 @@ export const TeacherClassDetailPage: React.FC = () => {
           )}
         </div>
 
-        {/* Phase 5/6 Placeholder Section */}
+        {/* Course Materials Link Section */}
         <div className="pt-2">
-          <div className="flex items-center space-x-2 mb-3">
-            <Sparkles className="w-5 h-5 text-accent" />
-            <h3 className="text-base font-semibold text-text">Course Materials & Knowledge Base</h3>
-            <Badge variant="primary" size="sm">
-              Coming in Phase 5
-            </Badge>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center space-x-2">
+              <FolderArchive className="w-5 h-5 text-primary" />
+              <h3 className="text-base font-semibold text-text">Course Materials</h3>
+            </div>
+            <Link
+              to={`/teacher/materials?class=${classId}`}
+              className="text-xs font-medium text-primary hover:underline"
+            >
+              View materials for this class &rarr;
+            </Link>
           </div>
 
-          <Card className="border-dashed border-border bg-surface/50">
+          <Card className="border-border bg-surface">
             <CardContent className="pt-6">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                <div className="p-3 rounded-xl bg-accent/10 text-accent shrink-0">
-                  <FolderArchive className="w-6 h-6" />
-                </div>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="space-y-1">
                   <h4 className="text-sm font-semibold text-text">
-                    Curriculum Document Ingestion & RAG Retrieval
+                    Course Materials for this Class
                   </h4>
                   <p className="text-xs text-text-muted leading-relaxed max-w-2xl">
-                    Faculty will be able to upload lecture slides, PDF textbooks, homework sheets, and syllabus guides.
-                    Documents will be automatically parsed, chunked, and vectorized so students can ask questions
-                    scoped strictly to this subject.
+                    Browse published textbooks, lecture slides, syllabus guides, and drafts assigned to this class.
                   </p>
                 </div>
-              </div>
-
-              <div className="mt-4 pt-4 border-t border-border flex items-center gap-2 text-xs text-text-muted">
-                <Info className="w-3.5 h-3.5 text-primary shrink-0" />
-                <span>Upload pipelines, background OCR workers, and vector storage will be enabled in Phase 5.</span>
+                <Link
+                  to={`/teacher/materials?class=${classId}`}
+                  className="shrink-0 inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-primary-hover min-h-[44px] transition-colors"
+                >
+                  View Course Materials
+                </Link>
               </div>
             </CardContent>
           </Card>
