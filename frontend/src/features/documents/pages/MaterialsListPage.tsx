@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, Link, useNavigate } from "react-router-dom";
 import { AppShell, PageHeader } from "@/components/layout";
 import {
   Table,
@@ -56,6 +56,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   responsiveLayout = "scroll",
 }) => {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const isAdmin = Boolean(user?.isAdmin || user?.roles?.includes("tenant_admin"));
   const isTeacher = Boolean(user?.roles?.includes("teacher"));
@@ -80,15 +81,16 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   } = useDocuments({ api });
 
   const isAdminRoute = location.pathname.startsWith("/admin");
+  const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
   const breadcrumbs = isAdminRoute
     ? [
-        { label: "Administration", href: "/admin" },
-        { label: "Course materials" },
-      ]
+      { label: "Administration", href: "/admin" },
+      { label: "Course materials" },
+    ]
     : [
-        { label: "Teacher Portal", href: "/teacher/dashboard" },
-        { label: "Course materials" },
-      ];
+      { label: "Teacher Portal", href: "/teacher/dashboard" },
+      { label: "Course materials" },
+    ];
 
   const columns: Column<DocumentItem>[] = useMemo(
     () => [
@@ -98,9 +100,12 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
         className: "min-w-[220px]",
         render: (doc) => (
           <div className="space-y-1">
-            <div className="font-medium text-text break-words">
+            <Link
+              to={`${baseRoute}/${doc.id}`}
+              className="font-medium text-text hover:text-primary transition-colors break-words block"
+            >
               {doc.title}
-            </div>
+            </Link>
             <div className="text-xs text-text-muted break-words">
               {doc.subject?.name ?? "-"}
             </div>
@@ -296,6 +301,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
             isLoading={isLoading}
             loadingRowCount={5}
             responsiveLayout={responsiveLayout}
+            onRowClick={(doc) => navigate(`${baseRoute}/${doc.id}`)}
           />
 
           {hasNextPage && (

@@ -127,6 +127,38 @@ test("createDocumentsApi: limits calls GET /documents/limits", async () => {
   assert.deepEqual(result.accepted_extensions, ["docx", "md", "pdf", "pptx", "txt"]);
 });
 
+test("createDocumentsApi: status calls GET /documents/:docId/versions/:vid/status", async () => {
+  let capturedUrl = "";
+  let finalUrl = "";
+  const mockClient = createMockAxios((config) => {
+    capturedUrl = config.url ?? "";
+    finalUrl = axios.getUri(config);
+    return {
+      data: {
+        document_id: "doc-123",
+        version_id: "v-456",
+        version_no: 2,
+        status: "processing",
+        stage: "chunking",
+        error_code: null,
+        retryable: false,
+        updated_at: "2026-11-20T10:00:00Z",
+      },
+    };
+  });
+
+  const api = createDocumentsApi(mockClient);
+  const result = await api.status("doc-123", "v-456");
+
+  assert.equal(capturedUrl, "/documents/doc-123/versions/v-456/status");
+  assert.equal(finalUrl, "/api/v1/documents/doc-123/versions/v-456/status");
+  assert.equal(result.document_id, "doc-123");
+  assert.equal(result.version_id, "v-456");
+  assert.equal(result.status, "processing");
+  assert.equal(result.stage, "chunking");
+  assert.equal(result.retryable, false);
+});
+
 test("createDocumentsApi: throws SchemaMismatchError if response shape is invalid", async () => {
   const mockClient = createMockAxios(() => {
     return {

@@ -2,10 +2,12 @@ import type { AxiosInstance } from "axios";
 import {
   DocumentListSchema,
   DocumentSchema,
+  DocumentStatusSchema,
   DocumentUploadLimitsSchema,
   validateResponse,
   type DocumentListItem,
   type DocumentItem,
+  type DocumentStatusItem,
   type DocumentUploadLimitsItem,
 } from "../schemas/documentSchemas.ts";
 
@@ -30,6 +32,10 @@ export function createDocumentsApi(client: AxiosInstance) {
     limits: async (): Promise<DocumentUploadLimitsItem> => {
       const response = await client.get("/documents/limits");
       return validateResponse(DocumentUploadLimitsSchema, response.data, "upload limits");
+    },
+    status: async (documentId: string, versionId: string): Promise<DocumentStatusItem> => {
+      const response = await client.get(`/documents/${documentId}/versions/${versionId}/status`);
+      return validateResponse(DocumentStatusSchema, response.data, "document status");
     },
   };
 }

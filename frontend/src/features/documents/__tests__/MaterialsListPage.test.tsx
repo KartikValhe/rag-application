@@ -129,6 +129,7 @@ describe("MaterialsListPage", () => {
       }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -245,6 +246,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: docs, next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -286,6 +288,7 @@ describe("MaterialsListPage", () => {
       list: listMock,
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -316,6 +319,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -337,6 +341,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -361,6 +366,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -386,6 +392,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: [lockedDoc], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(
@@ -423,6 +430,7 @@ describe("MaterialsListPage", () => {
       list: vi.fn().mockResolvedValue({ items: [maliciousDoc], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
+      status: vi.fn(),
     };
 
     render(

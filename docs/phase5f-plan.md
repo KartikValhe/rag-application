@@ -461,4 +461,33 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 - Class Detail Link: replaced "Coming in Phase 5" placeholder in `TeacherClassDetailPage.tsx` with a direct link to `/teacher/materials?class=${classId}`.
 - Tests: verified `student_isolation_source.test.ts` (3/3 passing in `npm test`, total 161 node tests) and `MaterialsListPage.test.tsx` (9/9 passing in `npm run test:components`). All linting, style rules, and typechecks green.
 
+### Phase 5f-2: Document detail page and live status (2026-11-21)
+- API Client: added `status(documentId, versionId)` to `frontend/src/features/documents/api/documentsApi.ts`. Paths are relative to client `/api/v1` baseURL. Added URL test asserting final URL from `axios.getUri`.
+- Pure Polling Schedule (`frontend/src/features/documents/utils/pollingSchedule.ts`):
+  - `nextPollDelay(attempt)`: returns backoff in ms (2000, 3000, 5000, capped at 10000); on consecutive poll failures doubles wait up to 30000ms.
+  - `isTerminalStatus(status)`: identifies terminal version states (`ready`, `published`, `failed`, `archived`).
+  - `shouldPollList(items, isHidden?)`: returns true only when a visible latest version is `queued` or `processing`; false when tab is hidden or list is empty.
+  - `getLongRunningStatus(status, stage, createdAt)`: formats stage text with elapsed time, detects queued > 5 min ("Waiting for the processing service. If this does not change soon, contact your administrator."), in-progress > 15 min ("Taking longer than usual"), and hard stop at 65 min ("Check again" prompt).
+- Polling Hook (`frontend/src/features/documents/hooks/useVersionStatus.ts`):
+  - Polls status for in-flight versions (`queued` / `processing`) with dynamic backoff.
+  - Ceases polling on terminal states, hidden tab (`refetchIntervalInBackground: false`), 403/404 errors, or hard stop (65 min).
+  - Retains last valid state during network hiccups and displays "Connection lost, retrying".
+  - Fires `onTerminalStatus` callback once upon reaching terminal status to trigger document refetch.
+- List Page Polling & Links:
+  - `useDocuments.ts`: queries refetch every 5000ms only while `shouldPollList(items)` evaluates to true.
+  - `MaterialsListPage.tsx`: links title and row clicks to `/teacher/materials/:documentId` and `/admin/materials/:documentId`.
+- Detail Page (`frontend/src/features/documents/pages/MaterialDetailPage.tsx`):
+  - Registered at `/teacher/materials/:documentId` and `/admin/materials/:documentId`, guarded with `permission="document:view"`.
+  - Header renders title, subject, linked classes, and `can_manage=false` lock note.
+  - Versions table renders version number, plain text file name (`break-words`), type, size, pages, status chip, uploaded date, and published status.
+  - Failed versions display plain reason from `getVersionFailure(error_code)`.
+  - HTTP 404 renders `NotFoundState` with link back to materials list.
+  - Visually hidden `aria-live="polite"` region announces status changes (`"<title>: ready to publish"` / `"<title>: failed: <reason>"`).
+  - Strictly read-only: no upload, retry, delete, publish, flags tab, or search tab.
+- Tests & Verification:
+  - Unit tests: `pollingSchedule.test.ts` (9 tests), `documentsApi.test.ts` (status endpoint test), `student_isolation_source.test.ts` (detail routes guarded). All 173 node tests passing across 14 test suites in `npm test`.
+  - Component tests: `MaterialDetailPage.test.tsx` (7 tests covering live transition, terminal state stop, error display, failure reasons, 404 state, view-only lock note, and XSS safety). All 18 component tests passing across 3 test suites in `npm run test:components`.
+  - Full quality checks: `npm run typecheck`, `npm run lint` (0 styles violations), and `npm run build` all pass cleanly with exit code 0.
+
+
 

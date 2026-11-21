@@ -67,4 +67,28 @@ test("route guards: every /teacher/materials* and /admin/materials* route is wra
     adminMaterialsMatch[1].includes('permission="document:view"'),
     "/admin/materials must require document:view"
   );
+
+  // Verify /teacher/materials/:documentId exists and is inside TeacherRoute
+  const teacherDetailMatch = content.match(/<Route\s+path="\/teacher\/materials\/:documentId"[\s\S]*?element=\{([\s\S]*?)\}/);
+  assert.ok(teacherDetailMatch, "Route /teacher/materials/:documentId must exist in App.tsx");
+  assert.ok(
+    teacherDetailMatch[1].includes("<TeacherRoute"),
+    "/teacher/materials/:documentId must be wrapped in TeacherRoute"
+  );
+  assert.ok(
+    teacherDetailMatch[1].includes('permission="document:view"'),
+    "/teacher/materials/:documentId must require document:view"
+  );
+
+  // Verify /admin/materials/:documentId exists and is inside AdminRoute
+  const adminDetailMatch = content.match(/<Route\s+path="\/admin\/materials\/:documentId"[\s\S]*?element=\{([\s\S]*?)\}/);
+  assert.ok(adminDetailMatch, "Route /admin/materials/:documentId must exist in App.tsx");
+  assert.ok(
+    adminDetailMatch[1].includes("<AdminRoute"),
+    "/admin/materials/:documentId must be wrapped in AdminRoute"
+  );
+  assert.ok(
+    adminDetailMatch[1].includes('permission="document:view"'),
+    "/admin/materials/:documentId must require document:view"
+  );
 });

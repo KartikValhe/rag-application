@@ -8,6 +8,7 @@ import {
   type MyClassItem,
 } from "@/features/academic/api/academicApi";
 import type { DocumentItem } from "../schemas/documentSchemas";
+import { shouldPollList } from "../utils/pollingSchedule";
 
 export interface UseDocumentsOptions {
   api?: DocumentsApi;
@@ -59,6 +60,11 @@ export function useDocuments(options: UseDocumentsOptions = {}) {
         limit: 20,
       }),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    refetchInterval: (query) => {
+      const items = query.state.data?.pages.flatMap((page) => page.items) ?? [];
+      return shouldPollList(items) ? 5000 : false;
+    },
+    refetchIntervalInBackground: false,
   });
 
   const documents: DocumentItem[] = useMemo(() => {
