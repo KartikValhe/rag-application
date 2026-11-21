@@ -115,6 +115,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -144,6 +145,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -274,6 +276,7 @@ describe("UploadDialog and Upload flow", () => {
           uploadVersion: vi.fn(),
           deleteDocument: vi.fn(),
           deleteVersion: vi.fn(),
+          flags: vi.fn(),
           list: vi.fn(),
           get: vi.fn(),
           limits: vi.fn().mockResolvedValue({
@@ -357,6 +360,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -452,6 +456,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -527,6 +532,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -593,6 +599,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -647,6 +654,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -703,6 +711,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -764,6 +773,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -826,6 +836,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -887,6 +898,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -949,6 +961,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -1011,6 +1024,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -1082,6 +1096,7 @@ describe("UploadDialog and Upload flow", () => {
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
+      flags: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({

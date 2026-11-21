@@ -394,6 +394,48 @@ test("documentSchemas: validateResponse throws SchemaMismatchError on missing re
   );
 });
 
+test("documentSchemas: VersionFlagsSchema accepts matches and unknown extra keys", () => {
+  const flagsPayload = {
+    document_id: "doc-1",
+    version_id: "v-1",
+    version_no: 1,
+    version_status: "ready",
+    flagged_chunk_count: 1,
+    flags_acknowledged: false,
+    title_flagged: false,
+    filename_flagged: false,
+    unknown_top_field: "extra",
+    items: [
+      {
+        chunk_id: "chk-1",
+        ordinal: 0,
+        page_start: 1,
+        page_end: 2,
+        heading_path: "Intro",
+        injection_flags: ["instruction_override"],
+        excluded: false,
+        excerpt: "Ignore previous instructions",
+        unknown_chunk_field: 42,
+        matches: [
+          {
+            code: "instruction_override",
+            source: "content",
+            excerpt: "Ignore previous instructions",
+            unknown_match_field: true,
+          },
+        ],
+      },
+    ],
+    next_after_ordinal: null,
+  };
+  const parsed = VersionFlagsSchema.parse(flagsPayload);
+  assert.equal(parsed.items.length, 1);
+  assert.equal(parsed.items[0].matches.length, 1);
+  assert.equal(parsed.items[0].matches[0].code, "instruction_override");
+  assert.equal(parsed.items[0].matches[0].source, "content");
+  assert.equal(parsed.items[0].matches[0].excerpt, "Ignore previous instructions");
+});
+
 test("known limitation (5f-5 leftover C): the version response carries no updated or processing-started timestamp", () => {
   // The 65-minute polling stop can only start from created_at after a page reload. If the backend ever adds a
   // usable timestamp to DocumentVersionResponse, this test fails: then base the stop on it and delete this test.

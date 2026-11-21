@@ -1,5 +1,5 @@
 import React from "react";
-import { Lock, RefreshCw, Trash2 } from "lucide-react";
+import { Lock, RefreshCw, Trash2, Flag } from "lucide-react";
 import { Button } from "@/components/ui";
 import type { DocumentPolicyAction } from "../utils/documentPolicy";
 
@@ -16,6 +16,7 @@ export interface VersionRowActionsProps {
   describedById: string;
   onRetry: () => void;
   onDelete: () => void;
+  onReviewFlags?: () => void;
 }
 
 /**
@@ -31,13 +32,15 @@ export const VersionRowActions: React.FC<VersionRowActionsProps> = ({
   describedById,
   onRetry,
   onDelete,
+  onReviewFlags,
 }) => {
   const retry = actions.find((a) => a.id === "retry" && a.visible);
   const del = actions.find((a) => a.id === "delete_version" && a.visible);
-  const lockReason = [retry, del].find((a) => a && !a.enabled && a.reason)?.reason;
+  const reviewFlags = actions.find((a) => a.id === "review_flags" && a.visible);
+  const lockReason = [retry, del, reviewFlags].find((a) => a && !a.enabled && a.reason)?.reason;
   const noteText = lockReason ?? hint;
 
-  if (!retry && !del && !hint) return null;
+  if (!retry && !del && !reviewFlags && !hint) return null;
 
   return (
     <div className="w-full flex flex-col gap-3 md:flex-row md:flex-wrap md:items-center md:justify-end md:gap-2 min-w-0">
@@ -49,6 +52,21 @@ export const VersionRowActions: React.FC<VersionRowActionsProps> = ({
           {lockReason && <Lock className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />}
           <span className="min-w-0">{noteText}</span>
         </p>
+      )}
+
+      {reviewFlags && (
+        <div className="w-full md:w-auto">
+          <Button
+            variant="secondary"
+            className="w-full md:w-auto min-h-[44px]"
+            leftIcon={<Flag className="w-4 h-4" aria-hidden="true" />}
+            disabled={!reviewFlags.enabled || isBusy}
+            aria-describedby={noteText ? describedById : undefined}
+            onClick={onReviewFlags}
+          >
+            Review flags
+          </Button>
+        </div>
       )}
 
       {retry && (

@@ -5,12 +5,14 @@ import {
   DocumentStatusSchema,
   DocumentUploadLimitsSchema,
   DocumentVersionSchema,
+  VersionFlagsSchema,
   validateResponse,
   type DocumentListItem,
   type DocumentItem,
   type DocumentStatusItem,
   type DocumentUploadLimitsItem,
   type DocumentVersionItem,
+  type VersionFlagsItem,
 } from "../schemas/documentSchemas.ts";
 
 export interface DocumentListParams {
@@ -26,6 +28,11 @@ export interface DocumentUploadPayload {
   title: string;
   subject_id: string;
   class_ids: string[];
+}
+
+export interface FlagsParams {
+  afterOrdinal?: number | null;
+  limit?: number;
 }
 
 /** New version of an existing document: the file is the only thing the server accepts. */
@@ -86,6 +93,23 @@ export function createDocumentsApi(client: AxiosInstance) {
     status: async (documentId: string, versionId: string): Promise<DocumentStatusItem> => {
       const response = await client.get(`/documents/${documentId}/versions/${versionId}/status`);
       return validateResponse(DocumentStatusSchema, response.data, "document status");
+    },
+    flags: async (
+      documentId: string,
+      versionId: string,
+      options?: FlagsParams
+    ): Promise<VersionFlagsItem> => {
+      const params: Record<string, unknown> = {
+        limit: options?.limit ?? 50,
+      };
+      if (options?.afterOrdinal != null) {
+        params.after_ordinal = options.afterOrdinal;
+      }
+      const response = await client.get(
+        `/documents/${documentId}/versions/${versionId}/flags`,
+        { params }
+      );
+      return validateResponse(VersionFlagsSchema, response.data, "document flags");
     },
     upload: async (
       form: FormData | DocumentUploadPayload,

@@ -309,7 +309,7 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
     assert.ok(seen.length > before, `${name} made no request`);
   }
-  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument"]) {
+  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags"]) {
     assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {
@@ -457,3 +457,82 @@ test("createDocumentsApi: deleteDocument is DELETE /documents/:id (final URL), 2
   assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9`);
   assert.equal(result, undefined);
 });
+
+const FLAGS_RESPONSE = {
+  document_id: "doc-9",
+  version_id: "v-1",
+  version_no: 1,
+  version_status: "ready",
+  flagged_chunk_count: 2,
+  flags_acknowledged: false,
+  title_flagged: false,
+  filename_flagged: true,
+  items: [
+    {
+      chunk_id: "chk-1",
+      ordinal: 0,
+      page_start: 3,
+      page_end: 4,
+      heading_path: "Unit 1 > Section A",
+      injection_flags: ["instruction_override"],
+      excluded: false,
+      excerpt: "Ignore previous instructions",
+      matches: [
+        {
+          code: "instruction_override",
+          source: "content",
+          excerpt: "Ignore previous instructions",
+        },
+      ],
+    },
+  ],
+  next_after_ordinal: 0,
+};
+
+test("createDocumentsApi: flags is GET /documents/:docId/versions/:vid/flags with after_ordinal and limit (final URL)", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 200, data: FLAGS_RESPONSE };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.flags("doc-9", "v-1", { afterOrdinal: 10, limit: 25 });
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "get");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions/v-1/flags?limit=25&after_ordinal=10`);
+  assert.equal(captured.params?.limit, 25);
+  assert.equal(captured.params?.after_ordinal, 10);
+  assert.equal(result.document_id, "doc-9");
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].matches[0].code, "instruction_override");
+});
+
+test("createDocumentsApi: flags defaults limit to 50 when options are omitted", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 200, data: FLAGS_RESPONSE };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.flags("doc-9", "v-1");
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "get");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions/v-1/flags?limit=50`);
+  assert.equal(captured.params?.limit, 50);
+  assert.equal(captured.params?.after_ordinal, undefined);
+  assert.equal(result.version_no, 1);
+});
+
+test("createDocumentsApi: flags rejects invalid response shape with SchemaMismatchError", async () => {
+  const mockClient = createMockAxios(() => ({ status: 200, data: { corrupt: true } }));
+  const api = createDocumentsApi(mockClient);
+  await assert.rejects(
+    () => api.flags("doc-9", "v-1"),
+    (e: Error) => e.name === SCHEMA_MISMATCH_NAME
+  );
+});
+

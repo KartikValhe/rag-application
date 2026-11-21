@@ -9,7 +9,9 @@ export type DocumentActionId =
   | "delete_document"
   | "publish"
   | "test_search"
-  | "usage";
+  | "usage"
+  | "review_flags"
+  | "flags";
 
 export interface DocumentPolicyAction {
   id: DocumentActionId;
@@ -170,6 +172,35 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
     id: "usage",
     visible: canManageSettings,
     enabled: canManageSettings,
+  });
+
+  // 10. Review Flags
+  const isReviewFlagsEligible =
+    (activeStatus === "ready" || activeStatus === "published") &&
+    (activeVersion?.flagged_chunk_count === null ||
+      activeVersion?.flagged_chunk_count === undefined ||
+      activeVersion.flagged_chunk_count > 0);
+
+  actions.push({
+    id: "review_flags",
+    visible: canView && isReviewFlagsEligible,
+    enabled: canView && isReviewFlagsEligible,
+  });
+
+  // 11. Flags Tab
+  const hasReadyOrPublishedVersion = Boolean(
+    activeStatus === "ready" ||
+      activeStatus === "published" ||
+      document?.latest_version?.status === "ready" ||
+      document?.latest_version?.status === "published" ||
+      document?.published_version?.status === "ready" ||
+      document?.published_version?.status === "published"
+  );
+
+  actions.push({
+    id: "flags",
+    visible: canView && hasReadyOrPublishedVersion,
+    enabled: canView && hasReadyOrPublishedVersion,
   });
 
   return actions;

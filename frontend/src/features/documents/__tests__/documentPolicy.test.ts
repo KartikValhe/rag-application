@@ -479,3 +479,72 @@ test("documentPolicy matrix: new_version and delete_document by permission, can_
     }
   }
 });
+
+test("documentPolicy: review_flags action in row and flags tab action on document", () => {
+  const teacherPerms = new Set(["document:upload", "document:delete", "document:view", "document:publish"]);
+  const canTeacher = (perm: string) => teacherPerms.has(perm);
+  const canStudent = (_perm: string) => false;
+
+  // 1. ready version with flagged_chunk_count > 0 -> review_flags visible & enabled
+  const readyFlagged = createMockVersion({ status: "ready", flagged_chunk_count: 2 });
+  const docFlagged = createMockDoc({ latest_version: readyFlagged });
+  const actionsFlagged = getDocumentActions({ can: canTeacher, document: docFlagged, version: readyFlagged });
+  const rfFlagged = getAction(actionsFlagged, "review_flags");
+  assert.equal(rfFlagged.visible, true, "review_flags must be visible for flagged_chunk_count > 0");
+  assert.equal(rfFlagged.enabled, true, "review_flags must be enabled");
+
+  // 2. ready version with flagged_chunk_count === null -> review_flags visible & enabled
+  const readyNull = createMockVersion({ status: "ready", flagged_chunk_count: null });
+  const docNull = createMockDoc({ latest_version: readyNull });
+  const actionsNull = getDocumentActions({ can: canTeacher, document: docNull, version: readyNull });
+  const rfNull = getAction(actionsNull, "review_flags");
+  assert.equal(rfNull.visible, true, "review_flags must be visible for flagged_chunk_count === null");
+  assert.equal(rfNull.enabled, true, "review_flags must be enabled");
+
+  // 3. ready version with flagged_chunk_count === 0 -> review_flags hidden
+  const readyZero = createMockVersion({ status: "ready", flagged_chunk_count: 0 });
+  const docZero = createMockDoc({ latest_version: readyZero });
+  const actionsZero = getDocumentActions({ can: canTeacher, document: docZero, version: readyZero });
+  const rfZero = getAction(actionsZero, "review_flags");
+  assert.equal(rfZero.visible, false, "review_flags must be hidden when flagged_chunk_count === 0");
+
+  // 4. published version with flagged_chunk_count > 0 -> review_flags visible
+  const publishedFlagged = createMockVersion({ status: "published", flagged_chunk_count: 1 });
+  const actionsPublished = getDocumentActions({ can: canTeacher, version: publishedFlagged });
+  const rfPublished = getAction(actionsPublished, "review_flags");
+  assert.equal(rfPublished.visible, true, "review_flags visible for published with flags");
+
+  // 5. queued, processing, failed versions -> review_flags hidden even if flagged_chunk_count is null or > 0
+  for (const status of ["queued", "processing", "failed", "archived"]) {
+    const v = createMockVersion({ status, flagged_chunk_count: 5 });
+    const acts = getDocumentActions({ can: canTeacher, version: v });
+    const rf = getAction(acts, "review_flags");
+    assert.equal(rf.visible, false, `review_flags must be hidden for status=${status}`);
+  }
+
+  // 6. can_manage === false -> review_flags still visible and enabled (view-only user can inspect flags)
+  const unmanagedDoc = createMockDoc({ can_manage: false, latest_version: readyFlagged });
+  const actionsUnmanaged = getDocumentActions({ can: canTeacher, document: unmanagedDoc, version: readyFlagged });
+  const rfUnmanaged = getAction(actionsUnmanaged, "review_flags");
+  assert.equal(rfUnmanaged.visible, true);
+  assert.equal(rfUnmanaged.enabled, true);
+
+  // 7. Student -> review_flags hidden and flags tab hidden
+  const actionsStudent = getDocumentActions({ can: canStudent, document: docFlagged, version: readyFlagged });
+  const rfStudent = getAction(actionsStudent, "review_flags");
+  const flagsStudent = getAction(actionsStudent, "flags");
+  assert.equal(rfStudent.visible, false, "Student cannot see review_flags");
+  assert.equal(flagsStudent.visible, false, "Student cannot see flags tab");
+
+  // 8. Flags tab: visible on document when ready or published version exists
+  const actionsDocReady = getDocumentActions({ can: canTeacher, document: docZero });
+  const flagsDocReady = getAction(actionsDocReady, "flags");
+  assert.equal(flagsDocReady.visible, true, "Flags tab visible when ready version exists even if flags count is 0");
+
+  // 9. Flags tab: hidden on document when only queued/failed versions exist
+  const docOnlyQueued = createMockDoc({ latest_version: createMockVersion({ status: "queued" }) });
+  const actionsOnlyQueued = getDocumentActions({ can: canTeacher, document: docOnlyQueued });
+  const flagsOnlyQueued = getAction(actionsOnlyQueued, "flags");
+  assert.equal(flagsOnlyQueued.visible, false, "Flags tab hidden when no ready or published version");
+});
+

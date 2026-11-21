@@ -558,3 +558,36 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 - Leftover C (known limitation, not fixed): `DocumentVersionResponse` carries only `created_at` and `published_at`; there is no updated or processing-started timestamp (the status route has `updated_at`, but it is only called while polling, and the 65 minute stop is evaluated before the first poll). After a page reload a version retried hours after upload therefore still shows "Check again" instead of polling, and nothing is invented. A tripwire test in `documentSchemas.test.ts` fails when the backend adds such a field, as the reminder to use it. Fix needs a backend field (for example `updated_at` or `processing_started_at` on the version response).
 - Open question for the owner: a document whose only version was deleted has `latest_version: null`, and the existing policy (pinned by tests) hides "New version" then, so the only way out is to delete the document.
 - Tests: node `documentsApi` (real builder, final URLs, guard), `fileChecks`, `documentErrors` (new_version context), `documentPolicy` (role x can_manage x status matrix for new version and delete document), `documentSchemas` (tripwire), `source_guard`; component `NewVersionAndDelete.test.tsx` (dialog mode, detail actions, delete document, bidi file name) and `MaterialsListPage.test.tsx` (stacked layout). Ten rules were switched off one at a time to prove a test goes red (builder extra field, 404 as removed, same-tick double submit, file name sanitising, Cancel focus, list layout, Show it focus, version-mode title validation, can_manage lock, delete visibility); each time a test failed, then the code was restored.
+
+### Phase 5f-6: Flags viewer (read-only) (2026-11-21)
+- API (`documentsApi.ts`): `flags(documentId, versionId, options)` is `GET /documents/:id/versions/:vid/flags` (default `limit: 50`, `after_ordinal`, response validated as `VersionFlagsSchema`). Tested by final URL and method (`axios.getUri`); the "every API function" guard covers `flags`.
+- Schemas (`documentSchemas.ts`): `VersionFlagsSchema` accepts `matches` array per item and unknown extra keys (`.passthrough()`).
+- Hook (`hooks/useVersionFlags.ts`): `useVersionFlags(documentId, versionId)` uses `useInfiniteQuery` with cursor paging on `next_after_ordinal`. Aggregates all pages into flat `items`, preserves `firstPage` metadata (`flagged_chunk_count`, `title_flagged`, `filename_flagged`), exposes `hasNextPage`, `fetchNextPage`, `isFetchingNextPage`.
+- Detail page integration (`pages/MaterialDetailPage.tsx`):
+  - Uses `Tabs` component with "Versions" and "Flags" tabs.
+  - "Flags" tab trigger visible and enabled when a version is `ready` or `published` via `documentPolicy` action `flags`.
+  - Switching versions or clicking "Review flags" updates `selectedFlagsVersionId` and switches active tab to "flags".
+  - Versions row action: "Review flags" button rendered in `VersionRowActions.tsx` when `documentPolicy` allows `review_flags` (visible for ready/published versions with `flagged_chunk_count > 0` or `null`). Button is at least 44 px high (`min-h-[44px]`).
+- Flags viewer component (`components/FlagsViewer.tsx`):
+  - Tripwire alert: "This check is a tripwire. Text that is not flagged is not guaranteed safe."
+  - Heading texts based on `flagged_chunk_count`:
+    - `> 0`: "N passages were flagged for review"
+    - `0`: "Nothing was flagged"
+    - `null`: "This file has not been checked yet. You can still publish after you confirm you have read this notice."
+  - Metadata alerts when `title_flagged` ("The title of this material contains flagged text.") or `filename_flagged` ("The original file name contains flagged text.").
+  - Stacked cards for items (never a wide table):
+    - Page range: "Page 3" / "Pages 3-4" with label "Page/slide".
+    - Heading path rendered as plain React text (`break-words`).
+    - Injection code chips with plain English descriptions (`FLAG_CODE_DESCRIPTIONS` in `utils/flagDescriptions.ts`, e.g. instruction_override: "Tells an AI to ignore its instructions", unknown code fallback: "Flagged for review"). Chips wrap on narrow screens.
+    - Matched spans: `matches[].source` ("in the heading" / "in the text") and `matches[].excerpt`. Empty matches fallback: renders chunk excerpt and displays "No longer matches the current rules".
+    - "Excluded" badge marker shown when `excluded` is true.
+    - Long excerpts wrap with `break-words` and feature a visible "Show more" / "Show less" toggle button (`min-h-[44px]`, not a tooltip).
+  - Error states via `getDocumentError`: 404 ("We could not find this material. It may have been removed.") and 403 ("You do not have permission to do this.").
+  - Next-page load error keeps loaded items visible with inline alert and "Try again" button.
+  - Loading skeleton state and empty states.
+  - Untrusted text safety: all text from the backend (heading, excerpts, file names) is rendered as plain React text with `whitespace-pre-wrap break-words`, never HTML.
+  - Mobile (360px): full width stacked cards, >= 44px min-height buttons ("Review flags", "Load more", "Show more", "Try again"), zero horizontal scroll, keyboard reachable (Tab, Enter).
+- Tests:
+  - Node tests: `flagDescriptions.test.ts` (table-driven codes, count headings, page ranges, match sources, constants), `documentPolicy.test.ts` (review_flags and flags tab policy matrix), `documentsApi.test.ts` (flags endpoint, default limit 50, after_ordinal, schema validation, guard coverage), `documentSchemas.test.ts` (matches and extra keys). Added `flagDescriptions.test.ts` to `test` script in `package.json`.
+  - Component tests: `FlagsViewer.test.tsx` (15 tests: detail page integration, tab switching, headings, title/filename notes, page ranges, code descriptions, matched spans, empty matches fallback, excluded marker, XSS plain text rendering for script and img onerror, 404 and 403 error states, next page error keeping items, mobile Show more toggle, keyboard navigation, student isolation).
+  - Source guard (`source_guard.test.ts`): verified clean across all documents files with zero violations.

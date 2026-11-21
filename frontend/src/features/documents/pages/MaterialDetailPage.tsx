@@ -10,6 +10,10 @@ import {
   Alert,
   Skeleton,
   ConfirmDialog,
+  Tabs,
+  TabList,
+  TabTrigger,
+  TabContent,
 } from "@/components/ui";
 import { useOptionalToast } from "@/components/ui/Toast";
 import { usePermission } from "@/hooks/usePermission";
@@ -34,6 +38,7 @@ import {
 import { VersionRowActions } from "../components/VersionRowActions";
 import { DocumentActions } from "../components/DocumentActions";
 import { UploadDialog } from "../components/UploadDialog";
+import { FlagsViewer } from "../components/FlagsViewer";
 
 export interface MaterialDetailPageProps {
   api?: DocumentsApi;
@@ -90,6 +95,8 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   const [deleteDocError, setDeleteDocError] = useState<string | null>(null);
   // Set once the document is gone, so the page does not refetch it (that would only answer 404).
   const [isRemoved, setIsRemoved] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>("versions");
+  const [selectedFlagsVersionId, setSelectedFlagsVersionId] = useState<string | null>(null);
 
   const isAdminRoute = location.pathname.startsWith("/admin");
   const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
@@ -444,8 +451,9 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     getDocumentActions({ can, document: doc, version: v });
   const showActionsColumn = versions.some(
     (v) =>
-      rowActions(v).some((a) => (a.id === "retry" || a.id === "delete_version") && a.visible) ||
-      getFailedVersionHint({ can, version: v }) !== null
+      rowActions(v).some(
+        (a) => (a.id === "retry" || a.id === "delete_version" || a.id === "review_flags") && a.visible
+      ) || getFailedVersionHint({ can, version: v }) !== null
   );
   if (showActionsColumn) {
     columns.push({
@@ -467,6 +475,10 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
               setDeleteError(null);
               setDeleteTarget(v);
             }}
+            onReviewFlags={() => {
+              setSelectedFlagsVersionId(v.id);
+              setActiveTab("flags");
+            }}
           />
         );
       },
@@ -480,6 +492,18 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   const deleteTargetEnabled = deleteTarget
     ? rowActions(deleteTarget).find((a) => a.id === "delete_version")?.enabled === true
     : false;
+
+  const showFlagsTab = documentActions.find((a) => a.id === "flags")?.visible === true;
+  const defaultFlagsVersionId =
+    doc.latest_version &&
+    (doc.latest_version.status === "ready" || doc.latest_version.status === "published")
+      ? doc.latest_version.id
+      : doc.published_version
+      ? doc.published_version.id
+      : versions.find((v) => v.status === "ready" || v.status === "published")?.id ??
+        doc.latest_version?.id ??
+        "";
+  const effectiveFlagsVersionId = selectedFlagsVersionId || defaultFlagsVersionId;
 
   return (
     <AppShell>
@@ -528,27 +552,50 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         />
       </div>
 
-      {/* Versions Section */}
-      <div className="space-y-3">
-        <div className="flex items-center space-x-2">
-          <FileText className="w-5 h-5 text-primary" />
-          <h3 className="text-base font-semibold text-text">Versions</h3>
-        </div>
+      {/* Tabs Section: Versions and Flags */}
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabList>
+          <TabTrigger value="versions">Versions</TabTrigger>
+          {showFlagsTab && <TabTrigger value="flags">Flags</TabTrigger>}
+        </TabList>
 
-        {retryError && (
-          <Alert variant="danger" title="Could not try again" onClose={() => setRetryError(null)}>
-            <span className="break-words">{retryError}</span>
-          </Alert>
+        <TabContent value="versions">
+          <div className="space-y-3">
+            <div className="flex items-center space-x-2">
+              <FileText className="w-5 h-5 text-primary" />
+              <h3 className="text-base font-semibold text-text">Versions</h3>
+            </div>
+
+            {retryError && (
+              <Alert variant="danger" title="Could not try again" onClose={() => setRetryError(null)}>
+                <span className="break-words">{retryError}</span>
+              </Alert>
+            )}
+
+            <Table
+              columns={columns}
+              data={versions}
+              keyExtractor={(v) => v.id}
+              responsiveLayout={responsiveLayout}
+              mobileActionsLayout="stacked"
+            />
+          </div>
+        </TabContent>
+
+        {showFlagsTab && (
+          <TabContent value="flags">
+            <FlagsViewer
+              documentId={documentId}
+              versionId={effectiveFlagsVersionId}
+              originalFilename={
+                versions.find((v) => v.id === effectiveFlagsVersionId)?.original_filename ??
+                doc.latest_version?.original_filename
+              }
+              api={api}
+            />
+          </TabContent>
         )}
-
-        <Table
-          columns={columns}
-          data={versions}
-          keyExtractor={(v) => v.id}
-          responsiveLayout={responsiveLayout}
-          mobileActionsLayout="stacked"
-        />
-      </div>
+      </Tabs>
 
       <ConfirmDialog
         isOpen={deleteTarget !== null}
