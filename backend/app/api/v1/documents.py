@@ -59,6 +59,7 @@ from app.core.config import settings
 from app.core.tenant_db import tenant_session_context
 from app.core.upload_security import (
     UploadProfile,
+    accepted_extensions,
     attachment_header,
     sanitize_filename,
     stream_upload_with_limit,
@@ -89,6 +90,7 @@ from app.schemas.document import (
     DocumentResponse,
     DocumentStatusResponse,
     DocumentUpdateRequest,
+    DocumentUploadLimitsResponse,
     DocumentUsageResponse,
     DocumentVersionResponse,
     FlaggedChunk,
@@ -154,6 +156,8 @@ def _version_response(v: DocumentVersion, warnings: Sequence[str] = ()) -> Docum
         flagged_chunk_count=v.flagged_chunk_count,
         created_at=v.created_at,
         published_at=v.published_at,
+        # The one retry rule (the status route and the retry route use it too); null unless failed
+        retryable=document_upload.is_retryable(v.status, v.error_code) if v.status == VERSION_STATUS_FAILED else None,
         warnings=list(warnings),
     )
 
@@ -569,6 +573,26 @@ async def list_documents(
     )
 
 
+@router.get("/limits", response_model=DocumentUploadLimitsResponse)
+async def get_upload_limits(
+    db: TenantDB, user: Annotated[User, Depends(require("document:view"))]
+) -> DocumentUploadLimitsResponse:
+    """
+    The EFFECTIVE upload limits of the caller's own tenant (its override, else the platform default) and the
+    accepted file extensions, so the upload form can check a file before sending it. One single-row read, no
+    usage numbers, no quotas, no ids. Declared BEFORE `/{document_id}` so that "limits" is not read as an id.
+    """
+    limits = await document_limits.load_tenant_limits(db, user.tenant_id)
+    return DocumentUploadLimitsResponse(
+        max_file_bytes=limits.max_file_bytes,
+        max_pdf_pages=limits.max_pdf_pages,
+        max_pptx_slides=limits.max_pptx_slides,
+        uploads_per_user_per_hour=limits.uploads_per_user_per_hour,
+        uploads_per_tenant_per_hour=limits.uploads_per_tenant_per_hour,
+        accepted_extensions=accepted_extensions(UploadProfile.DOCUMENT),
+    )
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: uuid.UUID, db: TenantDB, user: Annotated[User, Depends(require("document:view"))]
@@ -725,7 +749,7 @@ async def get_version_status(
         status=v.status,
         stage=v.stage,
         error_code=v.error_code,
-        retryable=v.status == VERSION_STATUS_FAILED and v.error_code in document_upload.TRANSIENT_ERROR_CODES,
+        retryable=document_upload.is_retryable(v.status, v.error_code),
         updated_at=v.updated_at,
     )
 
@@ -752,7 +776,7 @@ async def retry_version(
             await document_scope.load_document_for(db, user, document_id, action="manage", for_update=True)
             v = await _load_version(db, tid, document_id, version_id, for_update=True)
             await document_upload.check_retry_rate(user.id, v.id)  # after the 404/403 checks: no probing
-            if v.status != VERSION_STATUS_FAILED or v.error_code not in document_upload.TRANSIENT_ERROR_CODES:
+            if not document_upload.is_retryable(v.status, v.error_code):
                 raise api_error(status.HTTP_409_CONFLICT, "version_not_retryable")
             if await document_upload.count_manual_retries(db, tid, document_id, v.id) >= settings.DOC_RETRY_MAX_PER_VERSION:
                 raise api_error(status.HTTP_409_CONFLICT, "retry_limit_reached")

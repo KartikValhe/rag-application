@@ -43,6 +43,10 @@ class DocumentVersionResponse(_Strict):
     flagged_chunk_count: int | None
     created_at: datetime
     published_at: datetime | None
+    # Whether POST .../retry would be accepted for this version's failure (the same rule as the status route:
+    # failed with a transient error code). null unless the version is failed; the retry route's own
+    # rate limits and caps still apply.
+    retryable: bool | None
     # Non-blocking notices, for example "duplicate_content" when the same bytes already exist in
     # another document the caller can see. Always a list (empty when there is nothing to say).
     warnings: list[str]
@@ -94,6 +98,19 @@ class DocumentLimitsModel(_Strict):
     max_pages: int
     uploads_per_user_per_hour: int
     uploads_per_tenant_per_hour: int
+
+
+class DocumentUploadLimitsResponse(_Strict):
+    """GET /api/v1/documents/limits: what the caller's tenant may upload, for the upload form. The EFFECTIVE
+    values (the tenant's override, else the platform default); no usage, no quotas, no ids."""
+
+    max_file_bytes: int
+    max_pdf_pages: int
+    max_pptx_slides: int
+    uploads_per_user_per_hour: int
+    uploads_per_tenant_per_hour: int
+    # Lower case, without a dot (the same words as `file_kind`), sorted.
+    accepted_extensions: list[str]
 
 
 class DocumentUsageResponse(_Strict):

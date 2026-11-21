@@ -166,6 +166,11 @@ PROFILE_RULES: dict[UploadProfile, ProfileRules] = {
 }
 
 
+def accepted_extensions(profile: UploadProfile) -> list[str]:
+    """The file name extensions a profile accepts (lower case, no dot, sorted): its detected formats."""
+    return sorted(PROFILE_RULES[profile].formats)
+
+
 def resolve_max_file_bytes(profile: UploadProfile, requested: int | None = None) -> int:
     """
     The per-file size limit to enforce: the caller's value (the tenant's max_file_bytes for

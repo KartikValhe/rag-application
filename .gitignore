@@ -50,3 +50,7 @@ Thumbs.db
 # Playwright output
 frontend/test-results/
 frontend/playwright-report/
+
+# Local retrieval working notes
+backend/tests/fixtures/Golden set for retrieval tests - Chunk observations.csv
+backend/tests/fixtures/Golden set for retrieval tests - To verify.csv

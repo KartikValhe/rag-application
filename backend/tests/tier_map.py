@@ -109,6 +109,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_branding.py": ("db",),
     "test_document_lifecycle.py": ("db", "slow"),
     "test_document_limits.py": ("db",),
+    "test_document_limits_route.py": ("db", "security"),  # who may read the limits, and no leak between tenants (gate)
+    "test_document_retryable.py": ("db",),  # one retry rule for the status route and the version responses
     "test_embed_stage.py": ("db", "slow"),
     "test_document_flags_route.py": ("db", "security"),  # who may read the flags (gate)
     "test_document_flags_contract.py": ("db",),  # keys, excerpts, spans, paging, read-only

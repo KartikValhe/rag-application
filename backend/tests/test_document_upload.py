@@ -38,7 +38,8 @@ pytestmark = pytest.mark.asyncio
 
 VERSION_KEYS = {
     "id", "document_id", "version_no", "status", "stage", "error_code", "file_kind", "original_filename",
-    "size_bytes", "page_count", "chunk_count", "flagged_chunk_count", "created_at", "published_at", "warnings",
+    "size_bytes", "page_count", "chunk_count", "flagged_chunk_count", "created_at", "published_at", "retryable",
+    "warnings",
 }
 
 

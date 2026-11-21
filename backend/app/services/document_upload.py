@@ -32,6 +32,7 @@ from app.db.models.audit import AuditLog
 from app.db.models.document import (
     IN_FLIGHT_VERSION_STATUSES,
     INACTIVE_VERSION_STATUSES,
+    VERSION_STATUS_FAILED,
     Document,
     DocumentVersion,
     StorageDeletion,
@@ -56,6 +57,14 @@ PAGE_COUNTING_STATUSES: tuple[str, ...] = (*IN_FLIGHT_VERSION_STATUSES, "publish
 # processing_failed after the last attempt; worker_crash is the crash code). Everything else is
 # permanent (validation, scanned_pdf, parse_timeout, too_many_pages, quota ...).
 TRANSIENT_ERROR_CODES: frozenset[str] = frozenset({"processing_failed", "worker_crash"})
+
+
+def is_retryable(version_status: str, error_code: str | None) -> bool:
+    """
+    THE retry rule: a version may be retried by hand only when it is failed with a transient error code.
+    The status route, the retry route and `retryable` on the version responses all call this function.
+    """
+    return version_status == VERSION_STATUS_FAILED and error_code in TRANSIENT_ERROR_CODES
 
 ERROR_MESSAGES: dict[str, str] = {
     "duplicate_version": "This file is already an active version of this document.",

@@ -42,6 +42,8 @@ ROLES = ("admin", "teacher", "teacher_out", "student", "anonymous")
 EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, int, int, int, int]]] = {
     ("POST", "/api/v1/documents"): ("document:upload", (202, 202, 404, 403, 401)),
     ("GET", "/api/v1/documents"): ("document:view", (200, 200, 200, 403, 401)),
+    # 5e-1: the effective limits of the caller's own tenant; no document or scope is involved, so T' gets 200
+    ("GET", "/api/v1/documents/limits"): ("document:view", (200, 200, 200, 403, 401)),
     ("GET", "/api/v1/documents/{document_id}"): ("document:view", (200, 200, 404, 403, 401)),
     ("PATCH", "/api/v1/documents/{document_id}"): ("document:upload", (200, 200, 404, 403, 401)),
     ("DELETE", "/api/v1/documents/{document_id}"): ("document:delete", (204, 204, 404, 403, 401)),
