@@ -57,6 +57,23 @@ export function useVersionStatus({
     return () => clearInterval(timer);
   }, [createdAt]);
 
+  // A version that goes back into flight (for example after a manual retry) must not keep the
+  // terminal state remembered from before: forget it and start polling from the beginning.
+  useEffect(() => {
+    if (initialStatus && !isTerminalStatus(initialStatus)) {
+      setLastGoodStatus((prev) => {
+        if (prev && isTerminalStatus(prev.status)) {
+          terminalRef.current = false;
+          setAttempt(0);
+          setConsecutiveErrors(0);
+          setIsConnectionLost(false);
+          return null;
+        }
+        return prev;
+      });
+    }
+  }, [initialStatus, versionId]);
+
   const currentStatus = lastGoodStatus?.status ?? initialStatus;
   const isTerminal = isTerminalStatus(currentStatus);
   const isHardStop = elapsedSeconds >= HARD_STOP_SECONDS;

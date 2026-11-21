@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getDocumentActions, type DocumentActionId, type DocumentPolicyAction } from "../utils/documentPolicy.ts";
+import { getDocumentActions, getFailedVersionHint, type DocumentActionId, type DocumentPolicyAction } from "../utils/documentPolicy.ts";
 import type { DocumentItem, DocumentVersionItem } from "../schemas/documentSchemas.ts";
 
 function createMockDoc(overrides: Partial<DocumentItem> = {}): DocumentItem {
@@ -330,4 +330,99 @@ test("documentPolicy: delete version with can_manage false for ready and for fai
   assert.equal(delFailed.visible, true);
   assert.equal(delFailed.enabled, false);
   assert.equal(delFailed.reason, lockReason);
+});
+
+const LOCK = "You teach this subject in only some of the linked classes, so you can only view it";
+
+test("documentPolicy matrix: retry is visible only for failed + retryable === true", () => {
+  const can = (_perm: string) => true;
+  const cases: Array<{ status: string; retryable: boolean | null; visible: boolean }> = [
+    { status: "failed", retryable: true, visible: true },
+    { status: "failed", retryable: false, visible: false },
+    { status: "failed", retryable: null, visible: false },
+    { status: "ready", retryable: null, visible: false },
+    { status: "queued", retryable: null, visible: false },
+    { status: "processing", retryable: null, visible: false },
+    { status: "published", retryable: null, visible: false },
+    { status: "archived", retryable: null, visible: false },
+  ];
+  assert.ok(cases.length > 0);
+  for (const c of cases) {
+    const v = createMockVersion({ status: c.status, retryable: c.retryable });
+    const doc = createMockDoc({ latest_version: v });
+    const retry = getAction(getDocumentActions({ can, document: doc, version: v }), "retry");
+    assert.equal(retry.visible, c.visible, `${c.status}/${String(c.retryable)}`);
+    assert.equal(retry.enabled, c.visible);
+    assert.equal(retry.reason, undefined);
+  }
+});
+
+test("documentPolicy matrix: retry and delete need document:upload; view-only and student get none", () => {
+  const v = createMockVersion({ status: "failed", retryable: true });
+  const doc = createMockDoc({ latest_version: v });
+  const viewOnly = (p: string) => p === "document:view";
+  const student = (_p: string) => false;
+  for (const can of [viewOnly, student]) {
+    const actions = getDocumentActions({ can, document: doc, version: v });
+    assert.equal(getAction(actions, "retry").visible, false);
+    assert.equal(getAction(actions, "delete_version").visible, false);
+  }
+});
+
+test("documentPolicy matrix: delete version only for ready and failed, never queued, processing, published, archived", () => {
+  const can = (_perm: string) => true;
+  const cases: Array<[string, boolean]> = [
+    ["ready", true],
+    ["failed", true],
+    ["queued", false],
+    ["processing", false],
+    ["published", false],
+    ["archived", false],
+  ];
+  for (const [status, visible] of cases) {
+    const v = createMockVersion({ status });
+    const doc = createMockDoc({ latest_version: v });
+    const del = getAction(getDocumentActions({ can, document: doc, version: v }), "delete_version");
+    assert.equal(del.visible, visible, status);
+    assert.equal(del.enabled, visible, status);
+  }
+});
+
+test("documentPolicy matrix: a published row is judged by its own status, not the latest version", () => {
+  const can = (_perm: string) => true;
+  const published = createMockVersion({ id: "v-2", version_no: 2, status: "published" });
+  const latestReady = createMockVersion({ id: "v-3", version_no: 3, status: "ready" });
+  const doc = createMockDoc({ latest_version: latestReady, published_version: published });
+  const forPublished = getDocumentActions({ can, document: doc, version: published });
+  assert.equal(getAction(forPublished, "delete_version").visible, false);
+  const forLatest = getDocumentActions({ can, document: doc, version: latestReady });
+  assert.equal(getAction(forLatest, "delete_version").visible, true);
+});
+
+test("documentPolicy matrix: can_manage false disables retry and delete with the lock reason", () => {
+  const can = (_perm: string) => true;
+  const v = createMockVersion({ status: "failed", retryable: true });
+  const doc = createMockDoc({ latest_version: v, can_manage: false });
+  const actions = getDocumentActions({ can, document: doc, version: v });
+  for (const id of ["retry", "delete_version"] as const) {
+    const a = getAction(actions, id);
+    assert.equal(a.visible, true);
+    assert.equal(a.enabled, false);
+    assert.equal(a.reason, LOCK);
+  }
+});
+
+test("getFailedVersionHint: shown for a failed, non-retryable version when the user may upload", () => {
+  const can = (_perm: string) => true;
+  const notRetryable = createMockVersion({ status: "failed", retryable: false });
+  assert.equal(getFailedVersionHint({ can, version: notRetryable }), "Upload a corrected file as a new version");
+
+  const retryable = createMockVersion({ status: "failed", retryable: true });
+  assert.equal(getFailedVersionHint({ can, version: retryable }), null);
+  const unknown = createMockVersion({ status: "failed", retryable: null });
+  assert.equal(getFailedVersionHint({ can, version: unknown }), null);
+  const ready = createMockVersion({ status: "ready", retryable: null });
+  assert.equal(getFailedVersionHint({ can, version: ready }), null);
+  const viewOnly = (p: string) => p === "document:view";
+  assert.equal(getFailedVersionHint({ can: viewOnly, version: notRetryable }), null);
 });

@@ -537,3 +537,13 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 
 
 
+
+### Phase 5f-4: Retry a failed version and delete a version (2026-11-21)
+- API (`documentsApi.ts`): `retryVersion` (`POST /documents/:id/versions/:vid/retry`, 202, validated as `DocumentVersionSchema`) and `deleteVersion` (`DELETE /documents/:id/versions/:vid`, 204). Tested by final URL and method (`axios.getUri`). The existing "every API function" guard test now also checks that each function really sends a request (it passed vacuously before because the request counter was cumulative, and `upload` never sent one).
+- Mutations (`hooks/useDocumentMutations.ts`, the only place): `useRetryVersion`, `useDeleteVersion`. `retry: false`, invalidate list and document, no optimistic update. A 404 on delete counts as "already removed". A 403 `document_manage_requires_all_classes` refetches the document.
+- Decision (differs from plan b4 text): "Try again" is decided from `retryable` on the version response, not from the status route. The status route is not called for this.
+- Policy (`documentPolicy.ts`): retry and delete rows were already there; added `getFailedVersionHint` ("Upload a corrected file as a new version", only for failed + `retryable === false` and users who may upload). Components render only what the policy returns.
+- UI: `components/VersionRowActions.tsx` (card footer actions, full width and `min-h-[44px]` on mobile, Delete in its own bordered block), page-level `Alert` for retry errors, `ConfirmDialog` for delete (names the version, file name sanitised and truncated, error shown inside the dialog, Cancel focused first, confirm disabled when the policy no longer allows it). Detail page default layout is now `stacked` (cards on phones).
+- Polling fix: `useVersionStatus` remembered a terminal state, so a retried version would have stayed "Failed" and never been polled again. It now forgets it when the document says the version is back in flight. A retried version also gets its polling clock from the click, not from the upload (otherwise an old version would be past the 65 minute stop immediately).
+- Shared component additions (optional props, nothing changes for existing callers): `Modal`/`useFocusTrap` `initialFocusRef`, `ConfirmDialog` `error`, `confirmDisabled`, `initialFocus="cancel"` and `min-h-[44px]` buttons, `Table` `mobileActionsLayout`, `Toast` `useOptionalToast`.
+- Tests: `VersionActions.test.tsx` (33 component tests: every retry code, delete codes, named confirmation, Cancel/Escape/backdrop, double submit incl. same-tick, 404, policy gating, student sees nothing, 44px classes, keyboard, polling resume incl. an old version), policy matrix rows, API URL tests, guard coverage of the new API functions.

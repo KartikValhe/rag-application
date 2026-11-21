@@ -107,3 +107,9 @@ export const useToast = (): ToastContextType["toast"] => {
   }
   return context.toast;
 };
+
+/** Like useToast, but returns null instead of throwing when no ToastProvider is mounted. */
+export const useOptionalToast = (): ToastContextType["toast"] | null => {
+  const context = useContext(ToastContext);
+  return context ? context.toast : null;
+};

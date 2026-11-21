@@ -114,6 +114,8 @@ describe("MaterialDetailPage", () => {
 
     let statusCallCount = 0;
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockImplementation(() => {
         if (statusCallCount > 0) {
@@ -143,7 +145,7 @@ describe("MaterialDetailPage", () => {
           <Routes>
             <Route
               path="/teacher/materials/:documentId"
-              element={<MaterialDetailPage api={fakeApi} />}
+              element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
             />
           </Routes>
         </MemoryRouter>
@@ -186,6 +188,8 @@ describe("MaterialDetailPage", () => {
 
     const statusMock = vi.fn();
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(readyDoc),
       limits: vi.fn(),
@@ -199,7 +203,7 @@ describe("MaterialDetailPage", () => {
           <Routes>
             <Route
               path="/teacher/materials/:documentId"
-              element={<MaterialDetailPage api={fakeApi} />}
+              element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
             />
           </Routes>
         </MemoryRouter>
@@ -217,6 +221,8 @@ describe("MaterialDetailPage", () => {
   it("a lost connection keeps the last state and says so", async () => {
     const doc = createMockDetailDoc();
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(doc),
       limits: vi.fn(),
@@ -230,7 +236,7 @@ describe("MaterialDetailPage", () => {
           <Routes>
             <Route
               path="/teacher/materials/:documentId"
-              element={<MaterialDetailPage api={fakeApi} />}
+              element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
             />
           </Routes>
         </MemoryRouter>
@@ -274,6 +280,8 @@ describe("MaterialDetailPage", () => {
       });
 
       const fakeApi: DocumentsApi = {
+        retryVersion: vi.fn(),
+        deleteVersion: vi.fn(),
         list: vi.fn(),
         get: vi.fn().mockResolvedValue(failedDoc),
         limits: vi.fn(),
@@ -287,7 +295,7 @@ describe("MaterialDetailPage", () => {
             <Routes>
               <Route
                 path="/teacher/materials/:documentId"
-                element={<MaterialDetailPage api={fakeApi} />}
+                element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
               />
             </Routes>
           </MemoryRouter>
@@ -312,6 +320,8 @@ describe("MaterialDetailPage", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockRejectedValue(notFoundError),
       limits: vi.fn(),
@@ -325,7 +335,7 @@ describe("MaterialDetailPage", () => {
           <Routes>
             <Route
               path="/teacher/materials/:documentId"
-              element={<MaterialDetailPage api={fakeApi} />}
+              element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
             />
           </Routes>
         </MemoryRouter>
@@ -353,6 +363,8 @@ describe("MaterialDetailPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn(),
@@ -368,7 +380,7 @@ describe("MaterialDetailPage", () => {
               path="/teacher/materials/:documentId"
               element={
                 <TeacherRoute permission="document:view">
-                  <MaterialDetailPage api={fakeApi} />
+                  <MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />
                 </TeacherRoute>
               }
             />
@@ -401,6 +413,8 @@ describe("MaterialDetailPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(maliciousDoc),
       limits: vi.fn(),
@@ -414,7 +428,7 @@ describe("MaterialDetailPage", () => {
           <Routes>
             <Route
               path="/teacher/materials/:documentId"
-              element={<MaterialDetailPage api={fakeApi} />}
+              element={<MaterialDetailPage api={fakeApi} responsiveLayout="scroll" />}
             />
           </Routes>
         </MemoryRouter>

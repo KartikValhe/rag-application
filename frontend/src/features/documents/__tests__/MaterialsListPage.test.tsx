@@ -123,6 +123,8 @@ describe("MaterialsListPage", () => {
   it("renders page header and list with filters for teacher", async () => {
     const doc = createMockDoc();
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({
         items: [doc],
         next_cursor: null,
@@ -244,6 +246,8 @@ describe("MaterialsListPage", () => {
     ];
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: docs, next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
@@ -287,6 +291,8 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: listMock,
       get: vi.fn(),
       limits: vi.fn(),
@@ -319,6 +325,8 @@ describe("MaterialsListPage", () => {
 
   it("shows empty state when no documents exist", async () => {
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
@@ -342,6 +350,8 @@ describe("MaterialsListPage", () => {
   it("shows filtered empty state with clear filters button", async () => {
     const user = userEvent.setup();
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
@@ -368,6 +378,8 @@ describe("MaterialsListPage", () => {
   it("shows empty state when teacher has no assigned classes", async () => {
     vi.spyOn(academicApi, "getMyClasses").mockResolvedValue([]);
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
@@ -395,6 +407,8 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [lockedDoc], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),
@@ -434,6 +448,8 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [maliciousDoc], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn(),

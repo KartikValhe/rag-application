@@ -174,3 +174,21 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
 
   return actions;
 }
+
+export const CORRECTED_FILE_HINT = "Upload a corrected file as a new version";
+
+/**
+ * Text shown on a failed version that a retry cannot fix. Only users who may upload see it,
+ * and only while the version is failed and not retryable (retryable comes from the version response).
+ */
+export function getFailedVersionHint(input: {
+  can: (permission: string) => boolean;
+  version?: DocumentVersionItem | null;
+}): string | null {
+  const { can: checkPermission, version } = input;
+  if (!version || version.status !== "failed") return null;
+  // Only an explicit "not retryable" answer from the server shows the hint (null means not known yet).
+  if (version.retryable !== false) return null;
+  if (!checkPermission("document:upload")) return null;
+  return CORRECTED_FILE_HINT;
+}

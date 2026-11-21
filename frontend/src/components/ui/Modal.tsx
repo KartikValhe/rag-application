@@ -16,6 +16,8 @@ export interface ModalProps {
   size?: ModalSize;
   closeOnBackdrop?: boolean;
   className?: string;
+  /** Element that receives focus when the modal opens (defaults to the first focusable element). */
+  initialFocusRef?: React.RefObject<HTMLElement>;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -28,6 +30,7 @@ export const Modal: React.FC<ModalProps> = ({
   size = "md",
   closeOnBackdrop = true,
   className,
+  initialFocusRef,
 }) => {
   const modalRef = useRef<HTMLDivElement>(null);
 
@@ -35,7 +38,7 @@ export const Modal: React.FC<ModalProps> = ({
     useScrollLock(isOpen);
 
     // Accessible focus trapping & Escape key listener
-    useFocusTrap(modalRef, isOpen, { onClose });
+    useFocusTrap(modalRef, isOpen, { onClose, initialFocusRef });
 
   if (!isOpen) return null;
 

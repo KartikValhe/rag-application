@@ -3,6 +3,8 @@ import { useEffect, useRef } from "react";
 export interface FocusTrapOptions {
   onClose?: () => void;
   returnFocusRef?: React.RefObject<HTMLElement>;
+  /** Element to focus first instead of the first focusable one (for example Cancel in a destructive dialog). */
+  initialFocusRef?: React.RefObject<HTMLElement>;
   enabled?: boolean;
 }
 
@@ -19,7 +21,9 @@ export function useFocusTrap(
   isActive: boolean,
   options: FocusTrapOptions = {}
 ): void {
-  const { onClose, returnFocusRef, enabled = true } = options;
+  const { onClose, returnFocusRef, initialFocusRef, enabled = true } = options;
+  const initialFocusRefRef = useRef(initialFocusRef);
+  initialFocusRefRef.current = initialFocusRef;
   const previousActiveElement = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -66,9 +70,9 @@ export function useFocusTrap(
 
     const focusables = getFocusables();
     if (focusables.length > 0 && focusables[0]) {
-      // Focus first element after browser render cycle
+      // Focus the requested element (or the first one) after browser render cycle
       requestAnimationFrame(() => {
-        focusables[0]?.focus();
+        (initialFocusRefRef.current?.current ?? focusables[0])?.focus();
       });
     }
 

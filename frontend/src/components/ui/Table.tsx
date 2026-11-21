@@ -46,6 +46,12 @@ export interface TableProps<T> {
    * - "scroll": retains table layout inside a horizontal-scrolling container
    */
   responsiveLayout?: "stacked" | "scroll";
+  /**
+   * How action columns sit in the mobile card footer:
+   * - "inline" (default): buttons are right-aligned and as wide as their content
+   * - "stacked": the actions fill the card width, one block under the other (touch friendly)
+   */
+  mobileActionsLayout?: "inline" | "stacked";
 }
 
 export function Table<T>({
@@ -66,6 +72,7 @@ export function Table<T>({
   className,
   onRowClick,
   responsiveLayout = "stacked",
+  mobileActionsLayout = "inline",
 }: TableProps<T>) {
   const displayTitle = emptyMessage || emptyTitle;
   const displayDesc = emptyMessage ? "" : emptyDescription;
@@ -216,9 +223,21 @@ export function Table<T>({
 
                       {/* Action Column (if present) */}
                       {actionColumns.length > 0 && (
-                        <div className="pt-2.5 mt-2 border-t border-border/60 flex items-center justify-end gap-2 flex-wrap">
+                        <div
+                          className={cn(
+                            "pt-2.5 mt-2 border-t border-border/60",
+                            mobileActionsLayout === "stacked"
+                              ? "flex flex-col gap-3"
+                              : "flex items-center justify-end gap-2 flex-wrap"
+                          )}
+                        >
                           {actionColumns.map((col) => (
-                            <div key={`m-act-${col.key}`} className="flex items-center gap-2">
+                            <div
+                              key={`m-act-${col.key}`}
+                              className={cn(
+                                mobileActionsLayout === "stacked" ? "w-full" : "flex items-center gap-2"
+                              )}
+                            >
                               {col.render ? col.render(item, index) : null}
                             </div>
                           ))}

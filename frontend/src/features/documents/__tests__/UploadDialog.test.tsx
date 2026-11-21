@@ -111,6 +111,8 @@ describe("UploadDialog and Upload flow", () => {
     mockUser.permissions = ["document:view"]; // Missing document:upload
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -136,6 +138,8 @@ describe("UploadDialog and Upload flow", () => {
     mockUser.permissions = ["document:view", "document:upload"];
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -262,6 +266,8 @@ describe("UploadDialog and Upload flow", () => {
         isOpen={true}
         onClose={vi.fn()}
         api={{
+          retryVersion: vi.fn(),
+          deleteVersion: vi.fn(),
           list: vi.fn(),
           get: vi.fn(),
           limits: vi.fn().mockResolvedValue({
@@ -341,6 +347,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -432,6 +440,8 @@ describe("UploadDialog and Upload flow", () => {
 
     let capturedSignal: AbortSignal | undefined;
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -503,6 +513,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -565,6 +577,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -615,6 +629,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -667,6 +683,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -724,6 +742,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -782,6 +802,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -839,6 +861,8 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -897,6 +921,8 @@ describe("UploadDialog and Upload flow", () => {
     const refreshSpy = vi.spyOn(authApi, "refresh");
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -955,6 +981,8 @@ describe("UploadDialog and Upload flow", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({
@@ -1022,6 +1050,8 @@ describe("UploadDialog and Upload flow", () => {
     vi.spyOn(authApi, "refresh").mockRejectedValue(error401);
 
     const fakeApi: DocumentsApi = {
+      retryVersion: vi.fn(),
+      deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
       limits: vi.fn().mockResolvedValue({

@@ -81,6 +81,13 @@ export function createDocumentsApi(client: AxiosInstance) {
       });
       return validateResponse(DocumentVersionSchema, response.data, "document upload");
     },
+    retryVersion: async (documentId: string, versionId: string): Promise<DocumentVersionItem> => {
+      const response = await client.post(`/documents/${documentId}/versions/${versionId}/retry`);
+      return validateResponse(DocumentVersionSchema, response.data, "document retry");
+    },
+    deleteVersion: async (documentId: string, versionId: string): Promise<void> => {
+      await client.delete(`/documents/${documentId}/versions/${versionId}`);
+    },
   };
 }
 

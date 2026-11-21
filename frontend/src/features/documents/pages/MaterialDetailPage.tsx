@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useParams, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell, PageHeader, NotFoundState } from "@/components/layout";
@@ -9,7 +9,10 @@ import {
   Button,
   Alert,
   Skeleton,
+  ConfirmDialog,
 } from "@/components/ui";
+import { useOptionalToast } from "@/components/ui/Toast";
+import { usePermission } from "@/hooks/usePermission";
 import { Lock, FileText, AlertCircle, RefreshCw } from "lucide-react";
 import { documentsApi as defaultDocumentsApi } from "../api/documentsClient";
 import type { DocumentsApi } from "../api/documentsApi";
@@ -21,6 +24,10 @@ import { getStatusChip } from "../utils/statusChip";
 import { getDocumentError, getVersionFailure } from "../utils/documentErrors";
 import { useVersionStatus } from "../hooks/useVersionStatus";
 import { isTerminalStatus } from "../utils/pollingSchedule";
+import { getDocumentActions, getFailedVersionHint } from "../utils/documentPolicy";
+import { sanitizeDisplayFilename } from "../utils/fileChecks";
+import { useRetryVersion, useDeleteVersion } from "../hooks/useDocumentMutations";
+import { VersionRowActions } from "../components/VersionRowActions";
 
 export interface MaterialDetailPageProps {
   api?: DocumentsApi;
@@ -57,12 +64,20 @@ function getBlockedReasonText(reason: string | null | undefined): string {
 
 export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   api: customApi,
-  responsiveLayout = "scroll",
+  responsiveLayout = "stacked",
 }) => {
   const { documentId = "" } = useParams<{ documentId: string }>();
   const location = useLocation();
   const api = customApi ?? defaultDocumentsApi;
   const [announcement, setAnnouncement] = useState("");
+  const { can } = usePermission();
+  const toast = useOptionalToast();
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DocumentVersionItem | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // A retried version starts a new processing run: its polling clock starts at the click, not at upload.
+  const [retryStartedAt, setRetryStartedAt] = useState<Record<string, string>>({});
+  const inFlightRef = useRef(false);
 
   const isAdminRoute = location.pathname.startsWith("/admin");
   const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
@@ -99,7 +114,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     versionId: latestVersion?.id,
     initialStatus: latestVersion?.status,
     initialStage: latestVersion?.stage,
-    createdAt: latestVersion?.created_at,
+    createdAt: (latestVersion && retryStartedAt[latestVersion.id]) || latestVersion?.created_at,
     api,
     enabled: isInFlight,
     onTerminalStatus: (statusItem: DocumentStatusItem) => {
@@ -113,6 +128,57 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
       refetchDoc();
     },
   });
+
+  const retryMutation = useRetryVersion({
+    api,
+    onSuccess: (_version, args) => {
+      inFlightRef.current = false;
+      setRetryError(null);
+      setRetryStartedAt((prev) => ({ ...prev, [args.versionId]: new Date().toISOString() }));
+      setAnnouncement(`${doc?.title || "Document"}: waiting to be processed again`);
+      toast?.success("Retry started. We are reading the file again.");
+    },
+    onError: (err) => {
+      inFlightRef.current = false;
+      setRetryError(getDocumentError(err, "retry").message);
+    },
+  });
+
+  const deleteMutation = useDeleteVersion({
+    api,
+    onSuccess: (result) => {
+      inFlightRef.current = false;
+      setDeleteTarget(null);
+      setDeleteError(null);
+      const text = result.alreadyRemoved ? "That version was already removed." : "Version deleted.";
+      setAnnouncement(text);
+      toast?.success(text);
+    },
+    onError: (err) => {
+      inFlightRef.current = false;
+      setDeleteError(getDocumentError(err, "delete").message);
+    },
+  });
+
+  const handleRetry = (version: DocumentVersionItem) => {
+    if (inFlightRef.current || retryMutation.isPending || deleteMutation.isPending) return;
+    inFlightRef.current = true;
+    setRetryError(null);
+    retryMutation.mutate({ documentId, versionId: version.id });
+  };
+
+  const handleConfirmDelete = () => {
+    if (!deleteTarget || inFlightRef.current || deleteMutation.isPending || retryMutation.isPending) return;
+    inFlightRef.current = true;
+    setDeleteError(null);
+    deleteMutation.mutate({ documentId, versionId: deleteTarget.id });
+  };
+
+  const handleCloseDelete = () => {
+    if (deleteMutation.isPending) return;
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
 
   // Synthesize versions list from document
   const versions: DocumentVersionItem[] = useMemo(() => {
@@ -129,6 +195,8 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         status: polledStatus || doc.latest_version.status,
         stage: polledStage !== undefined ? polledStage : doc.latest_version.stage,
       };
+      // The live status can be ahead of the document: its retryable flag is then not known yet.
+      if (liveLatest.status !== doc.latest_version.status) liveLatest.retryable = null;
       map.set(doc.latest_version.id, liveLatest);
     }
     if (doc.published_version) {
@@ -303,6 +371,44 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     },
   ];
 
+  // Row actions come only from the policy module; the page just renders what it returns.
+  const rowActions = (v: DocumentVersionItem) =>
+    getDocumentActions({ can, document: doc, version: v });
+  const showActionsColumn = versions.some(
+    (v) =>
+      rowActions(v).some((a) => (a.id === "retry" || a.id === "delete_version") && a.visible) ||
+      getFailedVersionHint({ can, version: v }) !== null
+  );
+  if (showActionsColumn) {
+    columns.push({
+      key: "actions",
+      header: "Actions",
+      className: "min-w-[220px]",
+      render: (v) => {
+        const isRetrying = retryMutation.isPending && retryMutation.variables?.versionId === v.id;
+        const isDeleting = deleteMutation.isPending && deleteMutation.variables?.versionId === v.id;
+        return (
+          <VersionRowActions
+            actions={rowActions(v)}
+            hint={getFailedVersionHint({ can, version: v })}
+            isRetrying={isRetrying}
+            isBusy={isRetrying || isDeleting}
+            describedById={`version-note-${v.id}`}
+            onRetry={() => handleRetry(v)}
+            onDelete={() => {
+              setDeleteError(null);
+              setDeleteTarget(v);
+            }}
+          />
+        );
+      },
+    });
+  }
+
+  const deleteTargetEnabled = deleteTarget
+    ? rowActions(deleteTarget).find((a) => a.id === "delete_version")?.enabled === true
+    : false;
+
   return (
     <AppShell>
       {/* Visually hidden aria-live polite region for status change announcements */}
@@ -346,13 +452,39 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
           <h3 className="text-base font-semibold text-text">Versions</h3>
         </div>
 
+        {retryError && (
+          <Alert variant="danger" title="Could not try again" onClose={() => setRetryError(null)}>
+            <span className="break-words">{retryError}</span>
+          </Alert>
+        )}
+
         <Table
           columns={columns}
           data={versions}
           keyExtractor={(v) => v.id}
           responsiveLayout={responsiveLayout}
+          mobileActionsLayout="stacked"
         />
       </div>
+
+      <ConfirmDialog
+        isOpen={deleteTarget !== null}
+        title={
+          deleteTarget
+            ? `Delete version ${deleteTarget.version_no} (${sanitizeDisplayFilename(deleteTarget.original_filename, 40)})?`
+            : ""
+        }
+        message="The file will be removed. This cannot be undone."
+        confirmText="Delete version"
+        cancelText="Cancel"
+        variant="danger"
+        initialFocus="cancel"
+        isLoading={deleteMutation.isPending}
+        confirmDisabled={!deleteTargetEnabled}
+        error={deleteError}
+        onConfirm={handleConfirmDelete}
+        onClose={handleCloseDelete}
+      />
     </AppShell>
   );
 };

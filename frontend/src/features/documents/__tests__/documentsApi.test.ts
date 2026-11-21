@@ -297,14 +297,77 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
   });
   const api = createDocumentsApi(mockClient);
   for (const [name, fn] of Object.entries(api)) {
-    const args = Array.from({ length: fn.length }, () => "id-1");
+    // upload takes a form, every other function takes ids; wrong argument types would throw before any request
+    const args = name === "upload" ? [new FormData()] : Array.from({ length: fn.length }, () => "id-1");
+    const before = seen.length;
     // Responses are not valid payloads; only the requested path matters here.
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
-    assert.ok(seen.length > 0, `${name} made no request`);
+    assert.ok(seen.length > before, `${name} made no request`);
+  }
+  for (const required of ["retryVersion", "deleteVersion"]) {
+    assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {
     assert.ok(!path.startsWith("/api"), `path starts with /api: ${path}`);
     assert.ok(!path.includes("//"), `path contains //: ${path}`);
     assert.ok(path.startsWith("/"), `path must start with /: ${path}`);
   }
+});
+
+test("createDocumentsApi: retryVersion is POST /documents/:docId/versions/:vid/retry (final URL)", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return {
+      status: 202,
+      data: {
+        id: "v-9",
+        document_id: "doc-9",
+        version_no: 2,
+        status: "queued",
+        stage: null,
+        error_code: null,
+        file_kind: "pdf",
+        original_filename: "a.pdf",
+        size_bytes: 10,
+        created_at: "2026-11-21T10:00:00Z",
+        retryable: null,
+        warnings: [],
+      },
+    };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.retryVersion("doc-9", "v-9");
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "post");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions/v-9/retry`);
+  assert.equal(captured.data, undefined, "retry sends no body");
+  assert.equal(result.status, "queued");
+});
+
+test("createDocumentsApi: deleteVersion is DELETE /documents/:docId/versions/:vid (final URL), 204 without body", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 204, data: "" };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.deleteVersion("doc-9", "v-9");
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "delete");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions/v-9`);
+  assert.equal(result, undefined);
+});
+
+test("createDocumentsApi: retryVersion rejects an invalid response shape", async () => {
+  const mockClient = createMockAxios(() => ({ status: 202, data: { nope: true } }));
+  const api = createDocumentsApi(mockClient);
+  await assert.rejects(
+    () => api.retryVersion("d", "v"),
+    (e: Error) => e.name === SCHEMA_MISMATCH_NAME
+  );
 });
