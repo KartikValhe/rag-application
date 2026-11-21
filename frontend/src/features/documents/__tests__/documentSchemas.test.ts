@@ -6,7 +6,9 @@ import {
   DocumentListSchema,
   DocumentStatusSchema,
   VersionFlagsSchema,
+  FlaggedChunkSchema,
   TestSearchResponseSchema,
+  TestSearchHitSchema,
   DocumentUsageSchema,
   DocumentLimitsSchema,
   DocumentUploadLimitsSchema,
@@ -175,6 +177,162 @@ test("documentSchemas: full valid payloads", () => {
     accepted_extensions: ["docx", "md", "pdf", "pptx", "txt"],
   };
   assert.equal(DocumentUploadLimitsSchema.parse(uploadLimitsPayload).accepted_extensions.length, 5);
+});
+
+test("documentSchemas: every optional key present with null for each response", () => {
+  // 1. DocumentVersionSchema with all nullables explicitly null
+  const nullVersion = {
+    id: "v-null",
+    document_id: "doc-null",
+    version_no: 1,
+    status: "failed",
+    stage: null,
+    error_code: null,
+    file_kind: "pdf",
+    original_filename: "file.pdf",
+    size_bytes: 100,
+    page_count: null,
+    chunk_count: null,
+    flagged_chunk_count: null,
+    created_at: "2026-11-20T10:00:00Z",
+    published_at: null,
+    retryable: null,
+    warnings: [],
+  };
+  const parsedVersion = DocumentVersionSchema.parse(nullVersion);
+  assert.equal(parsedVersion.stage, null);
+  assert.equal(parsedVersion.error_code, null);
+  assert.equal(parsedVersion.page_count, null);
+  assert.equal(parsedVersion.chunk_count, null);
+  assert.equal(parsedVersion.flagged_chunk_count, null);
+  assert.equal(parsedVersion.published_at, null);
+  assert.equal(parsedVersion.retryable, null);
+
+  // 2. DocumentSchema with all nullables explicitly null
+  const nullDoc = {
+    id: "doc-null",
+    title: "Untitled",
+    description: null,
+    subject: { id: "sub-1", name: "Math" },
+    classes: [],
+    created_by: "usr-1",
+    created_at: "2026-11-20T10:00:00Z",
+    updated_at: "2026-11-20T10:00:00Z",
+    latest_version: null,
+    published_version: null,
+    can_manage: true,
+    blocked_reason: null,
+  };
+  const parsedDoc = DocumentSchema.parse(nullDoc);
+  assert.equal(parsedDoc.description, null);
+  assert.equal(parsedDoc.latest_version, null);
+  assert.equal(parsedDoc.published_version, null);
+  assert.equal(parsedDoc.blocked_reason, null);
+
+  // 3. DocumentListSchema with next_cursor explicitly null
+  const nullList = {
+    items: [nullDoc],
+    next_cursor: null,
+  };
+  const parsedList = DocumentListSchema.parse(nullList);
+  assert.equal(parsedList.next_cursor, null);
+
+  // 4. DocumentStatusSchema with nullables explicitly null
+  const nullStatus = {
+    document_id: "doc-null",
+    version_id: "v-null",
+    version_no: 1,
+    status: "ready",
+    stage: null,
+    error_code: null,
+    retryable: false,
+    updated_at: "2026-11-20T10:00:00Z",
+  };
+  const parsedStatus = DocumentStatusSchema.parse(nullStatus);
+  assert.equal(parsedStatus.stage, null);
+  assert.equal(parsedStatus.error_code, null);
+
+  // 5. FlaggedChunkSchema with nullables explicitly null
+  const nullChunk = {
+    chunk_id: "chk-null",
+    ordinal: 0,
+    page_start: null,
+    page_end: null,
+    heading_path: null,
+    injection_flags: [],
+    excluded: false,
+    excerpt: "Safe excerpt",
+    matches: [],
+  };
+  const parsedChunk = FlaggedChunkSchema.parse(nullChunk);
+  assert.equal(parsedChunk.page_start, null);
+  assert.equal(parsedChunk.page_end, null);
+  assert.equal(parsedChunk.heading_path, null);
+
+  // 6. VersionFlagsSchema with nullables explicitly null
+  const nullFlags = {
+    document_id: "doc-null",
+    version_id: "v-null",
+    version_no: 1,
+    version_status: "ready",
+    flagged_chunk_count: null,
+    flags_acknowledged: false,
+    title_flagged: false,
+    filename_flagged: false,
+    items: [nullChunk],
+    next_after_ordinal: null,
+  };
+  const parsedFlags = VersionFlagsSchema.parse(nullFlags);
+  assert.equal(parsedFlags.flagged_chunk_count, null);
+  assert.equal(parsedFlags.next_after_ordinal, null);
+
+  // 7. TestSearchHitSchema with nullables explicitly null
+  const nullHit = {
+    rank: 1,
+    chunk_id: "chk-null",
+    document_id: "doc-null",
+    document_title: "Title",
+    version_id: "v-null",
+    version_no: 1,
+    version_status: "published",
+    page_start: null,
+    page_end: null,
+    heading_path: null,
+    content: "Content text",
+    vector_rank: null,
+    vector_similarity: null,
+    keyword_rank: null,
+    keyword_matched_terms: null,
+    fused_score: 0.5,
+    flagged: false,
+    injection_flags: [],
+    title_flagged: false,
+    filename_flagged: false,
+  };
+  const parsedHit = TestSearchHitSchema.parse(nullHit);
+  assert.equal(parsedHit.page_start, null);
+  assert.equal(parsedHit.page_end, null);
+  assert.equal(parsedHit.heading_path, null);
+  assert.equal(parsedHit.vector_rank, null);
+  assert.equal(parsedHit.vector_similarity, null);
+  assert.equal(parsedHit.keyword_rank, null);
+  assert.equal(parsedHit.keyword_matched_terms, null);
+
+  // 8. TestSearchResponseSchema with nullables explicitly null
+  const nullSearch = {
+    sufficient: false,
+    reason: "below_threshold",
+    message: null,
+    threshold: 0.84,
+    threshold_calibrated: false,
+    keyword_coverage_threshold: null,
+    model: "embedding-model",
+    candidate_count: 0,
+    hits: [nullHit],
+  };
+  const parsedSearch = TestSearchResponseSchema.parse(nullSearch);
+  assert.equal(parsedSearch.message, null);
+  assert.equal(parsedSearch.keyword_coverage_threshold, null);
 });
 
 test("documentSchemas: lenient with unknown extra keys", () => {

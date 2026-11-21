@@ -434,3 +434,14 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 - Status chip: implemented `frontend/src/features/documents/utils/statusChip.ts` with `getStatusChip`. Verified with `statusChip.test.ts`.
 - Document policy: implemented `frontend/src/features/documents/utils/documentPolicy.ts` with `getDocumentActions`. Verified with `documentPolicy.test.ts`.
 
+### Phase 5f-1a-fix: Corrections after review (2026-11-21)
+- Policy: "New version" action always evaluated from `document.latest_version` (not version row); disabled while latest is queued/processing/ready; hidden when no document or no latest_version.
+- Policy tests: added full state suite (queued, processing, ready, published, failed, archived), flags (0, >0, null), archived version visibility, retry with can_manage: false, delete version with can_manage: false for ready and failed, signed-out user (all hidden), and admin access through the real `usePermission` hook.
+- Error mapper: wait text appended strictly for HTTP 429; formatted >= 60s as minutes rounded up; added full stop to `too_many_concurrent_uploads`; 503 with `Retry-After` does not append a duplicate sentence.
+- Error wording: upload 404 says "We could not find the class or subject. Choose one of your own classes."; retry `duplicate_version` says "The same file is already an active version."; quota errors end with "Ask an administrator."; context-passing overrides covered.
+- `getVersionFailure`: mapped `xml_too_complex` to "The document could not be processed. Try exporting it again or upload a different format."; restricted mapped codes strictly to version failure table and upload validation codes with fallback for any other code.
+- ESLint test: checks rule severity 2 ("error"), tests both JSX attribute and plain identifier/object property selectors, and resolves paths relative to the test file.
+- Schemas test: added comprehensive "every key present with null" suite across all response schemas.
+- Cleanups: component setup test uses neutral text without tool or product names; package.json trailing newline restored.
+
+

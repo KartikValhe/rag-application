@@ -64,9 +64,11 @@ const DOCUMENT_ERROR_MESSAGES: Record<string, string> = {
   invalid_title: "The title must not be empty (and at most 200 characters).",
   too_many_classes: "A material can be linked to at most 50 classes.",
   quota_documents_exceeded:
-    "Your organisation has reached its document limit. Ask an administrator to remove old materials.",
-  quota_storage_exceeded: "Your organisation has reached its storage limit.",
-  quota_pages_exceeded: "Your organisation has reached its page limit.",
+    "Your organisation has reached its document limit. Ask an administrator.",
+  quota_storage_exceeded:
+    "Your organisation has reached its storage limit. Ask an administrator.",
+  quota_pages_exceeded:
+    "Your organisation has reached its page limit. Ask an administrator.",
   duplicate_version:
     "This exact file is already an active version of this material.",
   document_processing_in_progress:
@@ -207,11 +209,33 @@ const VERSION_FAILURES: Record<string, { message: string; retryable: boolean }> 
     message: "The document could not be processed. Try exporting it again or upload a different format.",
     retryable: false,
   },
+  xml_too_complex: {
+    message: "The document could not be processed. Try exporting it again or upload a different format.",
+    retryable: false,
+  },
   quota_pages_exceeded: {
-    message: "Your organisation has reached its page limit.",
+    message: "Your organisation has reached its page limit. Ask an administrator.",
     retryable: false,
   },
 };
+
+const UPLOAD_VALIDATION_CODES = new Set([
+  "unsupported_format",
+  "disallowed_file_type",
+  "file_type_mismatch",
+  "invalid_encoding",
+  "empty_file",
+  "invalid_xml",
+  "xml_entity_expansion_forbidden",
+  "corrupt_archive",
+  "zip_bomb_detected",
+  "zip_member_too_large",
+  "invalid_openxml_format",
+  "macro_enabled_file",
+  "embedded_content",
+  "external_relationship",
+  "encrypted_file",
+]);
 
 export function getDocumentError(
   err: unknown,
@@ -233,14 +257,20 @@ export function getDocumentError(
   let action: DocumentErrorInfo["action"] = "none";
 
   // Context-specific messages
-  if (context === "search") {
+  if (context === "upload") {
+    if (code === "not_found" || status === 404) {
+      message = "We could not find the class or subject. Choose one of your own classes.";
+    }
+  } else if (context === "search") {
     if (code === "service_unavailable") {
       message = "Search is temporarily unavailable. Please try again in a few minutes.";
-    } else if (code === "not_found") {
+    } else if (code === "not_found" || status === 404) {
       message = "The class or subject is not one of yours.";
     }
   } else if (context === "retry") {
-    if (code === "document_processing_in_progress") {
+    if (code === "duplicate_version") {
+      message = "The same file is already an active version.";
+    } else if (code === "document_processing_in_progress") {
       message = "Another version of this material is being processed. Try again when it is done.";
     }
   }
@@ -302,14 +332,20 @@ export function getDocumentError(
     action = "reload";
   }
 
-  // Append wait time for rate limits
-  if (parsed.retryAfterSeconds !== null && parsed.retryAfterSeconds !== undefined) {
+  // Append wait text ONLY for HTTP 429
+  if (status === 429) {
     const s = parsed.retryAfterSeconds;
-    const cleanMsg = message.endsWith(".") ? message.slice(0, -1) : message;
-    message = `${cleanMsg}. Please try again in ${s} second${s === 1 ? "" : "s"}.`;
-  } else if (status === 429) {
-    const cleanMsg = message.endsWith(".") ? message.slice(0, -1) : message;
-    message = `${cleanMsg}. Please try again in a few seconds.`;
+    let waitText = "Please try again in a few seconds.";
+    if (s !== null && s !== undefined && s > 0) {
+      if (s < 60) {
+        waitText = `Please try again in ${s} second${s === 1 ? "" : "s"}.`;
+      } else {
+        const m = Math.ceil(s / 60);
+        waitText = `Please try again in ${m} minute${m === 1 ? "" : "s"}.`;
+      }
+    }
+    const cleanMsg = message.endsWith(".") ? message : `${message}.`;
+    message = `${cleanMsg} ${waitText}`;
   }
 
   return {
@@ -334,7 +370,7 @@ export function getVersionFailure(
     return VERSION_FAILURES[errorCode];
   }
 
-  if (DOCUMENT_ERROR_MESSAGES[errorCode]) {
+  if (UPLOAD_VALIDATION_CODES.has(errorCode) && DOCUMENT_ERROR_MESSAGES[errorCode]) {
     return {
       message: DOCUMENT_ERROR_MESSAGES[errorCode],
       retryable: false,

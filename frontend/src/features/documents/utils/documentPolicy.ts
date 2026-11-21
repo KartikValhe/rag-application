@@ -53,18 +53,20 @@ export function getDocumentActions(input: DocumentPolicyInput): DocumentPolicyAc
   });
 
   // 3. New Version
-  const newVersionVisible = canUpload;
+  const hasLatestVersion = Boolean(document && document.latest_version);
+  const newVersionVisible = canUpload && Boolean(document) && hasLatestVersion;
   let newVersionEnabled = newVersionVisible;
   let newVersionReason: string | undefined = undefined;
 
-  if (newVersionVisible) {
+  if (newVersionVisible && document && document.latest_version) {
+    const latestStatus = document.latest_version.status;
     if (isManageBlocked) {
       newVersionEnabled = false;
       newVersionReason = CANNOT_MANAGE_REASON;
     } else if (
-      activeStatus === "queued" ||
-      activeStatus === "processing" ||
-      activeStatus === "ready"
+      latestStatus === "queued" ||
+      latestStatus === "processing" ||
+      latestStatus === "ready"
     ) {
       newVersionEnabled = false;
       newVersionReason = "Publish or delete the draft first";
