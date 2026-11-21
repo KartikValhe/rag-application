@@ -121,6 +121,8 @@ test("findViolations: flags all required injected bad snippets", () => {
     `props.api?.delete("doc-1")`,
     `documentsApi.delete("doc-1")`,
     `api.deleteVersion("v-1")`,
+    `api.publishVersion("d", "v", { acknowledgeFlags: true })`,
+    `props.api?.publishVersion("d", "v")`,
     `import { buildUploadFormData } from "../api/documentsApi";`,
   ];
 
@@ -208,6 +210,7 @@ test("Source guard: every mutating method of the exported API object is flagged 
   assert.ok(mutating.includes("deleteVersion"), "deleteVersion must be treated as mutating");
   assert.ok(mutating.includes("uploadVersion"), "uploadVersion must be treated as mutating");
   assert.ok(mutating.includes("deleteDocument"), "deleteDocument must be treated as mutating");
+  assert.ok(mutating.includes("publishVersion"), "publishVersion must be treated as mutating");
   for (const method of mutating) {
     for (const form of [`api.${method}(x)`, `props.api?.${method}(x)`, `documentsApi.${method}(x)`]) {
       assert.ok(findViolations(form).length > 0, `${form} must be flagged in a component`);

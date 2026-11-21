@@ -132,6 +132,30 @@ export const FlaggedItemCard: React.FC<{ item: FlaggedChunkItem }> = ({ item }) 
   );
 };
 
+/** Warnings for a flagged title or file name (shared by the Flags tab and the publish dialog). */
+export const FlagSourceNotices: React.FC<{
+  titleFlagged: boolean;
+  filenameFlagged: boolean;
+  originalFilename?: string | null;
+}> = ({ titleFlagged, filenameFlagged, originalFilename }) => (
+  <>
+    {titleFlagged && (
+      <Alert variant="warning" title="Title flagged">
+        <p className="text-xs break-words">The title of this material was flagged for review.</p>
+      </Alert>
+    )}
+    {filenameFlagged && (
+      <Alert variant="warning" title="File name flagged">
+        <p className="text-xs break-words">
+          {originalFilename
+            ? `The file name '${originalFilename}' was flagged for review.`
+            : "The file name was flagged for review."}
+        </p>
+      </Alert>
+    )}
+  </>
+);
+
 export const FlagsViewer: React.FC<FlagsViewerProps> = ({
   documentId,
   versionId,
@@ -185,25 +209,13 @@ export const FlagsViewer: React.FC<FlagsViewerProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Title flagged warning note */}
-      {titleFlagged && (
-        <Alert variant="warning" title="Title flagged">
-          <p className="text-xs break-words">
-            The title of this material was flagged for review.
-          </p>
-        </Alert>
-      )}
+      {/* Title / file name flagged warning notes */}
+      <FlagSourceNotices
+        titleFlagged={titleFlagged}
+        filenameFlagged={filenameFlagged}
+        originalFilename={originalFilename}
+      />
 
-      {/* Filename flagged warning note */}
-      {filenameFlagged && (
-        <Alert variant="warning" title="File name flagged">
-          <p className="text-xs break-words">
-            {originalFilename
-              ? `The file name '${originalFilename}' was flagged for review.`
-              : "The file name was flagged for review."}
-          </p>
-        </Alert>
-      )}
 
       {/* Heading section depending on flaggedChunkCount */}
       {flaggedChunkCount === null || flaggedChunkCount === undefined ? (

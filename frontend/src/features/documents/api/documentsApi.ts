@@ -62,6 +62,23 @@ export function buildNewVersionFormData(payload: NewVersionPayload): FormData {
   return form;
 }
 
+export interface PublishOptions {
+  /** Only the boolean true is ever sent; anything else leaves the body empty. */
+  acknowledgeFlags?: boolean;
+}
+
+/**
+ * The ONE place that builds the publish request body. The flag acknowledgement is sent only when the
+ * caller passes exactly the boolean `true`; a string, a number, an object or a boxed Boolean can
+ * never produce it (the server answers 422 to a non-boolean, and a truthy guess must not acknowledge).
+ */
+export function buildPublishBody(acknowledge: unknown): { acknowledge_flags?: true } {
+  if (acknowledge === true) {
+    return { acknowledge_flags: true };
+  }
+  return {};
+}
+
 // Shared by both upload routes: 10-minute timeout, progress and cancel.
 function multipartConfig(options?: UploadOptions): AxiosRequestConfig {
   return {
@@ -135,6 +152,17 @@ export function createDocumentsApi(client: AxiosInstance) {
     retryVersion: async (documentId: string, versionId: string): Promise<DocumentVersionItem> => {
       const response = await client.post(`/documents/${documentId}/versions/${versionId}/retry`);
       return validateResponse(DocumentVersionSchema, response.data, "document retry");
+    },
+    publishVersion: async (
+      documentId: string,
+      versionId: string,
+      options?: PublishOptions
+    ): Promise<DocumentVersionItem> => {
+      const response = await client.post(
+        `/documents/${documentId}/versions/${versionId}/publish`,
+        buildPublishBody(options?.acknowledgeFlags)
+      );
+      return validateResponse(DocumentVersionSchema, response.data, "document publish");
     },
     deleteVersion: async (documentId: string, versionId: string): Promise<void> => {
       await client.delete(`/documents/${documentId}/versions/${versionId}`);

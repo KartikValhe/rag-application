@@ -39,6 +39,7 @@ import { VersionRowActions } from "../components/VersionRowActions";
 import { DocumentActions } from "../components/DocumentActions";
 import { UploadDialog } from "../components/UploadDialog";
 import { FlagsViewer } from "../components/FlagsViewer";
+import { PublishDialog } from "../components/PublishDialog";
 
 export interface MaterialDetailPageProps {
   api?: DocumentsApi;
@@ -97,6 +98,10 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   const [isRemoved, setIsRemoved] = useState(false);
   const [activeTab, setActiveTab] = useState<string>("versions");
   const [selectedFlagsVersionId, setSelectedFlagsVersionId] = useState<string | null>(null);
+  const [publishTarget, setPublishTarget] = useState<DocumentVersionItem | null>(null);
+  // A version we saw as published that a later publish replaced. The server archives it and the document
+  // payload no longer lists it, so it is remembered here to show "Older version" (backend: phase5.md, publish).
+  const [replacedVersions, setReplacedVersions] = useState<Record<string, DocumentVersionItem>>({});
 
   const isAdminRoute = location.pathname.startsWith("/admin");
   const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
@@ -257,10 +262,12 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     const map = new Map<string, DocumentVersionItem>();
     if (doc.latest_version) {
       // Overlay live polling status onto latest version row
+      // Only while the document itself says the version is in flight: once it is ready, published or
+      // failed the document is the truth (a remembered "ready" must not hide a later publish).
       const liveLatest: DocumentVersionItem = {
         ...doc.latest_version,
-        status: polledStatus || doc.latest_version.status,
-        stage: polledStage !== undefined ? polledStage : doc.latest_version.stage,
+        status: isInFlight ? polledStatus || doc.latest_version.status : doc.latest_version.status,
+        stage: isInFlight && polledStage !== undefined ? polledStage : doc.latest_version.stage,
       };
       // The live status can be ahead of the document: its retryable flag is then not known yet.
       if (liveLatest.status !== doc.latest_version.status) liveLatest.retryable = null;
@@ -271,8 +278,11 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         map.set(doc.published_version.id, doc.published_version);
       }
     }
+    for (const replaced of Object.values(replacedVersions)) {
+      if (!map.has(replaced.id)) map.set(replaced.id, replaced);
+    }
     return Array.from(map.values()).sort((a, b) => b.version_no - a.version_no);
-  }, [doc, polledStatus, polledStage]);
+  }, [doc, polledStatus, polledStage, isInFlight, replacedVersions]);
 
   const breadcrumbs = useMemo(() => {
     const rootLabel = isAdminRoute ? "Administration" : "Teacher Portal";
@@ -452,7 +462,9 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   const showActionsColumn = versions.some(
     (v) =>
       rowActions(v).some(
-        (a) => (a.id === "retry" || a.id === "delete_version" || a.id === "review_flags") && a.visible
+        (a) =>
+          (a.id === "retry" || a.id === "delete_version" || a.id === "review_flags" || a.id === "publish") &&
+          a.visible
       ) || getFailedVersionHint({ can, version: v }) !== null
   );
   if (showActionsColumn) {
@@ -479,6 +491,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
               setSelectedFlagsVersionId(v.id);
               setActiveTab("flags");
             }}
+            onPublish={() => setPublishTarget(v)}
           />
         );
       },
@@ -504,6 +517,14 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         doc.latest_version?.id ??
         "";
   const effectiveFlagsVersionId = selectedFlagsVersionId || defaultFlagsVersionId;
+
+  // The dialog shows the live version (it is reloaded after a conflict); the policy decides the action.
+  const publishVersionLive = publishTarget
+    ? versions.find((v) => v.id === publishTarget.id) ?? publishTarget
+    : null;
+  const publishAction = publishVersionLive
+    ? getDocumentActions({ can, document: doc, version: publishVersionLive }).find((a) => a.id === "publish")
+    : undefined;
 
   return (
     <AppShell>
@@ -630,6 +651,31 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         onConfirm={handleConfirmDeleteDocument}
         onClose={handleCloseDeleteDocument}
       />
+
+      {publishVersionLive && publishAction && (
+        <PublishDialog
+          isOpen
+          onClose={() => setPublishTarget(null)}
+          document={doc}
+          version={publishVersionLive}
+          action={publishAction}
+          api={api}
+          onReviewAll={(versionId) => {
+            setPublishTarget(null);
+            setSelectedFlagsVersionId(versionId);
+            setActiveTab("flags");
+          }}
+          onPublished={(published, previous) => {
+            if (previous && previous.id !== published.id) {
+              setReplacedVersions((prev) => ({
+                ...prev,
+                [previous.id]: { ...previous, status: "archived" },
+              }));
+            }
+            setAnnouncement(`${doc.title}: version ${published.version_no} is published`);
+          }}
+        />
+      )}
 
       <UploadDialog
         isOpen={isNewVersionOpen}

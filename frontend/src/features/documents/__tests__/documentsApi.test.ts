@@ -2,7 +2,12 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import axios, { type InternalAxiosRequestConfig, type AxiosResponse } from "axios";
-import { createDocumentsApi, buildUploadFormData, buildNewVersionFormData } from "../api/documentsApi.ts";
+import {
+  createDocumentsApi,
+  buildUploadFormData,
+  buildNewVersionFormData,
+  buildPublishBody,
+} from "../api/documentsApi.ts";
 import { SCHEMA_MISMATCH_NAME } from "../../../api/errorMessages.ts";
 
 // The real client cannot be imported under node (it uses import.meta.env), so read
@@ -309,7 +314,7 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
     assert.ok(seen.length > before, `${name} made no request`);
   }
-  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags"]) {
+  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags", "publishVersion"]) {
     assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {
@@ -536,3 +541,70 @@ test("createDocumentsApi: flags rejects invalid response shape with SchemaMismat
   );
 });
 
+
+// ---------------------------------------------------------------------------------------------
+// 5f-7 publish
+test("buildPublishBody: only the boolean true produces acknowledge_flags", () => {
+  assert.deepEqual(buildPublishBody(true), { acknowledge_flags: true });
+  for (const value of [false, undefined, null, "true", "yes", "1", 1, 0, 2, {}, [], [true], NaN, Symbol("x")]) {
+    assert.deepEqual(buildPublishBody(value), {}, `must not acknowledge for ${String(value)}`);
+  }
+  // an object that merely looks like true (boxed Boolean) is not the boolean true either
+  assert.deepEqual(buildPublishBody(new Boolean(true)), {});
+});
+
+test("buildPublishBody: the result never contains any key but acknowledge_flags, and its value is always the boolean true", () => {
+  for (const value of [true, false, "true", 1, null, undefined]) {
+    const body = buildPublishBody(value) as Record<string, unknown>;
+    for (const [key, v] of Object.entries(body)) {
+      assert.equal(key, "acknowledge_flags");
+      assert.strictEqual(v, true);
+    }
+  }
+});
+
+const PUBLISHED_RESPONSE = { ...VERSION_RESPONSE, id: "v-7", version_no: 3, status: "published", published_at: "2026-11-22T10:00:00Z" };
+
+test("createDocumentsApi: publishVersion is POST /documents/:docId/versions/:vid/publish (final URL) and sends {} when not acknowledged", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 200, data: PUBLISHED_RESPONSE };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.publishVersion("doc-9", "v-7");
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "post");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions/v-7/publish`);
+  assert.deepEqual(JSON.parse(String(captured.data ?? "{}")), {});
+  assert.equal(result.status, "published");
+  assert.equal(result.version_no, 3);
+});
+
+test("createDocumentsApi: publishVersion sends acknowledge_flags: true only for acknowledgeFlags === true (real builder)", async () => {
+  const bodies: unknown[] = [];
+  const mockClient = createMockAxios((config) => {
+    bodies.push(JSON.parse(String(config.data ?? "{}")));
+    return { status: 200, data: PUBLISHED_RESPONSE };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  await api.publishVersion("d", "v", { acknowledgeFlags: true });
+  await api.publishVersion("d", "v", { acknowledgeFlags: false });
+  await api.publishVersion("d", "v", {});
+  await api.publishVersion("d", "v", { acknowledgeFlags: "true" as never });
+  await api.publishVersion("d", "v", { acknowledgeFlags: 1 as never });
+
+  assert.deepEqual(bodies, [{ acknowledge_flags: true }, {}, {}, {}, {}]);
+});
+
+test("createDocumentsApi: publishVersion rejects an invalid response shape", async () => {
+  const mockClient = createMockAxios(() => ({ status: 200, data: { nope: true } }));
+  const api = createDocumentsApi(mockClient);
+  await assert.rejects(
+    () => api.publishVersion("d", "v"),
+    (e: Error) => e.name === SCHEMA_MISMATCH_NAME
+  );
+});

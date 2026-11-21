@@ -133,6 +133,58 @@ export function useRetryVersion(options: UseRetryVersionOptions = {}) {
   });
 }
 
+export interface PublishMutationArgs extends VersionMutationArgs {
+  /** The user ticked the review box. Only the boolean true is ever sent (see buildPublishBody). */
+  acknowledgeFlags?: boolean;
+}
+
+export interface UsePublishVersionOptions {
+  api?: DocumentsApi;
+  onSuccess?: (data: DocumentVersionItem, args: PublishMutationArgs) => void;
+  onError?: (error: unknown, args: PublishMutationArgs) => void;
+}
+
+const PUBLISH_RELOAD_CODES = new Set([
+  "version_not_ready",
+  "publish_conflict",
+  "flags_acknowledgement_required",
+  "document_manage_requires_all_classes",
+]);
+
+/**
+ * Publish a ready version (200).
+ * - Never retried automatically and never re-sent by itself (retry: false).
+ * - No optimistic update: after success the list and the document are refetched.
+ * - After 409 version_not_ready, publish_conflict, flags_acknowledgement_required, 403 manage and 404 the
+ *   document is refetched, so the buttons and the chips catch up with the server.
+ */
+export function usePublishVersion(options: UsePublishVersionOptions = {}) {
+  const { api = defaultDocumentsApi, onSuccess, onError } = options;
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    retry: false,
+    mutationFn: ({ documentId, versionId, acknowledgeFlags }: PublishMutationArgs) =>
+      api.publishVersion(documentId, versionId, { acknowledgeFlags }),
+    onSuccess: (data, args) => {
+      invalidateDocument(queryClient, args.documentId);
+      queryClient.invalidateQueries({
+        queryKey: ["documentVersionStatus", args.documentId, args.versionId],
+      });
+      queryClient.invalidateQueries({ queryKey: ["documentFlags", args.documentId] });
+      onSuccess?.(data, args);
+    },
+    onError: (err, args) => {
+      const code = getDocumentError(err, "publish").code ?? "";
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (PUBLISH_RELOAD_CODES.has(code) || status === 404) {
+        invalidateDocument(queryClient, args.documentId);
+      }
+      onError?.(err, args);
+    },
+  });
+}
+
 export interface UseDeleteVersionOptions {
   api?: DocumentsApi;
   onSuccess?: (result: { alreadyRemoved: boolean }, args: VersionMutationArgs) => void;
