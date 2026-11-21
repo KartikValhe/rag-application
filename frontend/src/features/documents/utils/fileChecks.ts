@@ -46,6 +46,14 @@ export function validateDocumentFile(
 }
 
 /**
+ * Removes control and bidi characters from untrusted display text (a title, for example).
+ * Unlike a file name, slashes are kept.
+ */
+export function sanitizeDisplayText(text: string): string {
+  return text.replace(UNSAFE_NAME_CHARS, "").trim();
+}
+
+/**
  * Sanitizes a filename for safe visual display:
  * - Strips directory paths (Windows & POSIX)
  * - Removes control and bidi characters

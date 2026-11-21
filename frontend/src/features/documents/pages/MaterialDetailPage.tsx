@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from "react";
-import { useParams, useLocation } from "react-router-dom";
+import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell, PageHeader, NotFoundState } from "@/components/layout";
 import {
@@ -25,9 +25,15 @@ import { getDocumentError, getVersionFailure } from "../utils/documentErrors";
 import { useVersionStatus } from "../hooks/useVersionStatus";
 import { isTerminalStatus } from "../utils/pollingSchedule";
 import { getDocumentActions, getFailedVersionHint } from "../utils/documentPolicy";
-import { sanitizeDisplayFilename } from "../utils/fileChecks";
-import { useRetryVersion, useDeleteVersion } from "../hooks/useDocumentMutations";
+import { sanitizeDisplayFilename, sanitizeDisplayText } from "../utils/fileChecks";
+import {
+  useRetryVersion,
+  useDeleteVersion,
+  useDeleteDocument,
+} from "../hooks/useDocumentMutations";
 import { VersionRowActions } from "../components/VersionRowActions";
+import { DocumentActions } from "../components/DocumentActions";
+import { UploadDialog } from "../components/UploadDialog";
 
 export interface MaterialDetailPageProps {
   api?: DocumentsApi;
@@ -78,6 +84,12 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   // A retried version starts a new processing run: its polling clock starts at the click, not at upload.
   const [retryStartedAt, setRetryStartedAt] = useState<Record<string, string>>({});
   const inFlightRef = useRef(false);
+  const navigate = useNavigate();
+  const [isNewVersionOpen, setIsNewVersionOpen] = useState(false);
+  const [deleteDocOpen, setDeleteDocOpen] = useState(false);
+  const [deleteDocError, setDeleteDocError] = useState<string | null>(null);
+  // Set once the document is gone, so the page does not refetch it (that would only answer 404).
+  const [isRemoved, setIsRemoved] = useState(false);
 
   const isAdminRoute = location.pathname.startsWith("/admin");
   const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
@@ -92,7 +104,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   } = useQuery({
     queryKey: ["document", documentId],
     queryFn: () => api.get(documentId),
-    enabled: Boolean(documentId),
+    enabled: Boolean(documentId) && !isRemoved,
     retry: false,
   });
 
@@ -159,6 +171,54 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
       setDeleteError(getDocumentError(err, "delete").message);
     },
   });
+
+  const deleteDocMutation = useDeleteDocument({
+    api,
+    onSuccess: (result) => {
+      inFlightRef.current = false;
+      setIsRemoved(true);
+      setDeleteDocOpen(false);
+      setDeleteDocError(null);
+      toast?.success(result.alreadyRemoved ? "That material was already removed." : "Material deleted.");
+      navigate(baseRoute);
+    },
+    onError: (err) => {
+      inFlightRef.current = false;
+      setDeleteDocError(getDocumentError(err, "delete").message);
+    },
+  });
+
+  const anyMutationPending =
+    retryMutation.isPending || deleteMutation.isPending || deleteDocMutation.isPending;
+
+  const handleConfirmDeleteDocument = () => {
+    if (inFlightRef.current || anyMutationPending) return;
+    inFlightRef.current = true;
+    setDeleteDocError(null);
+    deleteDocMutation.mutate({ documentId });
+  };
+
+  const handleCloseDeleteDocument = () => {
+    if (deleteDocMutation.isPending) return;
+    setDeleteDocOpen(false);
+    setDeleteDocError(null);
+  };
+
+  // "Show it" after duplicate_version: scroll to and focus the row of that version on this page.
+  // The same version appears in the phone card list and in the wide table (one of them is hidden by CSS),
+  // so the visible one is picked. The timer lets the closing dialog hand focus back first.
+  const handleShowVersion = (versionId: string) => {
+    window.setTimeout(() => {
+      const found = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-version-row]")
+      ).filter((el) => el.getAttribute("data-version-row") === versionId);
+      const target = found.find((el) => el.getClientRects().length > 0) ?? found[0];
+      if (!target) return;
+      target.scrollIntoView?.({ block: "center", behavior: "smooth" });
+      target.focus();
+      setAnnouncement(`Showing version ${target.textContent ?? ""}`.trim());
+    }, 0);
+  };
 
   const handleRetry = (version: DocumentVersionItem) => {
     if (inFlightRef.current || retryMutation.isPending || deleteMutation.isPending) return;
@@ -270,7 +330,15 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
       key: "version_no",
       header: "Version",
       className: "w-24 whitespace-nowrap",
-      render: (v) => <span className="font-semibold text-text">v{v.version_no}</span>,
+      render: (v) => (
+        <span
+          tabIndex={-1}
+          data-version-row={v.id}
+          className="font-semibold text-text rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          v{v.version_no}
+        </span>
+      ),
     },
     {
       key: "original_filename",
@@ -278,7 +346,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
       className: "min-w-[200px]",
       render: (v) => (
         <span className="font-medium text-text break-words">
-          {v.original_filename}
+          {sanitizeDisplayFilename(v.original_filename, 255)}
         </span>
       ),
     },
@@ -405,6 +473,10 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     });
   }
 
+  const documentActions = getDocumentActions({ can, document: doc });
+  const deleteDocumentEnabled =
+    documentActions.find((a) => a.id === "delete_document")?.enabled === true;
+
   const deleteTargetEnabled = deleteTarget
     ? rowActions(deleteTarget).find((a) => a.id === "delete_version")?.enabled === true
     : false;
@@ -443,6 +515,17 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
             <span>{getBlockedReasonText(doc.blocked_reason)}</span>
           </p>
         )}
+
+        {/* Document actions come only from the policy module */}
+        <DocumentActions
+          actions={documentActions}
+          isBusy={anyMutationPending}
+          onNewVersion={() => setIsNewVersionOpen(true)}
+          onDeleteDocument={() => {
+            setDeleteDocError(null);
+            setDeleteDocOpen(true);
+          }}
+        />
       </div>
 
       {/* Versions Section */}
@@ -484,6 +567,30 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         error={deleteError}
         onConfirm={handleConfirmDelete}
         onClose={handleCloseDelete}
+      />
+
+      <ConfirmDialog
+        isOpen={deleteDocOpen}
+        title={`Delete '${sanitizeDisplayText(doc.title)}'?`}
+        message="Students will no longer see it and it cannot be restored from here."
+        confirmText="Delete document"
+        cancelText="Cancel"
+        variant="danger"
+        initialFocus="cancel"
+        isLoading={deleteDocMutation.isPending}
+        confirmDisabled={!deleteDocumentEnabled}
+        error={deleteDocError}
+        onConfirm={handleConfirmDeleteDocument}
+        onClose={handleCloseDeleteDocument}
+      />
+
+      <UploadDialog
+        isOpen={isNewVersionOpen}
+        onClose={() => setIsNewVersionOpen(false)}
+        mode="version"
+        documentId={documentId}
+        api={api}
+        onShowVersion={handleShowVersion}
       />
     </AppShell>
   );

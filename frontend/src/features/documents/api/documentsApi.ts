@@ -1,4 +1,4 @@
-import type { AxiosInstance } from "axios";
+import type { AxiosInstance, AxiosRequestConfig } from "axios";
 import {
   DocumentListSchema,
   DocumentSchema,
@@ -28,6 +28,11 @@ export interface DocumentUploadPayload {
   class_ids: string[];
 }
 
+/** New version of an existing document: the file is the only thing the server accepts. */
+export interface NewVersionPayload {
+  file: File;
+}
+
 export interface UploadOptions {
   onProgress?: (progress: number) => void;
   signal?: AbortSignal;
@@ -42,6 +47,26 @@ export function buildUploadFormData(payload: DocumentUploadPayload): FormData {
     form.append("class_ids", classId);
   }
   return form;
+}
+
+export function buildNewVersionFormData(payload: NewVersionPayload): FormData {
+  const form = new FormData();
+  form.append("file", payload.file);
+  return form;
+}
+
+// Shared by both upload routes: 10-minute timeout, progress and cancel.
+function multipartConfig(options?: UploadOptions): AxiosRequestConfig {
+  return {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 10 * 60 * 1000,
+    signal: options?.signal,
+    onUploadProgress: (progressEvent) => {
+      if (options?.onProgress && progressEvent.total) {
+        options.onProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
+      }
+    },
+  };
 }
 
 export function createDocumentsApi(client: AxiosInstance) {
@@ -67,19 +92,21 @@ export function createDocumentsApi(client: AxiosInstance) {
       options?: UploadOptions
     ): Promise<DocumentVersionItem> => {
       const data = form instanceof FormData ? form : buildUploadFormData(form);
-      const response = await client.post("/documents", data, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-        timeout: 10 * 60 * 1000,
-        signal: options?.signal,
-        onUploadProgress: (progressEvent) => {
-          if (options?.onProgress && progressEvent.total) {
-            options.onProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total));
-          }
-        },
-      });
+      const response = await client.post("/documents", data, multipartConfig(options));
       return validateResponse(DocumentVersionSchema, response.data, "document upload");
+    },
+    uploadVersion: async (
+      documentId: string,
+      form: FormData | NewVersionPayload,
+      options?: UploadOptions
+    ): Promise<DocumentVersionItem> => {
+      const data = form instanceof FormData ? form : buildNewVersionFormData(form);
+      const response = await client.post(
+        `/documents/${documentId}/versions`,
+        data,
+        multipartConfig(options)
+      );
+      return validateResponse(DocumentVersionSchema, response.data, "document new version");
     },
     retryVersion: async (documentId: string, versionId: string): Promise<DocumentVersionItem> => {
       const response = await client.post(`/documents/${documentId}/versions/${versionId}/retry`);
@@ -87,6 +114,9 @@ export function createDocumentsApi(client: AxiosInstance) {
     },
     deleteVersion: async (documentId: string, versionId: string): Promise<void> => {
       await client.delete(`/documents/${documentId}/versions/${versionId}`);
+    },
+    deleteDocument: async (documentId: string): Promise<void> => {
+      await client.delete(`/documents/${documentId}`);
     },
   };
 }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   validateDocumentFile,
   sanitizeDisplayFilename,
+  sanitizeDisplayText,
   ALLOWED_EXTENSIONS,
   DEFAULT_MAX_FILE_BYTES,
 } from "../utils/fileChecks.ts";
@@ -84,4 +85,10 @@ test("sanitizeDisplayFilename removes paths, control characters, and bidi marks"
   assert.ok(sanitized.endsWith(".pdf"));
   assert.ok(sanitized.includes("…"));
   assert.ok(sanitized.length <= 20);
+});
+
+test("sanitizeDisplayText: removes bidi and control characters but keeps slashes in a title", () => {
+  assert.equal(sanitizeDisplayText("Notes\u202E gpj.exe\u0000"), "Notes gpj.exe");
+  assert.equal(sanitizeDisplayText("Maths / Algebra \u2066x\u2069"), "Maths / Algebra x");
+  assert.equal(sanitizeDisplayText("\u202E\u200F"), "");
 });

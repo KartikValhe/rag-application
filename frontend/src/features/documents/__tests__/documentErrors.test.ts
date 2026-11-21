@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { getDocumentError, getVersionFailure } from "../utils/documentErrors.ts";
 
-const SECTION_D_CODES: Array<{ code: string; status: number; context?: "upload" | "publish" | "search" | "retry" | "list" | "delete" }> = [
+const SECTION_D_CODES: Array<{ code: string; status: number; context?: "upload" | "new_version" | "publish" | "search" | "retry" | "list" | "delete" }> = [
   // Auth and generic
   { code: "permission_denied", status: 403 },
   { code: "document_manage_requires_all_classes", status: 403 },
@@ -439,4 +439,29 @@ test("documentErrors: Item 5 - getVersionFailure covers EVERY row of table and f
     assert.equal(actual.retryable, false);
     assert.equal(actual.message, "This file could not be processed.", `Code ${code} must return fallback`);
   }
+});
+
+test("documentErrors: new_version context never talks about classes or subjects", () => {
+  const notFound = getDocumentError(
+    { response: { status: 404, data: { detail: { code: "not_found", message: "RAW 7" } } } },
+    "new_version"
+  );
+  assert.equal(notFound.message, "We could not find this material. It may have been removed.");
+
+  const net = getDocumentError({ isAxiosError: true, request: {}, message: "Network Error" }, "new_version");
+  assert.equal(net.message, "The upload did not finish. Check your connection and try again");
+
+  const dup = getDocumentError(
+    { response: { status: 409, data: { detail: { code: "duplicate_version", version_id: "v-2", message: "RAW 7" } } } },
+    "new_version"
+  );
+  assert.equal(dup.message, "This exact file is already an active version of this material.");
+  assert.equal(dup.versionId, "v-2");
+  assert.ok(!dup.message.includes("RAW"));
+
+  const busy = getDocumentError(
+    { response: { status: 409, data: { detail: { code: "document_processing_in_progress" } } } },
+    "new_version"
+  );
+  assert.match(busy.message, /Publish or delete it first/);
 });

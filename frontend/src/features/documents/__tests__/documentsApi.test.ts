@@ -2,7 +2,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import axios, { type InternalAxiosRequestConfig, type AxiosResponse } from "axios";
-import { createDocumentsApi, buildUploadFormData } from "../api/documentsApi.ts";
+import { createDocumentsApi, buildUploadFormData, buildNewVersionFormData } from "../api/documentsApi.ts";
 import { SCHEMA_MISMATCH_NAME } from "../../../api/errorMessages.ts";
 
 // The real client cannot be imported under node (it uses import.meta.env), so read
@@ -298,13 +298,18 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
   const api = createDocumentsApi(mockClient);
   for (const [name, fn] of Object.entries(api)) {
     // upload takes a form, every other function takes ids; wrong argument types would throw before any request
-    const args = name === "upload" ? [new FormData()] : Array.from({ length: fn.length }, () => "id-1");
+    const FORM_FUNCTIONS = ["upload", "uploadVersion"];
+    const args = FORM_FUNCTIONS.includes(name)
+      ? name === "upload"
+        ? [new FormData()]
+        : ["id-1", new FormData()]
+      : Array.from({ length: fn.length }, () => "id-1");
     const before = seen.length;
     // Responses are not valid payloads; only the requested path matters here.
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
     assert.ok(seen.length > before, `${name} made no request`);
   }
-  for (const required of ["retryVersion", "deleteVersion"]) {
+  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument"]) {
     assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {
@@ -370,4 +375,85 @@ test("createDocumentsApi: retryVersion rejects an invalid response shape", async
     () => api.retryVersion("d", "v"),
     (e: Error) => e.name === SCHEMA_MISMATCH_NAME
   );
+});
+
+const VERSION_RESPONSE = {
+  id: "v-new",
+  document_id: "doc-9",
+  version_no: 4,
+  status: "queued",
+  stage: null,
+  error_code: null,
+  file_kind: "pdf",
+  original_filename: "second.pdf",
+  size_bytes: 10,
+  created_at: "2026-11-21T10:00:00Z",
+  retryable: null,
+  warnings: [],
+};
+
+test("buildNewVersionFormData: the real builder sends only the file field", () => {
+  const file = new File(["content"], "second.pdf", { type: "application/pdf" });
+  // Extra fields passed by mistake must never reach the form
+  const form = buildNewVersionFormData({ file, title: "x", subject_id: "s", class_ids: ["c"] } as never);
+  assert.ok(form instanceof FormData);
+  assert.deepEqual(Array.from(new Set(form.keys())), ["file"]);
+  assert.equal((form.get("file") as File).name, "second.pdf");
+});
+
+test("createDocumentsApi: uploadVersion is POST /documents/:id/versions (final URL), only `file`, 10-minute timeout, abortable", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 202, data: VERSION_RESPONSE };
+  });
+  const api = createDocumentsApi(mockClient);
+  const file = new File(["content"], "second.pdf", { type: "application/pdf" });
+  const controller = new AbortController();
+  let progress: number | null = null;
+
+  const result = await api.uploadVersion("doc-9", { file }, {
+    onProgress: (p: number) => {
+      progress = p;
+    },
+    signal: controller.signal,
+  });
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "post");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9/versions`);
+  assert.equal(captured.timeout, 600000);
+  assert.equal(captured.signal, controller.signal);
+  captured.onUploadProgress?.({ loaded: 25, total: 100 } as never);
+  assert.equal(progress, 25);
+  const sent = captured.data as FormData;
+  assert.ok(sent instanceof FormData);
+  assert.deepEqual(Array.from(new Set(sent.keys())), ["file"]);
+  assert.equal(result.id, "v-new");
+  assert.equal(result.version_no, 4);
+});
+
+test("createDocumentsApi: uploadVersion accepts a ready-made FormData too and rejects an invalid response", async () => {
+  const mockClient = createMockAxios(() => ({ status: 202, data: { nope: true } }));
+  const api = createDocumentsApi(mockClient);
+  await assert.rejects(
+    () => api.uploadVersion("d", new FormData()),
+    (e: Error) => e.name === SCHEMA_MISMATCH_NAME
+  );
+});
+
+test("createDocumentsApi: deleteDocument is DELETE /documents/:id (final URL), 204 without body", async () => {
+  let captured: InternalAxiosRequestConfig | undefined;
+  const mockClient = createMockAxios((config) => {
+    captured = config;
+    return { status: 204, data: "" };
+  });
+  const api = createDocumentsApi(mockClient);
+
+  const result = await api.deleteDocument("doc-9");
+
+  assert.ok(captured);
+  assert.equal(captured.method?.toLowerCase(), "delete");
+  assert.equal(axios.getUri(captured), `${BASE_URL}/documents/doc-9`);
+  assert.equal(result, undefined);
 });

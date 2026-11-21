@@ -393,3 +393,11 @@ test("documentSchemas: validateResponse throws SchemaMismatchError on missing re
     }
   );
 });
+
+test("known limitation (5f-5 leftover C): the version response carries no updated or processing-started timestamp", () => {
+  // The 65-minute polling stop can only start from created_at after a page reload. If the backend ever adds a
+  // usable timestamp to DocumentVersionResponse, this test fails: then base the stop on it and delete this test.
+  const keys = Object.keys(DocumentVersionSchema.shape);
+  const timestamps = keys.filter((k) => /(_at|_started|started_)/.test(k)).sort();
+  assert.deepEqual(timestamps, ["created_at", "published_at"]);
+});

@@ -10,7 +10,7 @@ import {
 } from "@/components/ui";
 import { useToast } from "@/components/ui/Toast";
 import { academicApi, type MyClassItem } from "@/features/academic/api/academicApi";
-import { useUploadDocument } from "../hooks/useDocumentMutations";
+import { useUploadDocument, useUploadVersion } from "../hooks/useDocumentMutations";
 import { useDocumentLimits } from "../hooks/useDocuments";
 import { validateDocumentFile, DEFAULT_MAX_FILE_BYTES } from "../utils/fileChecks";
 import { getDocumentError, type DocumentErrorInfo } from "../utils/documentErrors";
@@ -25,6 +25,15 @@ export interface UploadDialogProps {
   api?: DocumentsApi;
   initialSubjectId?: string;
   initialClassId?: string;
+  /**
+   * "document" (default): a new material with title, subject, classes and file.
+   * "version": a new version of an existing material; only the file is asked for and sent.
+   */
+  mode?: "document" | "version";
+  /** Required in "version" mode. */
+  documentId?: string;
+  /** "version" mode, duplicate_version: scroll to and focus that version's row (the dialog closes first). */
+  onShowVersion?: (versionId: string) => void;
 }
 
 export const UploadDialog: React.FC<UploadDialogProps> = ({
@@ -34,7 +43,11 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
   api: customApi,
   initialSubjectId = "",
   initialClassId = "",
+  mode = "document",
+  documentId,
+  onShowVersion,
 }) => {
+  const isVersionMode = mode === "version";
   const api = customApi ?? defaultDocumentsApi;
 
   // Optional toast helper (fails gracefully if ToastProvider is not mounted in test)
@@ -96,7 +109,7 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
   const { data: myClasses = [] } = useQuery<MyClassItem[]>({
     queryKey: ["myClasses"],
     queryFn: () => academicApi.getMyClasses(),
-    enabled: isOpen,
+    enabled: isOpen && !isVersionMode,
   });
 
   // Available subjects from user's classes
@@ -141,42 +154,51 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
     });
   };
 
-  // Mutation
-  const uploadMutation = useUploadDocument({
+  // Mutations: a new document and a new version share the success and error handling.
+  const handleUploaded = (version: DocumentVersionItem) => {
+    setUploadProgress(null);
+    onClose();
+
+    // Toast notification
+    if (toastContext) {
+      toastContext.success("Uploaded. We are reading the file now.");
+      if (version.warnings && version.warnings.includes("duplicate_content")) {
+        toastContext.info(
+          "This file matches another material in your organisation. You can still publish it.",
+          "Duplicate content notice"
+        );
+      }
+    }
+
+    onSuccess?.(version);
+  };
+
+  const handleUploadError = (err: unknown) => {
+    setUploadProgress(null);
+    const mapped = getDocumentError(err, isVersionMode ? "new_version" : "upload");
+    setServerError(mapped);
+
+    if (mapped.field) {
+      const errObj = { [mapped.field]: mapped.message };
+      setFieldErrors((prev) => ({ ...prev, ...errObj }));
+      focusFirstError(errObj);
+    } else {
+      focusFirstError({}, true);
+    }
+  };
+
+  const documentMutation = useUploadDocument({
     api,
-    onSuccess: (version) => {
-      setUploadProgress(null);
-      onClose();
-
-      // Toast notification
-      if (toastContext) {
-        toastContext.success("Uploaded. We are reading the file now.");
-        if (version.warnings && version.warnings.includes("duplicate_content")) {
-          toastContext.info(
-            "This file matches another material in your organisation. You can still publish it.",
-            "Duplicate content notice"
-          );
-        }
-      }
-
-      onSuccess?.(version);
-    },
-    onError: (err) => {
-      setUploadProgress(null);
-      const mapped = getDocumentError(err, "upload");
-      setServerError(mapped);
-
-      if (mapped.field) {
-        const errObj = { [mapped.field]: mapped.message };
-        setFieldErrors((prev) => ({ ...prev, ...errObj }));
-        focusFirstError(errObj);
-      } else {
-        focusFirstError({}, true);
-      }
-    },
+    onSuccess: handleUploaded,
+    onError: handleUploadError,
+  });
+  const versionMutation = useUploadVersion({
+    api,
+    onSuccess: handleUploaded,
+    onError: handleUploadError,
   });
 
-  const isUploading = uploadMutation.isPending;
+  const isUploading = documentMutation.isPending || versionMutation.isPending;
 
   const handleSubjectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newSubjectId = e.target.value;
@@ -247,18 +269,20 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
     const newFieldErrors: Record<string, string> = {};
 
     const trimmedTitle = title.trim();
-    if (!trimmedTitle || trimmedTitle.length > 200) {
-      newFieldErrors.title = "The title must not be empty (and at most 200 characters).";
-    }
+    if (!isVersionMode) {
+      if (!trimmedTitle || trimmedTitle.length > 200) {
+        newFieldErrors.title = "The title must not be empty (and at most 200 characters).";
+      }
 
-    if (!subjectId) {
-      newFieldErrors.subject = "Please select a subject.";
-    }
+      if (!subjectId) {
+        newFieldErrors.subject = "Please select a subject.";
+      }
 
-    if (selectedClassIds.length === 0) {
-      newFieldErrors.classes = "Please select at least one class.";
-    } else if (selectedClassIds.length > 50) {
-      newFieldErrors.classes = "A material can be linked to at most 50 classes.";
+      if (selectedClassIds.length === 0) {
+        newFieldErrors.classes = "Please select at least one class.";
+      } else if (selectedClassIds.length > 50) {
+        newFieldErrors.classes = "A material can be linked to at most 50 classes.";
+      }
     }
 
     if (!selectedFile) {
@@ -279,15 +303,24 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
     setFieldErrors({});
     abortControllerRef.current = new AbortController();
 
-    uploadMutation.mutate({
+    const onProgress = (p: number) => setUploadProgress(p);
+    const signal = abortControllerRef.current.signal;
+
+    if (isVersionMode) {
+      if (!documentId) return;
+      versionMutation.mutate({ documentId, form: { file: selectedFile! }, onProgress, signal });
+      return;
+    }
+
+    documentMutation.mutate({
       form: {
         file: selectedFile!,
         title: trimmedTitle,
         subject_id: subjectId,
         class_ids: selectedClassIds,
       },
-      onProgress: (p) => setUploadProgress(p),
-      signal: abortControllerRef.current.signal,
+      onProgress,
+      signal,
     });
   };
 
@@ -298,16 +331,21 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
     <Modal
       isOpen={isOpen}
       onClose={handleCancel}
-      title="Upload material"
-      description="Upload a new document for your classes."
+      title={isVersionMode ? "Upload new version" : "Upload material"}
+      description={
+        isVersionMode
+          ? "Upload a new file for this material. Students keep seeing the published version until you publish this one."
+          : "Upload a new document for your classes."
+      }
       size="lg"
       footer={
-        <div className="flex items-center justify-end gap-3 w-full">
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 w-full">
           <Button
             type="button"
             variant="secondary"
             onClick={handleCancel}
             disabled={false}
+            className="w-full sm:w-auto min-h-[44px]"
           >
             Cancel
           </Button>
@@ -317,6 +355,7 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
             disabled={isSubmitDisabled}
             isLoading={isUploading}
             onClick={handleSubmit}
+            className="w-full sm:w-auto min-h-[44px]"
           >
             Upload
           </Button>
@@ -325,12 +364,32 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
     >
       <form onSubmit={handleSubmit} className="space-y-4 text-left">
         {/* Global/Server Alert Error (non-field errors or duplicate_version) */}
-        {serverError && !serverError.field && (
+        {serverError && (isVersionMode ? serverError.field !== "file" : !serverError.field) && (
           <Alert variant="danger" title="Upload failed">
-            <p>{serverError.message}</p>
+            <p className="break-words">{serverError.message}</p>
+            {isVersionMode &&
+              serverError.code === "duplicate_version" &&
+              serverError.versionId &&
+              onShowVersion && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="mt-3 w-full sm:w-auto min-h-[44px]"
+                  onClick={() => {
+                    const id = serverError.versionId!;
+                    onClose();
+                    onShowVersion(id);
+                  }}
+                >
+                  Show it
+                </Button>
+              )}
           </Alert>
         )}
 
+        {!isVersionMode && (
+        <>
         {/* Title Field with Character Counter */}
         <div>
           <div className="flex items-center justify-between mb-1">
@@ -428,6 +487,9 @@ export const UploadDialog: React.FC<UploadDialogProps> = ({
             </p>
           )}
         </div>
+
+        </>
+        )}
 
         {/* File Upload Zone */}
         <div>

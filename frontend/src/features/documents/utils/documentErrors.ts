@@ -242,7 +242,7 @@ const UPLOAD_VALIDATION_CODES = new Set([
 
 export function getDocumentError(
   err: unknown,
-  context?: "upload" | "publish" | "search" | "retry" | "list" | "delete"
+  context?: "upload" | "new_version" | "publish" | "search" | "retry" | "list" | "delete"
 ): DocumentErrorInfo {
   const parsed = parseApiError(err);
   const code = parsed.code ?? "";
@@ -293,7 +293,7 @@ export function getDocumentError(
       message = DOCUMENT_ERROR_MESSAGES[code];
     } else if (parsed.isNetwork) {
       message =
-        context === "upload"
+        context === "upload" || context === "new_version"
           ? "The upload did not finish. Check your connection and try again"
           : "Network error. Please check your connection and try again.";
     } else if (parsed.isSchemaMismatch) {

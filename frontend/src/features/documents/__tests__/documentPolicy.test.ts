@@ -426,3 +426,56 @@ test("getFailedVersionHint: shown for a failed, non-retryable version when the u
   const viewOnly = (p: string) => p === "document:view";
   assert.equal(getFailedVersionHint({ can: viewOnly, version: notRetryable }), null);
 });
+
+test("documentPolicy matrix: new_version and delete_document by permission, can_manage and latest status", () => {
+  const statuses = ["queued", "processing", "ready", "published", "failed", "archived"] as const;
+  const roles: Record<string, (p: string) => boolean> = {
+    admin: () => true,
+    teacherUploadOnly: (p) => p === "document:view" || p === "document:upload",
+    teacherWithDelete: (p) => ["document:view", "document:upload", "document:delete"].includes(p),
+    viewOnly: (p) => p === "document:view",
+    student: () => false,
+  };
+  const BLOCKED = ["queued", "processing", "ready"];
+  for (const [roleName, can] of Object.entries(roles)) {
+    for (const canManage of [true, false]) {
+      for (const status of statuses) {
+        const doc = createMockDoc({
+          can_manage: canManage,
+          latest_version: createMockVersion({ status }),
+        });
+        const actions = getDocumentActions({ can, document: doc });
+        const label = `${roleName} manage=${canManage} ${status}`;
+        const nv = getAction(actions, "new_version");
+        const dd = getAction(actions, "delete_document");
+
+        // New version: hidden without document:upload; otherwise disabled with a reason (never hidden)
+        const mayUpload = can("document:upload");
+        assert.equal(nv.visible, mayUpload, `${label}: new_version visible`);
+        if (mayUpload) {
+          const shouldEnable = canManage && !BLOCKED.includes(status);
+          assert.equal(nv.enabled, shouldEnable, `${label}: new_version enabled`);
+          assert.equal(Boolean(nv.reason), !shouldEnable, `${label}: new_version reason`);
+          if (!canManage) assert.match(nv.reason ?? "", /only some of the linked classes/);
+          else if (BLOCKED.includes(status)) assert.equal(nv.reason, "Publish or delete the draft first");
+        } else {
+          assert.equal(nv.enabled, false, `${label}: hidden is never enabled`);
+        }
+
+        // Delete document: hidden without document:delete (whatever the status); disabled with the lock reason when not manageable
+        const mayDelete = can("document:delete");
+        assert.equal(dd.visible, mayDelete, `${label}: delete_document visible`);
+        if (mayDelete) {
+          assert.equal(dd.enabled, canManage, `${label}: delete_document enabled`);
+          assert.equal(Boolean(dd.reason), !canManage, `${label}: delete_document reason`);
+        } else {
+          assert.equal(dd.enabled, false);
+        }
+
+        if (roleName === "student") {
+          assert.ok(actions.every((a) => !a.visible), `${label}: student sees no action`);
+        }
+      }
+    }
+  }
+});

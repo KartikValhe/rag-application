@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -101,6 +101,18 @@ const mockClasses: MyClassItem[] = [
   },
 ];
 
+
+// The default layout is stacked cards (phones) plus a hidden desktop table: both are in the DOM,
+// so content assertions look at the card list only.
+function cardList(): HTMLElement {
+  const el = document.querySelector<HTMLElement>("div.block.md\\:hidden");
+  if (!el) throw new Error("stacked card list not found");
+  return el;
+}
+function cards() {
+  return within(cardList());
+}
+
 describe("MaterialsListPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -124,6 +136,8 @@ describe("MaterialsListPage", () => {
     const doc = createMockDoc();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({
         items: [doc],
@@ -145,9 +159,9 @@ describe("MaterialsListPage", () => {
 
     expect(screen.getByRole("heading", { name: /course materials/i })).toBeDefined();
     await waitFor(() => {
-      expect(screen.getByText("Intro to Algorithms")).toBeDefined();
-      expect(screen.getByText("Computer Science")).toBeDefined();
-      expect(screen.getByText("Draft, ready to publish")).toBeDefined();
+      expect(cards().getByText("Intro to Algorithms")).toBeDefined();
+      expect(cards().getByText("Computer Science")).toBeDefined();
+      expect(cards().getByText("Draft, ready to publish")).toBeDefined();
     });
   });
 
@@ -247,6 +261,8 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: docs, next_cursor: null }),
       get: vi.fn(),
@@ -264,11 +280,11 @@ describe("MaterialsListPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Waiting")).toBeDefined();
-      expect(screen.getByText("Reading file")).toBeDefined();
-      expect(screen.getByText("Draft, needs review (3 passages)")).toBeDefined();
-      expect(screen.getByText("Draft, not checked yet")).toBeDefined();
-      expect(screen.getByText("Published: v1")).toBeDefined();
+      expect(cards().getByText("Waiting")).toBeDefined();
+      expect(cards().getByText("Reading file")).toBeDefined();
+      expect(cards().getByText("Draft, needs review (3 passages)")).toBeDefined();
+      expect(cards().getByText("Draft, not checked yet")).toBeDefined();
+      expect(cards().getByText("Published: v1")).toBeDefined();
     });
   });
 
@@ -292,6 +308,8 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: listMock,
       get: vi.fn(),
@@ -309,7 +327,7 @@ describe("MaterialsListPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Page 1 Doc")).toBeDefined();
+      expect(cards().getByText("Page 1 Doc")).toBeDefined();
     });
 
     const loadMoreButton = screen.getByRole("button", { name: /load more/i });
@@ -319,13 +337,15 @@ describe("MaterialsListPage", () => {
 
     await waitFor(() => {
       expect(listMock).toHaveBeenCalledWith(expect.objectContaining({ cursor: "cursor-page-2" }));
-      expect(screen.getByText("Page 2 Doc")).toBeDefined();
+      expect(cards().getByText("Page 2 Doc")).toBeDefined();
     });
   });
 
   it("shows empty state when no documents exist", async () => {
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
@@ -351,6 +371,8 @@ describe("MaterialsListPage", () => {
     const user = userEvent.setup();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
@@ -379,6 +401,8 @@ describe("MaterialsListPage", () => {
     vi.spyOn(academicApi, "getMyClasses").mockResolvedValue([]);
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
       get: vi.fn(),
@@ -408,6 +432,8 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [lockedDoc], next_cursor: null }),
       get: vi.fn(),
@@ -426,7 +452,7 @@ describe("MaterialsListPage", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/You teach this subject in only some of the linked classes, so you can only view it/i)
+        cards().getByText(/You teach this subject in only some of the linked classes, so you can only view it/i)
       ).toBeDefined();
     });
   });
@@ -449,6 +475,8 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn().mockResolvedValue({ items: [maliciousDoc], next_cursor: null }),
       get: vi.fn(),
@@ -466,7 +494,7 @@ describe("MaterialsListPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeDefined();
+      expect(cards().getByText("<img src=x onerror=alert(1)>")).toBeDefined();
       // Ensure no img tag exists in the document
       expect(document.querySelector("img[src='x']")).toBeNull();
     });
@@ -506,6 +534,111 @@ describe("MaterialsListPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/403/i)).toBeDefined();
+    });
+  });
+
+  describe("5f-5 leftover A: stacked card layout on phones", () => {
+    async function renderList(
+      docs: DocumentItem[],
+      perms = ["document:view", "document:upload"],
+      waitFor_ = "Intro to Algorithms"
+    ) {
+      vi.spyOn(AuthContextModule, "useAuth").mockReturnValue({
+        user: { id: "teacher-1", isAdmin: false, roles: ["teacher"], permissions: perms },
+        isAuthenticated: true,
+        isLoading: false,
+        login: vi.fn(),
+        register: vi.fn(),
+        logout: vi.fn(),
+      });
+      const fakeApi: DocumentsApi = {
+        retryVersion: vi.fn(),
+        uploadVersion: vi.fn(),
+        deleteDocument: vi.fn(),
+        deleteVersion: vi.fn(),
+        list: vi.fn().mockResolvedValue({ items: docs, next_cursor: null }),
+        get: vi.fn(),
+        limits: vi.fn(),
+        status: vi.fn(),
+        upload: vi.fn(),
+      };
+      const utils = render(
+        <QueryClientProvider client={createTestQueryClient()}>
+          <MemoryRouter initialEntries={["/teacher/materials"]}>
+            <Routes>
+              <Route path="/teacher/materials" element={<MaterialsListPage api={fakeApi} />} />
+              <Route path="/teacher/materials/:documentId" element={<div>DETAIL ROUTE</div>} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+      await waitFor(() => expect(cards().getByText(waitFor_)).toBeDefined());
+      return utils;
+    }
+
+    it("renders the stacked card list on phones and keeps the wide table hidden below md (no horizontal scroll at 360 px)", async () => {
+      await renderList([createMockDoc()]);
+      // phone cards are visible below md only
+      expect(cardList().classList.contains("block")).toBe(true);
+      expect(cardList().classList.contains("md:hidden")).toBe(true);
+      // the wide table sits in a wrapper that is display:none below md
+      const table = document.querySelector("table") as HTMLElement;
+      const wrapper = table.parentElement as HTMLElement;
+      expect(wrapper.classList.contains("hidden")).toBe(true);
+      expect(wrapper.classList.contains("md:block")).toBe(true);
+      // nothing on the phone side scrolls sideways
+      expect(cardList().className).not.toMatch(/overflow-x-(auto|scroll)/);
+      expect(cardList().querySelector(".overflow-x-auto")).toBeNull();
+    });
+
+    it("each card has a footer link at least 44 px high that opens the material; destructive actions are not offered here", async () => {
+      await renderList([createMockDoc()], ["document:view", "document:upload", "document:delete"]);
+      const link = cards().getByRole("link", { name: /open/i });
+      expect(link.className).toContain("min-h-[44px]");
+      expect(link.getAttribute("href")).toBe("/teacher/materials/doc-1");
+      expect(cards().queryByRole("button", { name: /delete/i })).toBeNull();
+    });
+
+    it("the Open link is reachable by keyboard and Enter opens the material once", async () => {
+      const user = userEvent.setup();
+      await renderList([createMockDoc()]);
+      const link = cards().getByRole("link", { name: /open/i });
+      link.focus();
+      expect(document.activeElement).toBe(link);
+      await user.keyboard("{Enter}");
+      expect(await screen.findByText("DETAIL ROUTE")).toBeDefined();
+    });
+
+    it("long titles and subjects wrap instead of widening the card", async () => {
+      const long = "A".repeat(150);
+      await renderList([createMockDoc({ title: long, subject: { id: "s", name: "B".repeat(120) } })], undefined, long);
+      expect(cards().getByText(long).className).toContain("break-words");
+      expect(cards().getByText("B".repeat(120)).className).toContain("break-words");
+    });
+
+    it("the Open link comes from the policy: without document:view it is not rendered (the title link is not the only way in)", async () => {
+      await renderList([createMockDoc()], []);
+      expect(cards().queryByRole("link", { name: /open/i })).toBeNull();
+    });
+
+    it("shows both chips when a draft is waiting and an older version stays published", async () => {
+      const waiting = createMockDoc({
+        latest_version: {
+          ...createMockDoc().latest_version!,
+          id: "v-3",
+          version_no: 3,
+          status: "queued",
+        },
+        published_version: {
+          ...createMockDoc().latest_version!,
+          id: "v-2",
+          version_no: 2,
+          status: "published",
+        },
+      });
+      await renderList([waiting]);
+      expect(cards().getByText("Waiting")).toBeDefined();
+      expect(cards().getByText("Published: v2")).toBeDefined();
     });
   });
 });

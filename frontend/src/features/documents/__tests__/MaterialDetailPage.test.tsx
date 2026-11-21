@@ -115,6 +115,8 @@ describe("MaterialDetailPage", () => {
     let statusCallCount = 0;
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockImplementation(() => {
@@ -189,6 +191,8 @@ describe("MaterialDetailPage", () => {
     const statusMock = vi.fn();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(readyDoc),
@@ -222,6 +226,8 @@ describe("MaterialDetailPage", () => {
     const doc = createMockDetailDoc();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(doc),
@@ -281,6 +287,8 @@ describe("MaterialDetailPage", () => {
 
       const fakeApi: DocumentsApi = {
         retryVersion: vi.fn(),
+        uploadVersion: vi.fn(),
+        deleteDocument: vi.fn(),
         deleteVersion: vi.fn(),
         list: vi.fn(),
         get: vi.fn().mockResolvedValue(failedDoc),
@@ -321,6 +329,8 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockRejectedValue(notFoundError),
@@ -364,6 +374,8 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn(),
@@ -405,7 +417,7 @@ describe("MaterialDetailPage", () => {
         stage: null,
         error_code: null,
         file_kind: "pdf",
-        original_filename: "<script>alert('xss')</script>.pdf",
+        original_filename: "<script>alert('xss')<b>.pdf",
         size_bytes: 100,
         created_at: "2026-11-20T10:00:00Z",
         warnings: [],
@@ -414,6 +426,8 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      uploadVersion: vi.fn(),
+      deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
       list: vi.fn(),
       get: vi.fn().mockResolvedValue(maliciousDoc),
@@ -437,7 +451,7 @@ describe("MaterialDetailPage", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "<img src=x onerror=alert(1)>", level: 1 })).toBeDefined();
-      expect(screen.getByText("<script>alert('xss')</script>.pdf")).toBeDefined();
+      expect(screen.getByText("<script>alert('xss')<b>.pdf")).toBeDefined();
       expect(document.querySelector("img[src='x']")).toBeNull();
       expect(document.querySelector("script")).toBeNull();
     });

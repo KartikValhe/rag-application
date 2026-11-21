@@ -15,6 +15,7 @@ import { useDocuments } from "../hooks/useDocuments";
 import { getStatusChip } from "../utils/statusChip";
 import { getDocumentError } from "../utils/documentErrors";
 import { getDocumentActions } from "../utils/documentPolicy";
+import { sanitizeDisplayText } from "../utils/fileChecks";
 import { UploadDialog } from "../components/UploadDialog";
 import type { DocumentsApi } from "../api/documentsApi";
 import type { DocumentItem } from "../schemas/documentSchemas";
@@ -57,7 +58,7 @@ function getBlockedReasonText(reason: string | null | undefined): string {
 
 export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   api,
-  responsiveLayout = "scroll",
+  responsiveLayout = "stacked",
 }) => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -67,6 +68,8 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
 
   const policyActions = useMemo(() => getDocumentActions({ can }), [can]);
   const canUpload = policyActions.find((a) => a.id === "upload")?.visible;
+  // "Open" is a view action: it comes from the policy, like every other action
+  const canOpen = policyActions.find((a) => a.id === "view")?.visible === true;
 
   const [isUploadOpen, setIsUploadOpen] = useState(false);
 
@@ -111,6 +114,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
           <div className="space-y-1">
             <Link
               to={`${baseRoute}/${doc.id}`}
+              onClick={(e) => e.stopPropagation()}
               className="font-medium text-text hover:text-primary transition-colors break-words block"
             >
               {doc.title}
@@ -202,8 +206,27 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
         className: "text-xs text-text-muted whitespace-nowrap",
         render: (doc) => formatDate(doc.updated_at),
       },
+      ...(canOpen
+        ? [
+            {
+              key: "actions",
+              header: "Actions",
+              className: "w-28",
+              render: (doc: DocumentItem) => (
+                <Link
+                  to={`${baseRoute}/${doc.id}`}
+                  onClick={(e) => e.stopPropagation()}
+                  aria-label={`Open ${sanitizeDisplayText(doc.title)}`}
+                  className="inline-flex w-full md:w-auto items-center justify-center rounded-md border border-border bg-surface px-4 min-h-[44px] md:min-h-0 md:py-1.5 text-sm font-medium text-primary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                >
+                  Open
+                </Link>
+              ),
+            } satisfies Column<DocumentItem>,
+          ]
+        : []),
     ],
-    []
+    [baseRoute, canOpen]
   );
 
   const emptyConfig = useMemo(() => {
@@ -322,6 +345,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
             isLoading={isLoading}
             loadingRowCount={5}
             responsiveLayout={responsiveLayout}
+            mobileActionsLayout="stacked"
             onRowClick={(doc) => navigate(`${baseRoute}/${doc.id}`)}
           />
 
