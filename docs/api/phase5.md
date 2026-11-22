@@ -1,6 +1,6 @@
 # Phase 5 API Reference: Documents
 
-Started during the 5a-2 security hardening. This page lists the contract changes to existing endpoints (section 1), the stable error codes (section 2), the upload rules built in step 5a-3 (section 3) and the document routes built in step 5b-1 (sections 4-6). Publish, flags and test search come in 5c/5d; until a worker exists (5b-2) uploaded versions stay `queued`.
+Started during the 5a-2 security hardening. This page lists the contract changes to existing endpoints (section 1), the stable error codes (section 2), the upload rules built in step 5a-3 (section 3) and the document routes built in step 5b-1 (sections 4-6). Publish, flags and test search were added in 5c/5d, the worker in 5b-2; section 11 covers test search and injection flags.
 
 ---
 
@@ -147,7 +147,7 @@ Implemented in `app/api/v1/documents.py`; scope in `app/services/document_scope.
 All models have `extra="forbid"`, and **every key is always present** (`null` when empty). Timestamps are ISO 8601 with a time zone.
 
 - `NamedRef`: `{id, name}`.
-- `DocumentVersionResponse`: `{id, document_id, version_no, status, stage, error_code, file_kind, original_filename, size_bytes, page_count, chunk_count, flagged_chunk_count, created_at, published_at, retryable: boolean | null (5e-1), warnings: string[]}`. `status` is one of `queued, processing, ready, published, archived, failed`; `file_kind` one of `pdf, docx, pptx, txt, md`.
+- `DocumentVersionResponse`: `{id, document_id, version_no, status, stage, error_code, file_kind, original_filename, size_bytes, page_count, chunk_count, flagged_chunk_count, created_at, updated_at, published_at, retryable: boolean | null (5e-1), warnings: string[]}`. `status` is one of `queued, processing, ready, published, archived, failed`; `file_kind` one of `pdf, docx, pptx, txt, md`. `updated_at` is the last time any column of this version changed (status, stage, error, counts, flags); transaction time. Use `published_at` for the time of publishing.
 - `DocumentResponse`: `{id, title, description, subject: NamedRef, classes: NamedRef[], created_by, created_at, updated_at, latest_version: DocumentVersionResponse | null, published_version: DocumentVersionResponse | null, can_manage: boolean, blocked_reason: "document_manage_requires_all_classes" | null}`.
 - `DocumentListResponse`: `{items: DocumentResponse[], next_cursor: string | null}`. Pass `next_cursor` back as `cursor` for the next page; it is opaque.
 - `DocumentStatusResponse`: `{document_id, version_id, version_no, status, stage, error_code, retryable: boolean, updated_at}`.
@@ -284,7 +284,7 @@ For tenant admins and teachers (`document:view`); students get `403`, no token `
 1. **Permission** (403).
 2. **Scope:** the caller's own (class, subject) pairs (section 4), narrowed by `class_id` and/or `subject_id`. The ids can only narrow: a class, subject or pair the caller does not teach, an unknown id or another tenant's id is the generic `404 not_found`, the same body as every other document route. The tenant always comes from the token; the request has no tenant field.
 3. **Rate limit:** `DOC_TEST_SEARCH_RATE_USER` (60) searches per user per `DOC_TEST_SEARCH_RATE_WINDOW_SECONDS` (600): `429 test_search_rate_limit_exceeded` with `Retry-After` and `retry_after_seconds`. Checked after the scope, so a probe of foreign ids never uses up the window. Redis down outside development: `503 service_unavailable` (fails closed).
-4. **Query:** cleaned like ingested text (NFC; control, zero-width and bidi characters dropped; whitespace collapsed). Empty, or no searchable word at all (`???`): `422 invalid_query`. Over `RETRIEVAL_MAX_QUERY_CHARS` (500) after cleaning: `422 query_too_long`. These come AFTER the rate limit, so an unusable query also uses up the window (tested). A JSON string with a lone surrogate (`"\ud800"`) is refused by the schema (FastAPI's `422` list, section 11.4); before 5d-2 that case ended as a generic 500 on every JSON route.
+4. **Query:** cleaned like ingested text (NFC; control, zero-width and bidi characters dropped; whitespace collapsed). Empty, or no searchable word at all (`???`): `422 invalid_query`. Over `RETRIEVAL_MAX_QUERY_CHARS` (500) after cleaning: `422 query_too_long`. These come AFTER the rate limit, so an unusable query also uses up the window (tested). A JSON string with a lone surrogate (`"\ud800"`) is refused by the schema (FastAPI's `422` list, section 11.5); before 5d-2 that case ended as a generic 500 on every JSON route.
 5. **Model:** the process-wide query embedder is loaded on the first test search of the process (seconds; backlog B96). A model that cannot load or fails, or a query vector of the wrong size, with a non-finite value or a zero norm: `503 search_unavailable`.
 6. **Embedding** under the per-process cap (section 10): at most `RETRIEVAL_EMBED_CONCURRENCY` (2) query embeddings at once; a search over the cap waits up to `RETRIEVAL_EMBED_QUEUE_SECONDS` (5) and then gets `503 search_busy`. An empty scope embeds nothing.
 7. **Search** with a manage scope (section 10), in a second transaction opened only after the embedding. A statement over `RETRIEVAL_STATEMENT_TIMEOUT_MS`: `503 search_timeout`.
@@ -344,6 +344,10 @@ Matching runs on a normalised copy: the invisible characters ingest cleaning dro
 - Text that is really **about** injection is still flagged: a lesson that quotes a jailbreak prompt, "tell the chatbot: ignore all previous instructions", or a note to "send the answers to https://...". Ordinary text about prompts and chatbots, plain links and plain "if a student asks" notes are not (5d-2b). Evasions still open: backlog B101.
 - Not detectable per chunk: zero-width and bidi characters (removed at ingest), PDF hidden text (backlog B56), PPTX hidden slides (backlog B53).
 
+### 11.4 Test-search error codes
+
+Codes of `POST /api/v1/documents/test-search` (11.1). Every message is fixed text.
+
 | Code | HTTP | Where |
 |---|---|---|
 | `invalid_query`, `query_too_long` | 422 | test search |
@@ -351,7 +355,7 @@ Matching runs on a normalised copy: the invisible characters ingest cleaning dro
 | `search_unavailable`, `search_timeout`, `search_busy` | 503 | test search |
 | `service_unavailable` | 503 | test search: Redis is down outside development |
 
-### 11.4 Validation errors on every route (5d-2b)
+### 11.5 Validation errors on every route (5d-2b)
 
 FastAPI's `422` keeps its shape, `{"detail": [errors]}`, but an error now carries only `type`, `loc`, `msg` and, when it holds the schema's own limits (`ge`, `le`, `max_length`, `pattern` ...), `ctx`. The echoed `input` is gone: for a missing field it was the whole request body, so a login without `tenant_slug` repeated the password (review of 5d-2, finding 8; tested on `/auth/login` with six bad bodies). Nothing in `frontend/src` read `input`.
 

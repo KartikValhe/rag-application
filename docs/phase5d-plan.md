@@ -330,7 +330,7 @@ Each batch ends with `run_tests gate`, `ruff check .` and `mypy app`, the exact 
   4. the rate limit is removed: `assert_rate_limited`;
   5. the flags route skips `load_document_for`'s scope: `assert_foreign_version_hidden`.
 
-**5d-2b (2026-11-19): fixes from the independent review of 5d-2.** No migration, no grant, no new dependency. API reference: `docs/api/phase5.md` sections 10, 11.1-11.4.
+**5d-2b (2026-11-19): fixes from the independent review of 5d-2.** No migration, no grant, no new dependency. API reference: `docs/api/phase5.md` sections 10, 11.1-11.5.
 
 | # | Finding | Result | Proving tests |
 |---|---|---|---|

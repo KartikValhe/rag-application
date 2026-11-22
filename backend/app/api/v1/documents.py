@@ -155,6 +155,7 @@ def _version_response(v: DocumentVersion, warnings: Sequence[str] = ()) -> Docum
         chunk_count=v.chunk_count,
         flagged_chunk_count=v.flagged_chunk_count,
         created_at=v.created_at,
+        updated_at=v.updated_at,
         published_at=v.published_at,
         # The one retry rule (the status route and the retry route use it too); null unless failed
         retryable=document_upload.is_retryable(v.status, v.error_code) if v.status == VERSION_STATUS_FAILED else None,

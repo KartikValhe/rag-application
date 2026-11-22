@@ -66,6 +66,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_ml_real_model.py": ("fast",),  # skipped unless RUN_REAL_MODEL=1 (needs the real model files)
     "test_ml_scripts.py": ("fast",),
     "test_parsed_document.py": ("fast",),
+    "test_document_version_updated_at.py": ("fast",),  # the response field and the source guard for writers
+    "test_phase5_doc_layout.py": ("fast",),  # section 11 numbering of docs/api/phase5.md (the drift guard reads it)
     "test_pdf_embedded_file_rule.py": ("fast", "security"),
     "test_retrieval_eval_metrics.py": ("fast",),
     "test_eval_retrieval_script.py": ("fast",),
@@ -108,6 +110,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_batch_c.py": ("db",),
     "test_branding.py": ("db",),
     "test_document_lifecycle.py": ("db", "slow"),
+    "test_document_version_updated_at_db.py": ("db",),  # routes carry updated_at; it moves on every transition
     "test_document_limits.py": ("db",),
     "test_document_limits_route.py": ("db", "security"),  # who may read the limits, and no leak between tenants (gate)
     "test_document_retryable.py": ("db",),  # one retry rule for the status route and the version responses

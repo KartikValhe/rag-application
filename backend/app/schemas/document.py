@@ -42,6 +42,8 @@ class DocumentVersionResponse(_Strict):
     chunk_count: int | None
     flagged_chunk_count: int | None
     created_at: datetime
+    # The last time any column of this version changed (status, stage, error, counts, flags); transaction time.
+    updated_at: datetime
     published_at: datetime | None
     # Whether POST .../retry would be accepted for this version's failure (the same rule as the status route:
     # failed with a transient error code). null unless the version is failed; the retry route's own
