@@ -1,0 +1,39 @@
+# Build context for backend/Dockerfile. Keep this small and free of secrets.
+
+# Secrets and local environment files (the example file is not needed in the image either)
+.env
+.env.*
+*.env
+
+# Virtualenvs and tool caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Large local data: stays on the host or on volumes, never in the image
+models/
+document_store/
+uploads/
+
+# VCS, editors, other projects
+.git
+.gitignore
+.vscode/
+.idea/
+node_modules/
+
+# Not needed at runtime (the dev compose file bind-mounts ./backend over /app)
+tests/
+reports/
+*.csv
+*.log
+Dockerfile
+.dockerignore
