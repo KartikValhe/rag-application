@@ -627,6 +627,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
               classOptions={doc.classes ?? []}
               subjectOptions={doc.subject ? [{ id: doc.subject.id, name: doc.subject.name }] : []}
               initialSubjectId={doc.subject?.id ?? ""}
+              singleDocumentScope
             />
           </TabContent>
         )}

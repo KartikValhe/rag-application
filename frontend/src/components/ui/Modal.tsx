@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useId, useRef } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { useScrollLock } from "@/hooks/useScrollLock";
@@ -18,6 +18,8 @@ export interface ModalProps {
   className?: string;
   /** Element that receives focus when the modal opens (defaults to the first focusable element). */
   initialFocusRef?: React.RefObject<HTMLElement>;
+  /** Id of a visible heading inside the children that names the dialog, for dialogs that pass no title. */
+  labelledBy?: string;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -31,7 +33,9 @@ export const Modal: React.FC<ModalProps> = ({
   closeOnBackdrop = true,
   className,
   initialFocusRef,
+  labelledBy,
 }) => {
+  const titleId = useId();
   const modalRef = useRef<HTMLDivElement>(null);
 
     // Lock body scroll via CSS class (zero inline styles)
@@ -54,6 +58,7 @@ export const Modal: React.FC<ModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
+      aria-labelledby={title ? titleId : labelledBy}
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 overflow-hidden"
     >
       {/* Backdrop */}
@@ -76,7 +81,7 @@ export const Modal: React.FC<ModalProps> = ({
         {/* Header */}
             <div className="flex items-center justify-between border-b border-border-subtle p-4 sm:p-5 shrink-0 bg-surface">
               <div className="space-y-0.5 min-w-0 pr-3">
-                {title && <h2 className="text-base sm:text-lg font-semibold text-text truncate">{title}</h2>}
+                {title && <h2 id={titleId} className="text-base sm:text-lg font-semibold text-text truncate">{title}</h2>}
                 {description && <p className="text-xs text-text-muted line-clamp-2">{description}</p>}
               </div>
               <button

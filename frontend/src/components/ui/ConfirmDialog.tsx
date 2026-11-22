@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useId, useRef } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Modal } from "./Modal";
 import { Alert } from "./Alert";
@@ -40,11 +40,13 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 }) => {
   const actualVariant = confirmVariant || variant || "danger";
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
   return (
     <Modal
       isOpen={isOpen}
       onClose={onClose}
       size="sm"
+      labelledBy={titleId}
       closeOnBackdrop={!isLoading}
       initialFocusRef={initialFocus === "cancel" ? cancelRef : undefined}
       footer={
@@ -77,7 +79,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <AlertTriangle className="h-6 w-6" />
         </div>
         <div className="space-y-1 min-w-0 w-full">
-          <h3 className="text-base font-semibold text-text break-words">{title}</h3>
+          <h3 id={titleId} className="text-base font-semibold text-text break-words">{title}</h3>
           <p className="text-sm text-text-muted break-words">{message}</p>
         </div>
         {error && (

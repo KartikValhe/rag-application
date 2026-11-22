@@ -12,7 +12,7 @@ import {
   Skeleton,
 } from "@/components/ui";
 import { academicApi } from "@/features/academic/api/academicApi";
-import { BookOpen, MessageSquare, ArrowLeft, Sparkles, FolderArchive } from "lucide-react";
+import { BookOpen, MessageSquare, ArrowLeft, Sparkles } from "lucide-react";
 
 export const StudentClassDetailPage: React.FC = () => {
   const { classId } = useParams<{ classId: string }>();
@@ -117,37 +117,14 @@ export const StudentClassDetailPage: React.FC = () => {
           )}
         </div>
 
-        {/* Phase 5 / Phase 6 Future Placeholders */}
+        {/* Phase 6 placeholder only: students see no document list */}
         <div className="pt-6 border-t border-border space-y-6">
           <div className="flex items-center space-x-2">
             <Sparkles className="w-5 h-5 text-warning" />
             <h3 className="text-base font-semibold text-text">Upcoming Academic Capabilities</h3>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Phase 5 Document Placeholder */}
-            <Card className="border-border/80 bg-surface-muted/30 relative overflow-hidden">
-              <CardHeader>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="p-2.5 bg-surface rounded-lg border border-border text-text-muted">
-                    <FolderArchive className="w-5 h-5" />
-                  </div>
-                  <Badge variant="warning" size="sm">
-                    Phase 5 (Coming Next)
-                  </Badge>
-                </div>
-                <CardTitle className="text-base">Course Materials & Lecture Notes</CardTitle>
-                <CardDescription>
-                  Document repository and textbook syllabus
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-xs text-text-muted leading-relaxed">
-                  Instructor uploads (PDFs, PPTs, syllabus notes, and lecture handouts) for this class will appear here once document ingestion is configured in Phase 5.
-                </p>
-              </CardContent>
-            </Card>
-
+          <div className="grid grid-cols-1 gap-6">
             {/* Phase 6 AI Chat Placeholder */}
             <Card className="border-border/80 bg-surface-muted/30 relative overflow-hidden">
               <CardHeader>

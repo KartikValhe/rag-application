@@ -619,3 +619,11 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
   2. Superadmin (platform portal) usage view: the route is tenant-scoped and nothing was built in the platform portal.
   3. Purge control (as in b9): no route lists deleted documents.
   4. Per-user "uploads this hour against the limit" meter, after item 1.
+
+### Phase 5f-10a: Accessibility and small corrections (2026-11-22)
+- **Modal name:** `Modal` now names its `role="dialog"` by the visible title (`aria-labelledby`, one `useId` per instance). A dialog with no `title` can pass `labelledBy` (used by `ConfirmDialog`, whose title heading is in its body, so the title is still shown once). Shared component: all 19 `<Modal>` uses and the 11 `<ConfirmDialog>` uses are covered by a source check (every `<Modal>` passes a title or `labelledBy`) plus rendered name tests for the five document dialogs (upload, new version, publish, delete document, delete version).
+- **Cards:** the list page no longer passes `onRowClick`, so the phone card is a plain container (no `role="button"`, no tab stop). The title is the main link (44 px on a phone), "Open" the second; whole-row click is gone on desktop too (the `Table` component is shared and was not changed). An automated DOM check finds no interactive element inside another on the list and detail pages.
+- **Test search scope:** on the detail page one sentence above the form says the search covers all published material in the chosen class and subject, not only this document (`singleDocumentScope`). Not shown on the list page.
+- **Filters:** the list-page panel now follows the page class and subject filters while it is open (this replaces the earlier note in 5f-8 that changes applied the next time the tab opens). A choice made inside the panel stays until a page filter changes.
+- **Student placeholders (Q8):** the student class page lost the "Course Materials" card (only the Phase 6 chat card remains); the student dashboard card says "Coming in Phase 6" and talks about questions with sources only. Teacher and admin dashboard text is unchanged.
+- **Not fixed (noticed):** see the 5f-10a report: the teacher/admin dashboard card still says documents "will be unlocked in Phase 5"; search results stay on screen after the scope changes; other `Table` users keep `onRowClick` with `role="button"` cards.

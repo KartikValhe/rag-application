@@ -198,7 +198,7 @@ export const DashboardPage: React.FC = () => {
                 <CardTitle className="text-lg">AI Knowledge Base</CardTitle>
               </div>
               <Badge variant="primary" size="sm">
-                Coming in Phase 5 & 6
+                {isStudentView ? "Coming in Phase 6" : "Coming in Phase 5 & 6"}
               </Badge>
             </div>
             <CardDescription>
@@ -211,7 +211,9 @@ export const DashboardPage: React.FC = () => {
           </CardHeader>
           <CardContent className="pt-2 text-xs text-text-muted">
             <p>
-              Document upload, vector chunking, and contextual multi-turn Q&amp;A will be unlocked in Phase 5 and Phase 6.
+              {isStudentView
+                ? "Ask questions about your classes and get answers with sources. This unlocks in Phase 6."
+                : "Document upload, vector chunking, and contextual multi-turn Q&A will be unlocked in Phase 5 and Phase 6."}
             </p>
           </CardContent>
         </Card>

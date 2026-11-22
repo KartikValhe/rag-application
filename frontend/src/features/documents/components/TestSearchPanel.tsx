@@ -31,7 +31,12 @@ export interface TestSearchPanelProps {
   subjectOptions: ScopeOption[];
   initialClassId?: string;
   initialSubjectId?: string;
+  /** Shown when the panel is mounted from one document: the search still covers the whole class and subject. */
+  singleDocumentScope?: boolean;
 }
+
+export const SINGLE_DOCUMENT_SCOPE_NOTE =
+  "This searches all published material in the chosen class and subject, not only this document.";
 
 const SLOW_SEARCH_HINT_MS = 3000;
 
@@ -136,6 +141,7 @@ export const TestSearchPanel: React.FC<TestSearchPanelProps> = ({
   subjectOptions,
   initialClassId = "",
   initialSubjectId = "",
+  singleDocumentScope = false,
 }) => {
   const { can } = usePermission();
   const location = useLocation();
@@ -152,6 +158,13 @@ export const TestSearchPanel: React.FC<TestSearchPanelProps> = ({
   const [query, setQuery] = useState("");
   const [classId, setClassId] = useState(initialClassId);
   const [subjectId, setSubjectId] = useState(initialSubjectId);
+  // Follow the page filters: when a page filter changes while the panel is open, the panel takes the new value.
+  const [seenFilters, setSeenFilters] = useState({ cls: initialClassId, subject: initialSubjectId });
+  if (seenFilters.cls !== initialClassId || seenFilters.subject !== initialSubjectId) {
+    if (seenFilters.cls !== initialClassId) setClassId(initialClassId);
+    if (seenFilters.subject !== initialSubjectId) setSubjectId(initialSubjectId);
+    setSeenFilters({ cls: initialClassId, subject: initialSubjectId });
+  }
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [count, setCount] = useState(String(DEFAULT_SEARCH_K));
   const [localFieldError, setLocalFieldError] = useState<string | null>(null);
@@ -224,6 +237,9 @@ export const TestSearchPanel: React.FC<TestSearchPanelProps> = ({
         <p className="text-xs sm:text-sm text-text-muted break-words">
           Type a question to see which passages the search would find. Your question is not saved.
         </p>
+        {singleDocumentScope && (
+          <p className="text-xs sm:text-sm text-text-muted break-words">{SINGLE_DOCUMENT_SCOPE_NOTE}</p>
+        )}
       </div>
 
       <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">

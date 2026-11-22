@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { useLocation, Link, useNavigate } from "react-router-dom";
+import { useLocation, Link } from "react-router-dom";
 import { AppShell, PageHeader } from "@/components/layout";
 import {
   Table,
@@ -66,7 +66,6 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   responsiveLayout = "stacked",
 }) => {
   const location = useLocation();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const { can } = usePermission();
   const isTeacherOnly = isTeacherOnlyUser(user);
@@ -125,8 +124,7 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
           <div className="space-y-1">
             <Link
               to={`${baseRoute}/${doc.id}`}
-              onClick={(e) => e.stopPropagation()}
-              className="font-medium text-text hover:text-primary transition-colors break-words block"
+              className="font-medium text-text hover:text-primary transition-colors break-words flex items-center min-h-[44px] md:min-h-0 justify-end md:justify-start text-right md:text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary rounded"
             >
               {doc.title}
             </Link>
@@ -226,7 +224,6 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
               render: (doc: DocumentItem) => (
                 <Link
                   to={`${baseRoute}/${doc.id}`}
-                  onClick={(e) => e.stopPropagation()}
                   aria-label={`Open ${sanitizeDisplayText(doc.title)}`}
                   className="inline-flex w-full md:w-auto items-center justify-center rounded-md border border-border bg-surface px-4 min-h-[44px] md:min-h-0 md:py-1.5 text-sm font-medium text-primary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                 >
@@ -300,7 +297,6 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
             loadingRowCount={5}
             responsiveLayout={responsiveLayout}
             mobileActionsLayout="stacked"
-            onRowClick={(doc) => navigate(`${baseRoute}/${doc.id}`)}
           />
 
           {hasNextPage && (
