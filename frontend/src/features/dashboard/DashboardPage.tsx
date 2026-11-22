@@ -9,6 +9,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/com
 import { AppShell } from "@/components/layout/AppShell";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { NextLectureCard } from "@/features/timetable";
+import { getDocumentActions } from "@/features/documents/utils/documentPolicy";
 import {
   GraduationCap,
   ShieldCheck,
@@ -23,10 +24,14 @@ export const DashboardPage: React.FC = () => {
   const location = useLocation();
   const { user } = useAuth();
   const { tenantSlug } = useTheme();
-  const { isAdmin, isTeacher, isStudent } = usePermission();
+  const { isAdmin, isTeacher, isStudent, can } = usePermission();
 
   const isTeacherView = location.pathname.includes("/teacher");
   const isStudentView = location.pathname.includes("/student");
+
+  // The materials link follows the documents policy (document:view); admins use the admin route.
+  const canViewMaterials = !isStudentView && !!getDocumentActions({ can }).find((a) => a.id === "view")?.visible;
+  const materialsPath = isAdmin && !isTeacherView ? "/admin/materials" : "/teacher/materials";
 
   const portalTitle = isTeacherView
     ? "Teaching Workspace"
@@ -198,23 +203,31 @@ export const DashboardPage: React.FC = () => {
                 <CardTitle className="text-lg">AI Knowledge Base</CardTitle>
               </div>
               <Badge variant="primary" size="sm">
-                {isStudentView ? "Coming in Phase 6" : "Coming in Phase 5 & 6"}
+                {isStudentView ? "Coming in Phase 6" : "Materials available, chat in Phase 6"}
               </Badge>
             </div>
             <CardDescription>
               {isTeacherView
-                ? "Course document ingestion, PDF syllabus parsing, and vector knowledge indexing."
+                ? "Upload course materials and check what the search finds in them."
                 : isStudentView
                 ? "Curriculum-grounded AI tutor chat with citations, sources, and instant answers."
-                : "Tenant-wide vector embeddings, document pipeline, and RAG configuration."}
+                : "Review course materials, usage and limits for your organisation."}
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-2 text-xs text-text-muted">
             <p>
               {isStudentView
                 ? "Ask questions about your classes and get answers with sources. This unlocks in Phase 6."
-                : "Document upload, vector chunking, and contextual multi-turn Q&A will be unlocked in Phase 5 and Phase 6."}
+                : "You can upload course materials, check them for flagged passages, publish them and try the search. Student questions with sources come in Phase 6."}
             </p>
+            {!isStudentView && canViewMaterials && (
+              <Link to={materialsPath} className="mt-3 block">
+                <Button variant="primary" size="sm" className="w-full justify-between">
+                  <span>Course materials</span>
+                  <ArrowRight className="w-4 h-4 ml-1" />
+                </Button>
+              </Link>
+            )}
           </CardContent>
         </Card>
       </div>

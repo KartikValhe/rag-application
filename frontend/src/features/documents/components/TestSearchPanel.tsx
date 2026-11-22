@@ -169,7 +169,12 @@ export const TestSearchPanel: React.FC<TestSearchPanelProps> = ({
   const [count, setCount] = useState(String(DEFAULT_SEARCH_K));
   const [localFieldError, setLocalFieldError] = useState<string | null>(null);
 
-  const { state, run, isPending } = useTestSearch({ api });
+  const { state, run, reset, isPending } = useTestSearch({ api });
+  // Results belong to the class and subject they were asked for: when either changes, drop them.
+  useEffect(() => {
+    reset();
+  }, [classId, subjectId, reset]);
+
   const showSlowHint = useDelayedFlag(isPending, SLOW_SEARCH_HINT_MS);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);

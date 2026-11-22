@@ -616,6 +616,74 @@ describe("Phase 5f-8: test-search panel", () => {
   });
 });
 
+describe("Phase 5f-10b: results never outlive their scope", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setUser(["document:view"]);
+  });
+
+  it("changing the class after a search clears the old results", async () => {
+    const api = mockApi();
+    renderPanel(api);
+    const user = await ask("light");
+    await screen.findByRole("heading", { name: "Search results" });
+    expect(screen.getByText("Physics Notes")).toBeDefined();
+    await user.selectOptions(screen.getByLabelText("Class"), "cls-2");
+    expect(screen.queryByRole("heading", { name: "Search results" })).toBeNull();
+    expect(screen.queryByText("Physics Notes")).toBeNull();
+  });
+
+  it("changing the subject after a search clears the old results", async () => {
+    renderPanel(mockApi());
+    const user = await ask("light");
+    await screen.findByRole("heading", { name: "Search results" });
+    await user.selectOptions(screen.getByLabelText("Subject"), "sub-1");
+    expect(screen.queryByText("Physics Notes")).toBeNull();
+  });
+
+  it("a page filter that changes while the panel is open also clears the results", async () => {
+    const api = mockApi();
+    const tree = (cls: string) => (
+      <QueryClientProvider client={createTestQueryClient()}>
+        <MemoryRouter initialEntries={["/teacher/materials"]}>
+          <TestSearchPanel api={api} classOptions={CLASSES} subjectOptions={SUBJECTS} initialClassId={cls} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(""));
+    await ask("light");
+    await screen.findByRole("heading", { name: "Search results" });
+    rerender(tree("cls-1"));
+    expect(screen.queryByText("Physics Notes")).toBeNull();
+  });
+
+  it("changing other options (drafts, count) keeps the results", async () => {
+    renderPanel(mockApi());
+    const user = await ask("light");
+    await screen.findByRole("heading", { name: "Search results" });
+    await user.click(screen.getByLabelText(/include drafts/i));
+    expect(screen.getByText("Physics Notes")).toBeDefined();
+  });
+
+  it("an answer that arrives after the scope changed is dropped, and a new search is allowed", async () => {
+    let resolveFirst: (v: TestSearchResponseItem) => void = () => {};
+    const search = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<TestSearchResponseItem>((r) => (resolveFirst = r)))
+      .mockResolvedValue(searchResponse({ hits: [hit({ document_title: "Chemistry Notes" })] }));
+    renderPanel(mockApi(search));
+    const user = await ask("light");
+    await user.selectOptions(screen.getByLabelText("Class"), "cls-2");
+    await act(async () => {
+      resolveFirst(searchResponse());
+    });
+    expect(screen.queryByText("Physics Notes")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("Chemistry Notes")).toBeDefined();
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Phase 5f-8: useTestSearch hook", () => {
   it("two calls in the same tick send ONE request; after it finishes a new call is allowed", async () => {
     const search = vi.fn().mockResolvedValue(searchResponse());

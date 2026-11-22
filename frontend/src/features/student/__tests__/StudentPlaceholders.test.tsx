@@ -101,9 +101,10 @@ describe("5f-10a change 5: student dashboard promises no document upload", () =>
     expect(screen.getByText(/Phase 6/, { selector: "p" })).toBeDefined();
   });
 
-  it("the teacher view is left as it was (not part of this change)", async () => {
+  it("the teacher view no longer promises Phase 5 (changed in 5f-10b: materials exist, chat is Phase 6)", async () => {
     renderDashboard("/teacher/dashboard", ["teacher"]);
     await screen.findByText("AI Knowledge Base");
-    expect(screen.getByText("Coming in Phase 5 & 6")).toBeDefined();
+    expect(screen.getByText("Materials available, chat in Phase 6")).toBeDefined();
+    expect(document.body.textContent ?? "").not.toMatch(/Phase 5/);
   });
 });

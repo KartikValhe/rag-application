@@ -413,3 +413,6 @@ export function getVersionFailure(
     retryable: false,
   };
 }
+
+/** Read-only lists of the codes this mapper knows (used by the API drift guard test). */
+export const MAPPED_ERROR_CODES: readonly string[] = Object.freeze(Object.keys(DOCUMENT_ERROR_MESSAGES));

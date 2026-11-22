@@ -20,6 +20,8 @@ export function useTestSearch(options: { api?: DocumentsApi } = {}) {
   const inFlight = useRef(false);
   const controller = useRef<AbortController | null>(null);
   const mounted = useRef(true);
+  // Bumped by reset(); an answer that belongs to an older generation is dropped.
+  const generation = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -35,20 +37,29 @@ export function useTestSearch(options: { api?: DocumentsApi } = {}) {
       inFlight.current = true;
       const abort = new AbortController();
       controller.current = abort;
+      const myGeneration = generation.current;
       setState({ status: "pending" });
       try {
         const data = await api.search(input, { signal: abort.signal });
-        if (mounted.current) {
+        if (mounted.current && generation.current === myGeneration) {
           setState({ status: "success", data, includeDrafts: input.includeDrafts === true });
         }
       } catch (error) {
-        if (mounted.current) setState({ status: "error", error });
+        if (mounted.current && generation.current === myGeneration) setState({ status: "error", error });
       } finally {
-        inFlight.current = false;
+        if (generation.current === myGeneration) inFlight.current = false;
       }
     },
     [api]
   );
 
-  return { state, run, isPending: state.status === "pending" };
+  /** Forget the last answer (and any request still running), e.g. when the search scope changed. */
+  const reset = useCallback(() => {
+    generation.current += 1;
+    controller.current?.abort();
+    inFlight.current = false;
+    setState((prev) => (prev.status === "idle" ? prev : { status: "idle" }));
+  }, []);
+
+  return { state, run, reset, isPending: state.status === "pending" };
 }

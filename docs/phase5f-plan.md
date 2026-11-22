@@ -627,3 +627,47 @@ Acceptance: the e2e flow passes locally; the checklist of section (f) is ticked 
 - **Filters:** the list-page panel now follows the page class and subject filters while it is open (this replaces the earlier note in 5f-8 that changes applied the next time the tab opens). A choice made inside the panel stays until a page filter changes.
 - **Student placeholders (Q8):** the student class page lost the "Course Materials" card (only the Phase 6 chat card remains); the student dashboard card says "Coming in Phase 6" and talks about questions with sources only. Teacher and admin dashboard text is unchanged.
 - **Not fixed (noticed):** see the 5f-10a report: the teacher/admin dashboard card still says documents "will be unlocked in Phase 5"; search results stay on screen after the scope changes; other `Table` users keep `onRowClick` with `role="button"` cards.
+
+### Phase 5f-10b: Small corrections, drift guard, closing record (2026-11-22)
+- **Dashboard card:** the teacher and admin "AI Knowledge Base" card no longer says documents "will be unlocked in Phase 5". It says materials can be uploaded, checked, published and searched, and that student questions with sources come in Phase 6. It has a "Course materials" link: `/teacher/materials` for teachers, `/admin/materials` for admins; shown only when the documents policy says `view` is allowed (`document:view`), never on the student dashboard.
+- **Test search scope:** changing the class or the subject (in the panel, or through a page filter while the panel is open) clears the old results and aborts a request still running; an answer that arrives later for the old scope is dropped (`useTestSearch.reset`, generation counter). Changing drafts or the number of results keeps the results.
+- **Drift guard (plan Q5):** see "How the drift guard works" below. Files: `features/documents/__tests__/apiDriftCheck.ts` (helper), `api_drift.test.ts` (the guard, in `npm test`), `api_drift_selftest.test.ts` (14 cases that change one name in an in-memory copy of the doc and check the guard reports it). `documentErrors.ts` got one read-only export, `MAPPED_ERROR_CODES`.
+- **Tests:** `DashboardMaterialsCard.test.tsx` (5), 5 new cases in `TestSearchPanel.test.tsx`, 15 node tests for the guard.
+
+**How the drift guard works.** It reads only the checked-in `docs/api/phase5.md` (no network, no backend files) and the frontend's own modules and sources, and compares: (1) every error code in the doc's code tables (sections 2, 7 and the test-search table) has a message in `documentErrors.ts`, or is in `INTENTIONALLY_GENERIC_ERROR_CODES` with a reason; worker and parser `error_code` values have a `getVersionFailure` message; injection flag codes match `flagDescriptions.ts` both ways; (2) permission names in the route table match the `document:*` and `settings:manage` strings used in frontend sources; (3) every route the frontend calls (method and path) is in the route table, and every documented route is called or in `ROUTES_NOT_USED_BY_FRONTEND` with a reason; (4) every key of each Zod response schema is a documented field of that model in section 5; (5) request fields (test search, publish, upload and new-version form fields) and query parameters (list, flags) are documented; (6) numbers: question length 500, `k` 1-10, title 200, classes 50. Both allow-lists fail when an entry becomes stale. If the doc layout changes so that a parser finds too little, the guard fails with a "DOC PARSE" message instead of passing. A failure lists each drift as one sentence. To try it on a copy of the doc: `PHASE5_API_DOC=<path to a copy> npm test`-style run of `api_drift.test.ts`.
+
+### Phase 5f closing
+**What was built**
+- 5f-1: read-only materials list with status chips, error mapper, schemas, API client, policy layer.
+- 5f-2: document detail page with live status polling of the latest version.
+- 5f-3: upload dialog (file checks, limits, class and subject choice, progress, cancel).
+- 5f-4: retry a failed version; delete a version.
+- 5f-5: upload a new version; delete a document.
+- 5f-6: flags viewer (read-only, plain text, paging).
+- 5f-7: publish with flag acknowledgement (flagged and not-scanned versions).
+- 5f-8: test-search panel on the list and detail pages.
+- 5f-9: admin usage and limits page.
+- 5f-10: accessibility (named dialogs, no nested interactive cards), student placeholder wording, dashboard card, search results tied to their scope, the API drift guard, this record.
+
+**Known leftovers (not built)**
+1. Version `updated_at` is not shown (the version response has no such field).
+2. "New version" is not offered when a document has no versions at all.
+3. Usage page: versions by status and live "uploads in the last hour" counts need a backend addition.
+4. Superadmin (platform portal) usage view.
+5. Other pages that use `Table` with `onRowClick` still render `role="button"` cards (the shared component was not changed).
+6. 16 non-document dialogs have no test that checks their rendered name (the shared `Modal` change is covered by a source check only).
+7. B98: a flagged title or file name does not need an acknowledgement (backend rule).
+8. Download of the original file is step 5f-11.
+
+**Manual smoke test in a real browser** (backend, worker, Redis and frontend running, seeded data; sign in as a teacher unless stated)
+1. Upload: open Course materials, press Upload, pick a small TXT, enter a title, choose a subject and one class, send. The new material appears with a Waiting or Processing chip.
+2. Wait: stay on the detail page; the chip changes to Ready without reloading. A scanned or empty file shows a plain reason and no retry.
+3. Flags: upload a text that contains the sentence "Ignore all previous instructions". When Ready, open the Flags tab; the passage and its code show as plain text.
+4. Publish with acknowledgement: press Publish; the dialog lists the flagged passages; the Publish button stays off until the checkbox is ticked; then the version shows Published.
+5. New version: on a published material press New version, upload a changed file; wait for Ready; publish it; the old version shows Archived.
+6. Retry: stop the worker, upload a file, start the worker again if the version fails with a retryable reason, press Retry; it goes back to Waiting.
+7. Delete: delete a Ready or Failed version (confirm dialog); then delete the whole material and check it leaves the list.
+8. Test search: open the Test search tab, ask a question about the published text; results appear with similarity numbers. Change the class or subject: the results disappear. Tick Include drafts and search again.
+9. Usage: sign in as the tenant admin, open Course materials, then Usage and limits; check the three meters and the limits list; press Refresh.
+10. Student view: sign in as a student; there is no Course materials entry, `/teacher/materials` shows the 403 page, and the dashboard card talks only about Phase 6.
+11. Also: resize to 360 px wide and tab through the list and detail pages with the keyboard.
