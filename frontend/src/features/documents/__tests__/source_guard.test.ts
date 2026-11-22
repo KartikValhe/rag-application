@@ -15,6 +15,7 @@ const NON_MUTATING_METHODS = new Set([
   "status",
   "flags",
   "search",
+  "usage",
 ]);
 
 /**

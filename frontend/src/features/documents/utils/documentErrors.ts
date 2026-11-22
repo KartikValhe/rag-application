@@ -101,6 +101,9 @@ const DOCUMENT_ERROR_MESSAGES: Record<string, string> = {
   // Delete
   version_not_deletable: "Only drafts and failed versions can be deleted.",
 
+  // Usage page (read-only figures; 404 has no server code of its own)
+  usage_not_found: "Usage figures are not available for this organisation.",
+
   // Test search
   invalid_query: "Type a question with at least one word.",
   query_too_long:
@@ -247,7 +250,7 @@ const UPLOAD_VALIDATION_CODES = new Set([
 
 export function getDocumentError(
   err: unknown,
-  context?: "upload" | "new_version" | "publish" | "search" | "retry" | "list" | "delete"
+  context?: "upload" | "new_version" | "publish" | "search" | "retry" | "list" | "delete" | "usage"
 ): DocumentErrorInfo {
   const parsed = parseApiError(err);
   const code = parsed.code ?? "";
@@ -274,6 +277,10 @@ export function getDocumentError(
       message = "Search is temporarily unavailable. Please try again in a few minutes.";
     } else if (code === "not_found" || status === 404) {
       message = "The class or subject is not one of yours.";
+    }
+  } else if (context === "usage") {
+    if (status === 404) {
+      message = DOCUMENT_ERROR_MESSAGES.usage_not_found;
     }
   } else if (context === "retry") {
     if (code === "duplicate_version") {

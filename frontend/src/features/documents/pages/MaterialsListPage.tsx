@@ -14,7 +14,7 @@ import {
   TabTrigger,
   TabContent,
 } from "@/components/ui";
-import { Lock, FolderArchive, UploadCloud } from "lucide-react";
+import { Lock, FolderArchive, UploadCloud, BarChart3 } from "lucide-react";
 import { useDocuments } from "../hooks/useDocuments";
 import { getStatusChip } from "../utils/statusChip";
 import { getDocumentError } from "../utils/documentErrors";
@@ -75,6 +75,9 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   const canUpload = policyActions.find((a) => a.id === "upload")?.visible;
   // "Open" is a view action: it comes from the policy, like every other action
   const canOpen = policyActions.find((a) => a.id === "view")?.visible === true;
+
+  // The usage page is an admin page: the link comes from the policy and shows only on the admin route
+  const canSeeUsage = policyActions.find((a) => a.id === "usage")?.visible === true;
 
   const showSearchTab = policyActions.find((a) => a.id === "test_search")?.visible === true;
 
@@ -324,15 +327,28 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
         description="Browse textbooks, syllabus guides, lecture notes, and curriculum resources."
         breadcrumbs={breadcrumbs}
         actions={
-          canUpload ? (
-            <Button
-              variant="primary"
-              onClick={() => setIsUploadOpen(true)}
-              className="flex items-center gap-1.5"
-            >
-              <UploadCloud className="w-4 h-4" />
-              Upload material
-            </Button>
+          canUpload || (canSeeUsage && isAdminRoute) ? (
+            <>
+              {canSeeUsage && isAdminRoute && (
+                <Link
+                  to="/admin/materials/usage"
+                  className="inline-flex w-full sm:w-auto items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-4 min-h-[44px] sm:min-h-[38px] text-sm font-medium text-primary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                >
+                  <BarChart3 className="w-4 h-4" aria-hidden="true" />
+                  Usage and limits
+                </Link>
+              )}
+              {canUpload && (
+                <Button
+                  variant="primary"
+                  onClick={() => setIsUploadOpen(true)}
+                  className="flex items-center gap-1.5"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  Upload material
+                </Button>
+              )}
+            </>
           ) : undefined
         }
       />

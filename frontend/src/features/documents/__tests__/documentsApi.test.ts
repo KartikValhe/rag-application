@@ -317,7 +317,7 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
     assert.ok(seen.length > before, `${name} made no request`);
   }
-  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags", "publishVersion", "search"]) {
+  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags", "publishVersion", "search", "usage"]) {
     assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {

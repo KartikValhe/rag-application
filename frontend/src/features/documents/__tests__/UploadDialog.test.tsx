@@ -85,6 +85,7 @@ const mockClasses: MyClassItem[] = [
 function makeLimitsApi(): DocumentsApi {
   return {
     retryVersion: vi.fn(),
+    usage: vi.fn(),
     uploadVersion: vi.fn(),
     deleteDocument: vi.fn(),
     deleteVersion: vi.fn(),
@@ -136,6 +137,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -168,6 +170,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -301,6 +304,7 @@ describe("UploadDialog and Upload flow", () => {
         onClose={vi.fn()}
         api={{
           retryVersion: vi.fn(),
+          usage: vi.fn(),
           uploadVersion: vi.fn(),
           deleteDocument: vi.fn(),
           deleteVersion: vi.fn(),
@@ -387,6 +391,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -485,6 +490,7 @@ describe("UploadDialog and Upload flow", () => {
     let capturedSignal: AbortSignal | undefined;
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -563,6 +569,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -632,6 +639,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -689,6 +697,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -748,6 +757,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -812,6 +822,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -877,6 +888,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -941,6 +953,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -1006,6 +1019,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -1071,6 +1085,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),
@@ -1145,6 +1160,7 @@ describe("UploadDialog and Upload flow", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       deleteVersion: vi.fn(),

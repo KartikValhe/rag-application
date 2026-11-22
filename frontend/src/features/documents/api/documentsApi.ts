@@ -4,6 +4,7 @@ import {
   DocumentSchema,
   DocumentStatusSchema,
   DocumentUploadLimitsSchema,
+  DocumentUsageSchema,
   DocumentVersionSchema,
   VersionFlagsSchema,
   TestSearchResponseSchema,
@@ -13,6 +14,7 @@ import {
   type DocumentItem,
   type DocumentStatusItem,
   type DocumentUploadLimitsItem,
+  type DocumentUsageItem,
   type DocumentVersionItem,
   type VersionFlagsItem,
 } from "../schemas/documentSchemas.ts";
@@ -157,6 +159,11 @@ export function createDocumentsApi(client: AxiosInstance) {
     limits: async (): Promise<DocumentUploadLimitsItem> => {
       const response = await client.get("/documents/limits");
       return validateResponse(DocumentUploadLimitsSchema, response.data, "upload limits");
+    },
+    // Read-only. Needs settings:manage (tenant admins); the server answers 403 to everyone else.
+    usage: async (): Promise<DocumentUsageItem> => {
+      const response = await client.get("/admin/documents/usage");
+      return validateResponse(DocumentUsageSchema, response.data, "document usage");
     },
     status: async (documentId: string, versionId: string): Promise<DocumentStatusItem> => {
       const response = await client.get(`/documents/${documentId}/versions/${versionId}/status`);

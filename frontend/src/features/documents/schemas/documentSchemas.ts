@@ -122,22 +122,36 @@ export const TestSearchResponseSchema = z.object({
   hits: z.array(TestSearchHitSchema),
 });
 
+/**
+ * A usage or limit number. Anything that is not a finite, non-negative number (missing, null, NaN,
+ * a string, a negative) becomes null, so a screen can never show NaN. Fractions are rounded down.
+ */
+const lenientCount = z
+  .unknown()
+  .transform((value): number | null =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
+  );
+
+// Lenient on purpose: a new backend field, a missing key or a null never blanks the usage page.
 export const DocumentLimitsSchema = z.object({
-  max_file_bytes: z.number().int(),
-  max_pdf_pages: z.number().int(),
-  max_pptx_slides: z.number().int(),
-  max_documents: z.number().int(),
-  max_storage_bytes: z.number().int(),
-  max_pages: z.number().int(),
-  uploads_per_user_per_hour: z.number().int(),
-  uploads_per_tenant_per_hour: z.number().int(),
+  max_file_bytes: lenientCount,
+  max_pdf_pages: lenientCount,
+  max_pptx_slides: lenientCount,
+  max_documents: lenientCount,
+  max_storage_bytes: lenientCount,
+  max_pages: lenientCount,
+  uploads_per_user_per_hour: lenientCount,
+  uploads_per_tenant_per_hour: lenientCount,
 });
 
 export const DocumentUsageSchema = z.object({
-  documents: z.number().int(),
-  storage_bytes: z.number().int(),
-  pages: z.number().int(),
-  limits: DocumentLimitsSchema,
+  documents: lenientCount,
+  storage_bytes: lenientCount,
+  pages: lenientCount,
+  limits: z.preprocess(
+    (value) => (typeof value === "object" && value !== null && !Array.isArray(value) ? value : {}),
+    DocumentLimitsSchema
+  ),
 });
 
 export const DocumentUploadLimitsSchema = z.object({

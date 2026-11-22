@@ -136,6 +136,7 @@ describe("MaterialsListPage", () => {
     const doc = createMockDoc();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -264,6 +265,7 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -314,6 +316,7 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -353,6 +356,7 @@ describe("MaterialsListPage", () => {
   it("shows empty state when no documents exist", async () => {
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -383,6 +387,7 @@ describe("MaterialsListPage", () => {
     const user = userEvent.setup();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -416,6 +421,7 @@ describe("MaterialsListPage", () => {
     vi.spyOn(academicApi, "getMyClasses").mockResolvedValue([]);
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -450,6 +456,7 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -496,6 +503,7 @@ describe("MaterialsListPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -577,6 +585,7 @@ describe("MaterialsListPage", () => {
       });
       const fakeApi: DocumentsApi = {
         retryVersion: vi.fn(),
+        usage: vi.fn(),
         uploadVersion: vi.fn(),
         deleteDocument: vi.fn(),
         publishVersion: vi.fn(),

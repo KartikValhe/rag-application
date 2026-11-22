@@ -505,7 +505,6 @@ def _encode_cursor(document: Document) -> str:
     raw = json.dumps({"t": document.created_at.isoformat(), "i": str(document.id)}).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-
 def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))

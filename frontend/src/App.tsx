@@ -37,6 +37,7 @@ import { StudentClassDetailPage } from "@/features/student/StudentClassDetailPag
 import { TimetableEditorPage, ScheduleViewPage } from "@/features/timetable";
 import { MaterialsListPage } from "@/features/documents/pages/MaterialsListPage";
 import { MaterialDetailPage } from "@/features/documents/pages/MaterialDetailPage";
+import { MaterialsUsagePage } from "@/features/documents/pages/MaterialsUsagePage";
 import { ErrorBoundary } from "@/components/layout";
 
 const queryClient = new QueryClient({
@@ -191,6 +192,16 @@ export const App: React.FC = () => {
                     element={
                       <AdminRoute permission="document:view">
                         <MaterialsListPage />
+                      </AdminRoute>
+                    }
+                  />
+                  <Route
+                    path="/admin/materials/usage"
+                    element={
+                      <AdminRoute permission="document:view">
+                        <AdminRoute permission="settings:manage">
+                          <MaterialsUsagePage />
+                        </AdminRoute>
                       </AdminRoute>
                     }
                   />

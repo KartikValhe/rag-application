@@ -89,6 +89,7 @@ function mockApi(search = vi.fn().mockResolvedValue(searchResponse())): Document
     upload: vi.fn(),
     uploadVersion: vi.fn(),
     retryVersion: vi.fn(),
+    usage: vi.fn(),
     publishVersion: vi.fn(),
     deleteVersion: vi.fn(),
     deleteDocument: vi.fn(),

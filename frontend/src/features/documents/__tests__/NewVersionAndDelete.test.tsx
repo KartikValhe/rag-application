@@ -94,6 +94,7 @@ function makeApi(overrides: Partial<Record<keyof DocumentsApi, unknown>> = {}) {
     upload: vi.fn(),
     uploadVersion: vi.fn(),
     retryVersion: vi.fn(),
+    usage: vi.fn(),
     deleteVersion: vi.fn(),
     deleteDocument: vi.fn().mockResolvedValue(undefined),
     ...overrides,

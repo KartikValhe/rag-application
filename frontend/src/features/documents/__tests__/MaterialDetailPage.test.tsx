@@ -115,6 +115,7 @@ describe("MaterialDetailPage", () => {
     let statusCallCount = 0;
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -194,6 +195,7 @@ describe("MaterialDetailPage", () => {
     const statusMock = vi.fn();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -232,6 +234,7 @@ describe("MaterialDetailPage", () => {
     const doc = createMockDetailDoc();
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -296,6 +299,7 @@ describe("MaterialDetailPage", () => {
 
       const fakeApi: DocumentsApi = {
         retryVersion: vi.fn(),
+        usage: vi.fn(),
         uploadVersion: vi.fn(),
         deleteDocument: vi.fn(),
         publishVersion: vi.fn(),
@@ -341,6 +345,7 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -389,6 +394,7 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
@@ -444,6 +450,7 @@ describe("MaterialDetailPage", () => {
 
     const fakeApi: DocumentsApi = {
       retryVersion: vi.fn(),
+      usage: vi.fn(),
       uploadVersion: vi.fn(),
       deleteDocument: vi.fn(),
       publishVersion: vi.fn(),
