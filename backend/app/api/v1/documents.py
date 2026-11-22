@@ -92,6 +92,7 @@ from app.schemas.document import (
     DocumentUpdateRequest,
     DocumentUploadLimitsResponse,
     DocumentUsageResponse,
+    DocumentVersionListResponse,
     DocumentVersionResponse,
     FlaggedChunk,
     FlagMatch,
@@ -100,6 +101,7 @@ from app.schemas.document import (
     TestSearchHit,
     TestSearchRequest,
     TestSearchResponse,
+    UploadsLastHour,
     VersionFlagsResponse,
 )
 from app.services import (
@@ -122,6 +124,8 @@ admin_router = APIRouter(prefix="/admin/documents", tags=["documents"])
 
 MAX_CLASSES_PER_DOCUMENT = 50
 DEFAULT_PAGE_SIZE = 20
+# Failed versions are never pruned, so a document's version list can in theory grow: the list route cuts it here.
+MAX_VERSIONS_LISTED = 100
 # A version may be deleted only while it is a draft (ready, not published) or failed.
 DELETABLE_VERSION_STATUSES = (VERSION_STATUS_READY, VERSION_STATUS_FAILED)
 # The download is a sandboxed attachment; a browser must never render or run it.
@@ -241,6 +245,22 @@ async def _load_version(
     if version is None:
         raise _not_found()
     return version
+
+
+async def _list_versions(
+    db: AsyncSession, tenant_id: uuid.UUID, document_id: uuid.UUID, limit: int
+) -> list[DocumentVersion]:
+    """
+    Up to `limit` versions of ONE document, newest version_no first. Row-level security keeps tenants apart;
+    the explicit tenant_id filter is the second layer. The caller has already passed the scope check.
+    """
+    stmt = (
+        select(DocumentVersion)
+        .where(DocumentVersion.tenant_id == tenant_id, DocumentVersion.document_id == document_id)
+        .order_by(DocumentVersion.version_no.desc())
+        .limit(limit)
+    )
+    return list((await db.execute(stmt)).scalars())
 
 
 # ── Upload pipeline ──────────────────────────────────────────────────────────
@@ -599,6 +619,24 @@ async def get_document(
 ) -> DocumentResponse:
     scoped = await document_scope.load_document_for(db, user, document_id, action="view")
     return await _document_response(db, user, scoped.document)
+
+
+@router.get("/{document_id}/versions", response_model=DocumentVersionListResponse)
+async def list_document_versions(
+    document_id: uuid.UUID, db: TenantDB, user: Annotated[User, Depends(require("document:view"))]
+) -> DocumentVersionListResponse:
+    """
+    Every version of one document, newest first (at most MAX_VERSIONS_LISTED; `has_more` says older ones were left
+    out), so the replaced (archived) version can be reached after a reload. The same scope call as the detail route:
+    an unknown id, another tenant's document, a document outside the teacher's pairs and a soft-deleted document
+    all give the one generic 404. The items are built like every other version response: no storage key, no hash.
+    """
+    await document_scope.load_document_for(db, user, document_id, action="view")
+    rows = await _list_versions(db, user.tenant_id, document_id, MAX_VERSIONS_LISTED + 1)
+    return DocumentVersionListResponse(
+        items=[_version_response(v) for v in rows[:MAX_VERSIONS_LISTED]],
+        has_more=len(rows) > MAX_VERSIONS_LISTED,
+    )
 
 
 # ── PATCH and DELETE ─────────────────────────────────────────────────────────
@@ -1184,11 +1222,20 @@ async def document_usage(
 ) -> DocumentUsageResponse:
     usage = await document_upload.tenant_usage(db, user.tenant_id)
     limits = await document_limits.load_tenant_limits(db, user.tenant_id)
+    by_status = await document_upload.version_status_counts(db, user.tenant_id)
+    # None when Redis cannot be read: the counts become null and everything else still renders.
+    window = await document_upload.uploads_last_hour(user.id, user.tenant_id)
     return DocumentUsageResponse(
         documents=usage.documents,
         storage_bytes=usage.storage_bytes,
         pages=usage.pages,
         limits=DocumentLimitsModel(**limits.as_dict()),
+        versions_by_status=by_status,
+        uploads_last_hour=UploadsLastHour(
+            tenant=window.tenant if window else None,
+            caller=window.caller if window else None,
+            window_seconds=document_upload.RATE_WINDOW_SECONDS,
+        ),
     )
 
 

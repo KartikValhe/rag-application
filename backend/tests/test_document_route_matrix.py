@@ -48,6 +48,8 @@ EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, int, int, int, int]]] = {
     ("PATCH", "/api/v1/documents/{document_id}"): ("document:upload", (200, 200, 404, 403, 401)),
     ("DELETE", "/api/v1/documents/{document_id}"): ("document:delete", (204, 204, 404, 403, 401)),
     ("POST", "/api/v1/documents/{document_id}/versions"): ("document:upload", (202, 202, 404, 403, 401)),
+    # Backend-small-plan item 2: every version of one document; the same scope as the detail route
+    ("GET", "/api/v1/documents/{document_id}/versions"): ("document:view", (200, 200, 404, 403, 401)),
     ("GET", "/api/v1/documents/{document_id}/versions/{version_id}/status"): (
         "document:view", (200, 200, 404, 403, 401)),
     ("POST", "/api/v1/documents/{document_id}/versions/{version_id}/retry"): (

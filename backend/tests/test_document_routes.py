@@ -423,7 +423,8 @@ async def test_usage_counts_live_documents_against_the_limits(
     resp = await client.get("/api/v1/admin/documents/usage", headers=auth(w, w.admin))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert set(body) == {"documents", "storage_bytes", "pages", "limits"}
+    # Contract change on purpose (backend-small-plan item 3): two additive keys, the old four are unchanged.
+    assert set(body) == {"documents", "storage_bytes", "pages", "limits", "versions_by_status", "uploads_last_hour"}
     assert (body["documents"], body["storage_bytes"], body["pages"]) == (2, 15, 4)
     assert body["limits"]["max_documents"] == 200
     for user in (w.t1, w.s1):

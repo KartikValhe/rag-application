@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
 from fastapi import HTTPException, status
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -30,6 +31,7 @@ from app.core.authz import GENERIC_NOT_FOUND
 from app.core.config import settings
 from app.db.models.audit import AuditLog
 from app.db.models.document import (
+    DOCUMENT_VERSION_STATUSES,
     IN_FLIGHT_VERSION_STATUSES,
     INACTIVE_VERSION_STATUSES,
     VERSION_STATUS_FAILED,
@@ -38,6 +40,8 @@ from app.db.models.document import (
     StorageDeletion,
 )
 from app.services.document_limits import DocumentLimits
+
+logger = structlog.get_logger(__name__)
 
 USER_RATE_KEY_PREFIX = "ratelimit:doc_upload:user:"
 TENANT_RATE_KEY_PREFIX = "ratelimit:doc_upload:tenant:"
@@ -135,6 +139,43 @@ async def check_upload_rate(user_id: uuid.UUID, tenant_id: uuid.UUID, limits: Do
             "Your organisation has reached its hourly upload limit. Please wait and try again.",
             rej.retry_after_seconds,
         ) from None
+
+
+@dataclass(frozen=True)
+class UploadWindowCounts:
+    """Live entries of the two hourly upload windows: the tenant's, and the calling user's own."""
+
+    tenant: int
+    caller: int
+
+
+def upload_window_keys(user_id: uuid.UUID, tenant_id: uuid.UUID) -> tuple[str, str]:
+    """
+    The Redis keys of the caller's and the tenant's upload windows, (caller_key, tenant_key). The same prefixes
+    `check_upload_rate` writes. Redis has no row-level security: these keys are the isolation, so they are built
+    from the authenticated user's own ids and from nothing else.
+    """
+    return f"{USER_RATE_KEY_PREFIX}{user_id}", f"{TENANT_RATE_KEY_PREFIX}{tenant_id}"
+
+
+async def uploads_last_hour(user_id: uuid.UUID, tenant_id: uuid.UUID) -> UploadWindowCounts | None:
+    """
+    Upload ATTEMPTS in the rolling RATE_WINDOW_SECONDS window, read from the windows `check_upload_rate`
+    enforces (so "limit minus count" is the real remaining quota). An attempt takes its slot once the scope check
+    passed and before the file is read, so a rejected upload still counts.
+
+    Read-only display: if Redis cannot be read (the slot manager answers 503 outside development, or any other
+    error) this logs a warning and returns None, which the route sends as null values. The limiter itself stays
+    fail-closed; this function never touches it.
+    """
+    caller_key, tenant_key = upload_window_keys(user_id, tenant_id)
+    try:
+        caller = await _slots().count(caller_key)
+        tenant = await _slots().count(tenant_key)
+    except Exception as exc:
+        logger.warning("document_upload_counts_unavailable", error=type(exc).__name__)
+        return None
+    return UploadWindowCounts(tenant=tenant, caller=caller)
 
 
 async def check_retry_rate(user_id: uuid.UUID, version_id: uuid.UUID) -> None:
@@ -245,6 +286,29 @@ async def tenant_usage(db: AsyncSession, tenant_id: uuid.UUID) -> Usage:
         )
     ).one()
     return Usage(documents=int(documents), storage_bytes=int(totals[0] or 0), pages=int(totals[1] or 0))
+
+
+async def version_status_counts(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, int]:
+    """
+    Versions per status (all six keys, zero when none) of the tenant's LIVE documents: a soft delete archives
+    every version, so counting those would inflate `archived`. A separate function from `tenant_usage` on
+    purpose: that one feeds the quota check. Row-level security keeps tenants apart; the explicit tenant_id
+    filter is the second layer.
+    """
+    live = (Document.tenant_id == DocumentVersion.tenant_id) & (Document.id == DocumentVersion.document_id)
+    rows = (
+        await db.execute(
+            select(DocumentVersion.status, func.count())
+            .select_from(DocumentVersion)
+            .join(Document, live)
+            .where(DocumentVersion.tenant_id == tenant_id, Document.deleted_at.is_(None))
+            .group_by(DocumentVersion.status)
+        )
+    ).all()
+    counts = dict.fromkeys(DOCUMENT_VERSION_STATUSES, 0)
+    for version_status, n in rows:
+        counts[version_status] = int(n)
+    return counts
 
 
 def check_quota(usage: Usage, limits: DocumentLimits, *, new_document: bool, new_bytes: int) -> None:

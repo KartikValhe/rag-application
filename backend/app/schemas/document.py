@@ -54,6 +54,14 @@ class DocumentVersionResponse(_Strict):
     warnings: list[str]
 
 
+class DocumentVersionListResponse(_Strict):
+    """GET /api/v1/documents/{document_id}/versions: the versions of one document, newest version_no first, at most
+    100. `has_more` is true when older versions were left out. No cursor: 100 is far above a normal count."""
+
+    items: list[DocumentVersionResponse]
+    has_more: bool
+
+
 class DocumentResponse(_Strict):
     """A document as the caller may see it, with whether they may change it."""
 
@@ -115,6 +123,17 @@ class DocumentUploadLimitsResponse(_Strict):
     accepted_extensions: list[str]
 
 
+class UploadsLastHour(_Strict):
+    """Upload ATTEMPTS in the rolling `window_seconds` (60 minutes, not the clock hour), read from the windows the
+    limiter enforces. An attempt that passed the scope check uses a slot even if the file is then rejected, so
+    this can be higher than the number of versions created. `caller` is the calling admin's OWN count, `tenant`
+    the tenant window; there is no per-user list. Both are null (never 0) when the counters cannot be read."""
+
+    tenant: int | None
+    caller: int | None
+    window_seconds: int
+
+
 class DocumentUsageResponse(_Strict):
     """What the tenant uses against its limits (soft-deleted documents do not count)."""
 
@@ -122,6 +141,9 @@ class DocumentUsageResponse(_Strict):
     storage_bytes: int
     pages: int
     limits: DocumentLimitsModel
+    # Versions of live documents per status: always all six statuses, zero when none.
+    versions_by_status: dict[str, int]
+    uploads_last_hour: UploadsLastHour
 
 
 class DocumentUpdateRequest(_Strict):

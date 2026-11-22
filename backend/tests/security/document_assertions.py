@@ -88,9 +88,9 @@ def assert_key_refused_for_other_tenant(exc: BaseException | None) -> None:
 
 
 # Every route that returns a document (or a file of one) for a document id, besides the list.
-# The detail response carries the versions (there is no separate versions listing route).
 DOCUMENT_READ_ROUTES: dict[str, str] = {
     "detail": "/api/v1/documents/{d}",
+    "versions": "/api/v1/documents/{d}/versions",
     "status": "/api/v1/documents/{d}/versions/{v}/status",
     "download": "/api/v1/documents/{d}/versions/{v}/download",
 }

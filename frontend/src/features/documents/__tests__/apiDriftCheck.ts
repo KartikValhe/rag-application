@@ -33,6 +33,7 @@ export const INTENTIONALLY_GENERIC_ERROR_CODES: Record<string, string> = {
 /** Documented routes the frontend does not call yet, each with the reason. Key: "METHOD /path-without-/api/v1". */
 export const ROUTES_NOT_USED_BY_FRONTEND: Record<string, string> = {
   "PATCH /documents/{}": "rename and unlink are not built",
+  "GET /documents/{}/versions": "used in a later frontend step",
   "GET /documents/{}/versions/{}/download": "download original is step 5f-11",
   "POST /admin/documents/{}/purge": "purge control is deferred (no route lists deleted documents)",
   "PATCH /platform/tenants/{}/limits": "platform portal limits screen is not built",

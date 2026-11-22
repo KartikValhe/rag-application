@@ -67,6 +67,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_ml_scripts.py": ("fast",),
     "test_parsed_document.py": ("fast",),
     "test_document_version_updated_at.py": ("fast",),  # the response field and the source guard for writers
+    "test_document_usage_keys.py": ("fast", "security"),  # the Redis keys of uploads_last_hour come from the user only
     "test_phase5_doc_layout.py": ("fast",),  # section 11 numbering of docs/api/phase5.md (the drift guard reads it)
     "test_pdf_embedded_file_rule.py": ("fast", "security"),
     "test_retrieval_eval_metrics.py": ("fast",),
@@ -112,6 +113,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_document_lifecycle.py": ("db", "slow"),
     "test_document_version_updated_at_db.py": ("db",),  # routes carry updated_at; it moves on every transition
     "test_document_limits.py": ("db",),
+    "test_document_versions_list.py": ("db",),  # GET /documents/{id}/versions: order, cut at 100, shape
+    "test_document_versions_list_security.py": ("db", "security"),  # same generic 404, roles, RLS for the list (gate)
+    "test_document_usage_counts.py": ("db",),  # usage route: versions_by_status, uploads_last_hour, Redis down
+    "test_document_usage_isolation.py": ("db", "security"),  # RLS for the counts, user-only Redis keys (gate)
     "test_document_limits_route.py": ("db", "security"),  # who may read the limits, and no leak between tenants (gate)
     "test_document_retryable.py": ("db",),  # one retry rule for the status route and the version responses
     "test_embed_stage.py": ("db", "slow"),
