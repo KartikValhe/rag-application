@@ -9,6 +9,10 @@ import {
   Select,
   Alert,
   EmptyState,
+  Tabs,
+  TabList,
+  TabTrigger,
+  TabContent,
 } from "@/components/ui";
 import { Lock, FolderArchive, UploadCloud } from "lucide-react";
 import { useDocuments } from "../hooks/useDocuments";
@@ -17,6 +21,7 @@ import { getDocumentError } from "../utils/documentErrors";
 import { getDocumentActions } from "../utils/documentPolicy";
 import { sanitizeDisplayText } from "../utils/fileChecks";
 import { UploadDialog } from "../components/UploadDialog";
+import { TestSearchPanel } from "../components/TestSearchPanel";
 import type { DocumentsApi } from "../api/documentsApi";
 import type { DocumentItem } from "../schemas/documentSchemas";
 import { useAuth } from "@/features/auth/AuthContext";
@@ -71,7 +76,10 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
   // "Open" is a view action: it comes from the policy, like every other action
   const canOpen = policyActions.find((a) => a.id === "view")?.visible === true;
 
+  const showSearchTab = policyActions.find((a) => a.id === "test_search")?.visible === true;
+
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [listTab, setListTab] = useState("materials");
 
   const {
     documents,
@@ -255,6 +263,60 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
     };
   }, [isTeacherOnly, classes.length, hasActiveFilters, clearFilters]);
 
+  const materialsContent = (
+    <>
+      {/* Error Alert */}
+      {isError && (
+        <Alert variant="danger" title="Error loading materials" className="mb-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <span>{getDocumentError(error, "list").message}</span>
+            <Button size="sm" variant="secondary" onClick={() => refetch()}>
+              Try again
+            </Button>
+          </div>
+        </Alert>
+      )}
+
+      {/* Main Content: Loading, Empty, or Table */}
+      {!isLoading && !isError && documents.length === 0 ? (
+        <div className="py-8 bg-surface rounded-xl border border-border">
+          <EmptyState
+            icon={FolderArchive}
+            title={emptyConfig.title}
+            description={emptyConfig.description}
+            action={emptyConfig.action}
+          />
+        </div>
+      ) : (
+        <>
+          <Table
+            columns={columns}
+            data={documents}
+            keyExtractor={(d) => d.id}
+            isLoading={isLoading}
+            loadingRowCount={5}
+            responsiveLayout={responsiveLayout}
+            mobileActionsLayout="stacked"
+            onRowClick={(doc) => navigate(`${baseRoute}/${doc.id}`)}
+          />
+
+          {hasNextPage && (
+            <div className="mt-4 flex justify-center">
+              <Button
+                variant="secondary"
+                onClick={() => fetchNextPage()}
+                isLoading={isFetchingNextPage}
+                disabled={isFetchingNextPage}
+              >
+                Load more
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+
   return (
     <AppShell>
       <PageHeader
@@ -314,54 +376,25 @@ export const MaterialsListPage: React.FC<MaterialsListPageProps> = ({
         />
       </div>
 
-      {/* Error Alert */}
-      {isError && (
-        <Alert variant="danger" title="Error loading materials" className="mb-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <span>{getDocumentError(error, "list").message}</span>
-            <Button size="sm" variant="secondary" onClick={() => refetch()}>
-              Try again
-            </Button>
-          </div>
-        </Alert>
-      )}
-
-      {/* Main Content: Loading, Empty, or Table */}
-      {!isLoading && !isError && documents.length === 0 ? (
-        <div className="py-8 bg-surface rounded-xl border border-border">
-          <EmptyState
-            icon={FolderArchive}
-            title={emptyConfig.title}
-            description={emptyConfig.description}
-            action={emptyConfig.action}
-          />
-        </div>
+      {showSearchTab ? (
+        <Tabs value={listTab} onValueChange={setListTab}>
+          <TabList>
+            <TabTrigger value="materials">Materials</TabTrigger>
+            <TabTrigger value="search">Test search</TabTrigger>
+          </TabList>
+          <TabContent value="materials">{materialsContent}</TabContent>
+          <TabContent value="search">
+            <TestSearchPanel
+              api={api}
+              classOptions={classes.map((c) => ({ id: c.id, name: c.name }))}
+              subjectOptions={availableSubjects.map((s) => ({ id: s.id, name: s.name }))}
+              initialClassId={filterClass}
+              initialSubjectId={filterSubject}
+            />
+          </TabContent>
+        </Tabs>
       ) : (
-        <>
-          <Table
-            columns={columns}
-            data={documents}
-            keyExtractor={(d) => d.id}
-            isLoading={isLoading}
-            loadingRowCount={5}
-            responsiveLayout={responsiveLayout}
-            mobileActionsLayout="stacked"
-            onRowClick={(doc) => navigate(`${baseRoute}/${doc.id}`)}
-          />
-
-          {hasNextPage && (
-            <div className="mt-4 flex justify-center">
-              <Button
-                variant="secondary"
-                onClick={() => fetchNextPage()}
-                isLoading={isFetchingNextPage}
-                disabled={isFetchingNextPage}
-              >
-                Load more
-              </Button>
-            </div>
-          )}
-        </>
+        materialsContent
       )}
 
       <UploadDialog

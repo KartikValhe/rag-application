@@ -304,7 +304,10 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
   for (const [name, fn] of Object.entries(api)) {
     // upload takes a form, every other function takes ids; wrong argument types would throw before any request
     const FORM_FUNCTIONS = ["upload", "uploadVersion"];
-    const args = FORM_FUNCTIONS.includes(name)
+    // search takes an input object, not ids
+    const args = name === "search"
+      ? [{ query: "light" }]
+      : FORM_FUNCTIONS.includes(name)
       ? name === "upload"
         ? [new FormData()]
         : ["id-1", new FormData()]
@@ -314,7 +317,7 @@ test("documentsApi: every API function requests a path relative to baseURL", asy
     await (fn as (...a: unknown[]) => Promise<unknown>)(...args).catch(() => undefined);
     assert.ok(seen.length > before, `${name} made no request`);
   }
-  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags", "publishVersion"]) {
+  for (const required of ["retryVersion", "deleteVersion", "uploadVersion", "deleteDocument", "flags", "publishVersion", "search"]) {
     assert.ok(Object.keys(api).includes(required), `${required} must be part of the API object`);
   }
   for (const path of seen) {

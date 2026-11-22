@@ -112,6 +112,11 @@ const DOCUMENT_ERROR_MESSAGES: Record<string, string> = {
   search_busy: "Search is busy right now. Please try again in a moment.",
 };
 
+/** Text for a question that is refused on the device before any request (same table texts as the server codes). */
+export function getSearchInputMessage(code: "invalid_query" | "query_too_long"): string {
+  return DOCUMENT_ERROR_MESSAGES[code];
+}
+
 const FILE_FIELDS = new Set([
   "empty_file",
   "unsupported_format",

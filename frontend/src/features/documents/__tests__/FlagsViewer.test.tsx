@@ -138,6 +138,7 @@ function createMockApi(overrides: Partial<DocumentsApi> = {}): DocumentsApi {
     deleteVersion: vi.fn(),
     deleteDocument: vi.fn(),
     publishVersion: vi.fn(),
+    search: vi.fn(),
     ...overrides,
   };
 }

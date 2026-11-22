@@ -202,6 +202,41 @@ test("Source guard: scan EVERY .ts and .tsx file under features/documents (excep
   assert.deepEqual(violations, []);
 });
 
+test("Source guard: every function of the API object is classified, and the read-only ones are exactly the known list", () => {
+  const api = createDocumentsApi({} as any);
+  const keys = Object.keys(api);
+  // A new function that is not in the read-only list counts as a mutation and is blocked in components.
+  for (const name of NON_MUTATING_METHODS) {
+    assert.ok(keys.includes(name), `${name} is listed as read-only but is not in the API object`);
+  }
+  assert.ok(keys.includes("search"));
+});
+
+test("Source guard: the search call is made only through a hook, never directly in a component or page", () => {
+  const callPattern = /\b(?:api|documentsApi|props\.api)\??\.search\s*\(/;
+  assert.ok(callPattern.test("api.search(x)"));
+  assert.ok(callPattern.test("props.api?.search(x)"));
+  assert.ok(!callPattern.test("location.search"));
+  const offenders: string[] = [];
+  for (const file of getAllSourceFiles(documentsDir)) {
+    const rel = path.normalize(path.relative(documentsDir, file));
+    if (rel.startsWith("hooks") || rel.startsWith("api")) continue;
+    if (callPattern.test(fs.readFileSync(file, "utf8"))) offenders.push(rel);
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test("Source guard: no search result text is rendered as HTML or turned into a link", () => {
+  const files = ["components/TestSearchPanel.tsx", "utils/searchView.ts"];
+  for (const rel of files) {
+    const src = fs.readFileSync(path.join(documentsDir, rel), "utf8");
+    assert.ok(!/dangerouslySetInnerHTML/.test(src), `${rel}: dangerouslySetInnerHTML`);
+    assert.ok(!/innerHTML/.test(src), `${rel}: innerHTML`);
+    assert.ok(!/react-markdown|marked|markdown-it|DOMParser/i.test(src), `${rel}: markdown/HTML parser`);
+    assert.ok(!/href=\{[^}]*content/.test(src), `${rel}: link built from passage text`);
+  }
+});
+
 test("Source guard: every mutating method of the exported API object is flagged when a component calls it", () => {
   const api = createDocumentsApi({} as any);
   const mutating = Object.keys(api).filter((k) => !NON_MUTATING_METHODS.has(k));

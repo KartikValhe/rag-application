@@ -158,6 +158,7 @@ function makeApi(): MockApi {
     deleteVersion: vi.fn(),
     deleteDocument: vi.fn(),
     publishVersion: vi.fn(),
+    search: vi.fn(),
   } as unknown as MockApi;
 }
 

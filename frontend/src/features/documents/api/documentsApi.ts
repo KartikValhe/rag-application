@@ -6,7 +6,9 @@ import {
   DocumentUploadLimitsSchema,
   DocumentVersionSchema,
   VersionFlagsSchema,
+  TestSearchResponseSchema,
   validateResponse,
+  type TestSearchResponseItem,
   type DocumentListItem,
   type DocumentItem,
   type DocumentStatusItem,
@@ -79,6 +81,55 @@ export function buildPublishBody(acknowledge: unknown): { acknowledge_flags?: tr
   return {};
 }
 
+export const SEARCH_MAX_QUERY_CHARS = 500;
+
+/** Raised before any request when the question cannot be sent; `code` is a key of the error table. */
+export class SearchInputError extends Error {
+  readonly code: "invalid_query" | "query_too_long";
+  constructor(code: "invalid_query" | "query_too_long") {
+    super(code);
+    this.name = "SearchInputError";
+    this.code = code;
+  }
+}
+
+export interface TestSearchInput {
+  query: string;
+  classId?: string | null;
+  subjectId?: string | null;
+  includeDrafts?: boolean;
+  k?: number;
+}
+
+export interface TestSearchBody {
+  query: string;
+  class_id?: string;
+  subject_id?: string;
+  include_drafts?: true;
+  k?: number;
+}
+
+/**
+ * The ONE place that builds the test-search request body. It trims the question, enforces 1-500
+ * characters, and copies only the documented fields (never a tenant id or anything else that was
+ * passed by mistake). `include_drafts` is sent only for the boolean true and `k` only as an integer 1-10.
+ */
+export function buildTestSearchBody(input: TestSearchInput): TestSearchBody {
+  const raw = input.query;
+  const query = typeof raw === "string" ? raw.trim() : "";
+  if (query.length === 0) throw new SearchInputError("invalid_query");
+  if (query.length > SEARCH_MAX_QUERY_CHARS) throw new SearchInputError("query_too_long");
+
+  const body: TestSearchBody = { query };
+  if (typeof input.classId === "string" && input.classId !== "") body.class_id = input.classId;
+  if (typeof input.subjectId === "string" && input.subjectId !== "") body.subject_id = input.subjectId;
+  if (input.includeDrafts === true) body.include_drafts = true;
+  if (typeof input.k === "number" && Number.isInteger(input.k) && input.k >= 1 && input.k <= 10) {
+    body.k = input.k;
+  }
+  return body;
+}
+
 // Shared by both upload routes: 10-minute timeout, progress and cancel.
 function multipartConfig(options?: UploadOptions): AxiosRequestConfig {
   return {
@@ -127,6 +178,16 @@ export function createDocumentsApi(client: AxiosInstance) {
         { params }
       );
       return validateResponse(VersionFlagsSchema, response.data, "document flags");
+    },
+    // Read-only: a POST because the question must not travel in a URL. Nothing is stored by the server.
+    search: async (
+      input: TestSearchInput,
+      options?: { signal?: AbortSignal }
+    ): Promise<TestSearchResponseItem> => {
+      const response = await client.post("/documents/test-search", buildTestSearchBody(input), {
+        signal: options?.signal,
+      });
+      return validateResponse(TestSearchResponseSchema, response.data, "test search");
     },
     upload: async (
       form: FormData | DocumentUploadPayload,

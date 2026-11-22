@@ -40,6 +40,7 @@ import { DocumentActions } from "../components/DocumentActions";
 import { UploadDialog } from "../components/UploadDialog";
 import { FlagsViewer } from "../components/FlagsViewer";
 import { PublishDialog } from "../components/PublishDialog";
+import { TestSearchPanel } from "../components/TestSearchPanel";
 
 export interface MaterialDetailPageProps {
   api?: DocumentsApi;
@@ -507,6 +508,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     : false;
 
   const showFlagsTab = documentActions.find((a) => a.id === "flags")?.visible === true;
+  const showSearchTab = documentActions.find((a) => a.id === "test_search")?.visible === true;
   const defaultFlagsVersionId =
     doc.latest_version &&
     (doc.latest_version.status === "ready" || doc.latest_version.status === "published")
@@ -578,6 +580,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         <TabList>
           <TabTrigger value="versions">Versions</TabTrigger>
           {showFlagsTab && <TabTrigger value="flags">Flags</TabTrigger>}
+          {showSearchTab && <TabTrigger value="search">Test search</TabTrigger>}
         </TabList>
 
         <TabContent value="versions">
@@ -613,6 +616,17 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
                 doc.latest_version?.original_filename
               }
               api={api}
+            />
+          </TabContent>
+        )}
+
+        {showSearchTab && (
+          <TabContent value="search">
+            <TestSearchPanel
+              api={api}
+              classOptions={doc.classes ?? []}
+              subjectOptions={doc.subject ? [{ id: doc.subject.id, name: doc.subject.name }] : []}
+              initialSubjectId={doc.subject?.id ?? ""}
             />
           </TabContent>
         )}
