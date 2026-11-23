@@ -11,6 +11,7 @@ const documentsDir = path.resolve(__dirname, "..");
 const NON_MUTATING_METHODS = new Set([
   "list",
   "get",
+  "versions",
   "limits",
   "status",
   "flags",

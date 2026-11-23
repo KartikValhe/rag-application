@@ -437,9 +437,10 @@ test("documentSchemas: VersionFlagsSchema accepts matches and unknown extra keys
 });
 
 test("known limitation (5f-5 leftover C): the version response carries no updated or processing-started timestamp", () => {
-  // The 65-minute polling stop can only start from created_at after a page reload. If the backend ever adds a
-  // usable timestamp to DocumentVersionResponse, this test fails: then base the stop on it and delete this test.
+  // The 65-minute polling stop can only start from created_at after a page reload. 5g-1 added updated_at, but it
+  // moves with every column change (status, stage, counts), so it is NOT a processing start. If the backend ever
+  // adds a real start timestamp, this test fails: then base the stop on it and delete this test.
   const keys = Object.keys(DocumentVersionSchema.shape);
   const timestamps = keys.filter((k) => /(_at|_started|started_)/.test(k)).sort();
-  assert.deepEqual(timestamps, ["created_at", "published_at"]);
+  assert.deepEqual(timestamps, ["created_at", "published_at", "updated_at"]);
 });

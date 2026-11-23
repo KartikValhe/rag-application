@@ -5,6 +5,7 @@ import { documentsApi as defaultDocumentsApi } from "../api/documentsClient";
 import type { DocumentsApi, DocumentUploadPayload, NewVersionPayload } from "../api/documentsApi";
 import type { DocumentVersionItem } from "../schemas/documentSchemas";
 import { getDocumentError } from "../utils/documentErrors";
+import { documentVersionsKey } from "./useDocumentVersions";
 
 export interface UseUploadDocumentOptions {
   api?: DocumentsApi;
@@ -92,6 +93,7 @@ export interface VersionMutationArgs {
 function invalidateDocument(queryClient: QueryClient, documentId: string) {
   queryClient.invalidateQueries({ queryKey: ["documents"] });
   queryClient.invalidateQueries({ queryKey: ["document", documentId] });
+  queryClient.invalidateQueries({ queryKey: documentVersionsKey(documentId) });
 }
 
 function isManageDenied(err: unknown): boolean {
@@ -304,6 +306,7 @@ export function useDeleteDocument(options: UseDeleteDocumentOptions = {}) {
     onSuccess: (result, args) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       queryClient.removeQueries({ queryKey: ["document", args.documentId] });
+      queryClient.removeQueries({ queryKey: documentVersionsKey(args.documentId) });
       queryClient.removeQueries({ queryKey: ["documentVersionStatus", args.documentId] });
       onSuccess?.(result, args);
     },

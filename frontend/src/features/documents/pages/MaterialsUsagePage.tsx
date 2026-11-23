@@ -4,7 +4,7 @@ import { Alert, Button } from "@/components/ui";
 import { RefreshCw } from "lucide-react";
 import { useDocumentUsage } from "../hooks/useDocumentUsage";
 import { getDocumentError } from "../utils/documentErrors";
-import { formatBytes, formatCount, getMeter, type Meter, type MeterLevel } from "../utils/usageView";
+import { formatAttempts, formatBytes, formatCount, getMeter, getVersionStatusRows, type Meter, type MeterLevel } from "../utils/usageView";
 import type { DocumentsApi } from "../api/documentsApi";
 import type { DocumentUsageItem } from "../schemas/documentSchemas";
 
@@ -95,6 +95,16 @@ export const MaterialsUsagePage: React.FC<MaterialsUsagePageProps> = ({ api }) =
         ["Most slides in one presentation", formatCount(limits.max_pptx_slides)],
         ["Uploads per person per hour", formatCount(limits.uploads_per_user_per_hour)],
         ["Uploads per organisation per hour", formatCount(limits.uploads_per_tenant_per_hour)],
+      ]
+    : [];
+
+  const attemptRows = usage
+    ? [
+        { label: "Your attempts", attempts: formatAttempts(usage.uploads_last_hour.caller, limits?.uploads_per_user_per_hour) },
+        {
+          label: "Everyone in your organisation",
+          attempts: formatAttempts(usage.uploads_last_hour.tenant, limits?.uploads_per_tenant_per_hour),
+        },
       ]
     : [];
 
@@ -192,8 +202,42 @@ export const MaterialsUsagePage: React.FC<MaterialsUsagePageProps> = ({ api }) =
                   </dl>
                 ))}
               </div>
-              <p className="mt-3 text-sm text-text-muted">
-                The number of uploads made so far this hour is not shown here.
+            </section>
+
+            <section aria-labelledby="usage-status-heading" className="mt-8">
+              <h2 id="usage-status-heading" className="mb-3 text-lg font-semibold text-text">
+                Versions by status
+              </h2>
+              <div className="rounded-xl border border-border bg-surface divide-y divide-border">
+                {getVersionStatusRows(usage.versions_by_status).map((row) => (
+                  <dl
+                    key={row.key}
+                    data-status-row
+                    className="flex items-start justify-between gap-3 p-4 min-w-0"
+                  >
+                    <dt className="text-sm text-text-muted break-words min-w-0">{row.label}</dt>
+                    <dd className="text-sm font-medium text-text break-words text-right min-w-0">{row.text}</dd>
+                  </dl>
+                ))}
+              </div>
+            </section>
+
+            <section aria-labelledby="usage-attempts-heading" className="mt-8">
+              <h2 id="usage-attempts-heading" className="mb-3 text-lg font-semibold text-text">
+                Upload attempts in the last 60 minutes
+              </h2>
+              <div className="rounded-xl border border-border bg-surface divide-y divide-border">
+                {attemptRows.map(({ label, attempts }) => (
+                  <div key={label} data-attempts-row className="p-4 min-w-0">
+                    <p className="text-sm font-medium text-text break-words">{`${label}: ${attempts.text}`}</p>
+                    {attempts.levelText && (
+                      <p className={`mt-1 text-sm ${LEVEL_TEXT_CLASS[attempts.level]}`}>{attempts.levelText}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 text-sm text-text-muted break-words">
+                A rejected upload still counts as an attempt.
               </p>
             </section>
           </>

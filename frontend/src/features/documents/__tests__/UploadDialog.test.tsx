@@ -84,6 +84,7 @@ const mockClasses: MyClassItem[] = [
 
 function makeLimitsApi(): DocumentsApi {
   return {
+    versions: vi.fn(() => new Promise<never>(() => undefined)),
     retryVersion: vi.fn(),
     usage: vi.fn(),
     uploadVersion: vi.fn(),
@@ -136,6 +137,7 @@ describe("UploadDialog and Upload flow", () => {
     mockUser.permissions = ["document:view"]; // Missing document:upload
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -169,6 +171,7 @@ describe("UploadDialog and Upload flow", () => {
     mockUser.permissions = ["document:view", "document:upload"];
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -303,6 +306,7 @@ describe("UploadDialog and Upload flow", () => {
         isOpen={true}
         onClose={vi.fn()}
         api={{
+          versions: vi.fn(() => new Promise<never>(() => undefined)),
           retryVersion: vi.fn(),
           usage: vi.fn(),
           uploadVersion: vi.fn(),
@@ -390,6 +394,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -489,6 +494,7 @@ describe("UploadDialog and Upload flow", () => {
 
     let capturedSignal: AbortSignal | undefined;
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -568,6 +574,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -638,6 +645,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -696,6 +704,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -756,6 +765,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -821,6 +831,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -887,6 +898,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -952,6 +964,7 @@ describe("UploadDialog and Upload flow", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -1018,6 +1031,7 @@ describe("UploadDialog and Upload flow", () => {
     const refreshSpy = vi.spyOn(authApi, "refresh");
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -1084,6 +1098,7 @@ describe("UploadDialog and Upload flow", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -1159,6 +1174,7 @@ describe("UploadDialog and Upload flow", () => {
     vi.spyOn(authApi, "refresh").mockRejectedValue(error401);
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),

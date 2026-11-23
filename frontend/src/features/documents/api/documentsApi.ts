@@ -6,6 +6,7 @@ import {
   DocumentUploadLimitsSchema,
   DocumentUsageSchema,
   DocumentVersionSchema,
+  DocumentVersionListSchema,
   VersionFlagsSchema,
   TestSearchResponseSchema,
   validateResponse,
@@ -16,6 +17,7 @@ import {
   type DocumentUploadLimitsItem,
   type DocumentUsageItem,
   type DocumentVersionItem,
+  type DocumentVersionListItem,
   type VersionFlagsItem,
 } from "../schemas/documentSchemas.ts";
 
@@ -155,6 +157,11 @@ export function createDocumentsApi(client: AxiosInstance) {
     get: async (documentId: string): Promise<DocumentItem> => {
       const response = await client.get(`/documents/${documentId}`);
       return validateResponse(DocumentSchema, response.data, "document detail");
+    },
+    // Every version of one document, newest first (at most 100). Read-only.
+    versions: async (documentId: string): Promise<DocumentVersionListItem> => {
+      const response = await client.get(`/documents/${documentId}/versions`);
+      return validateResponse(DocumentVersionListSchema, response.data, "document versions");
     },
     limits: async (): Promise<DocumentUploadLimitsItem> => {
       const response = await client.get("/documents/limits");

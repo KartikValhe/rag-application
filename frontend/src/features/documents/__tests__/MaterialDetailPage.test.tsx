@@ -114,6 +114,7 @@ describe("MaterialDetailPage", () => {
 
     let statusCallCount = 0;
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -194,6 +195,7 @@ describe("MaterialDetailPage", () => {
 
     const statusMock = vi.fn();
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -233,6 +235,7 @@ describe("MaterialDetailPage", () => {
   it("a lost connection keeps the last state and says so", async () => {
     const doc = createMockDetailDoc();
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -298,6 +301,7 @@ describe("MaterialDetailPage", () => {
       });
 
       const fakeApi: DocumentsApi = {
+        versions: vi.fn(() => new Promise<never>(() => undefined)),
         retryVersion: vi.fn(),
         usage: vi.fn(),
         uploadVersion: vi.fn(),
@@ -344,6 +348,7 @@ describe("MaterialDetailPage", () => {
     };
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -393,6 +398,7 @@ describe("MaterialDetailPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -449,6 +455,7 @@ describe("MaterialDetailPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),

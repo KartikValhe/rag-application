@@ -135,6 +135,7 @@ describe("MaterialsListPage", () => {
   it("renders page header and list with filters for teacher", async () => {
     const doc = createMockDoc();
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -264,6 +265,7 @@ describe("MaterialsListPage", () => {
     ];
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -315,6 +317,7 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -355,6 +358,7 @@ describe("MaterialsListPage", () => {
 
   it("shows empty state when no documents exist", async () => {
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -386,6 +390,7 @@ describe("MaterialsListPage", () => {
   it("shows filtered empty state with clear filters button", async () => {
     const user = userEvent.setup();
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -420,6 +425,7 @@ describe("MaterialsListPage", () => {
   it("shows empty state when teacher has no assigned classes", async () => {
     vi.spyOn(academicApi, "getMyClasses").mockResolvedValue([]);
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -455,6 +461,7 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -502,6 +509,7 @@ describe("MaterialsListPage", () => {
     });
 
     const fakeApi: DocumentsApi = {
+      versions: vi.fn(() => new Promise<never>(() => undefined)),
       retryVersion: vi.fn(),
       usage: vi.fn(),
       uploadVersion: vi.fn(),
@@ -584,6 +592,7 @@ describe("MaterialsListPage", () => {
         logout: vi.fn(),
       });
       const fakeApi: DocumentsApi = {
+        versions: vi.fn(() => new Promise<never>(() => undefined)),
         retryVersion: vi.fn(),
         usage: vi.fn(),
         uploadVersion: vi.fn(),

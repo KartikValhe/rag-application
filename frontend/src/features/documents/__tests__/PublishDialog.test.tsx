@@ -137,7 +137,7 @@ type MockApi = DocumentsApi & {
 };
 
 function makeApi(): MockApi {
-  return {
+  const api = {
     list: vi.fn(),
     get: vi.fn(),
     limits: vi.fn(),
@@ -161,6 +161,10 @@ function makeApi(): MockApi {
     publishVersion: vi.fn(),
     search: vi.fn(),
   } as unknown as MockApi;
+  // By default the version list never answers, so the page shows the rows its document carries (no extra
+  // api.get calls, no alert). A test that needs the server list replaces this.
+  (api as unknown as { versions: unknown }).versions = vi.fn(() => new Promise(() => undefined));
+  return api;
 }
 
 function setUser(permissions: string[], roles: string[] = ["teacher"]) {
@@ -769,7 +773,16 @@ describe("5f-7 results", () => {
     api.get.mockResolvedValueOnce(makeDoc(ready(0))).mockResolvedValue(
       makeDoc(PUBLISHED_V3, { published_version: PUBLISHED_V3 })
     );
-    api.publishVersion.mockResolvedValue(PUBLISHED_V3);
+    // The server lists the replaced version as archived once the publish went through.
+    let publishedNow = false;
+    (api as unknown as { versions: unknown }).versions = vi.fn(async () => ({
+      items: publishedNow ? [PUBLISHED_V3, { ...V2, status: "archived" }] : [ready(0), V2],
+      has_more: false,
+    }));
+    api.publishVersion.mockImplementation(async () => {
+      publishedNow = true;
+      return PUBLISHED_V3;
+    });
     renderPage(api);
     const dialog = await openDialog(user);
     await user.click(dialogPublish(dialog));

@@ -26,6 +26,8 @@ import type {
 } from "../schemas/documentSchemas";
 import { getStatusChip } from "../utils/statusChip";
 import { getDocumentError, getVersionFailure } from "../utils/documentErrors";
+import { useDocumentVersions } from "../hooks/useDocumentVersions";
+import { formatChangedAt } from "../utils/versionView";
 import { useVersionStatus } from "../hooks/useVersionStatus";
 import { isTerminalStatus } from "../utils/pollingSchedule";
 import { getDocumentActions, getFailedVersionHint } from "../utils/documentPolicy";
@@ -100,9 +102,6 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
   const [activeTab, setActiveTab] = useState<string>("versions");
   const [selectedFlagsVersionId, setSelectedFlagsVersionId] = useState<string | null>(null);
   const [publishTarget, setPublishTarget] = useState<DocumentVersionItem | null>(null);
-  // A version we saw as published that a later publish replaced. The server archives it and the document
-  // payload no longer lists it, so it is remembered here to show "Older version" (backend: phase5.md, publish).
-  const [replacedVersions, setReplacedVersions] = useState<Record<string, DocumentVersionItem>>({});
 
   const isAdminRoute = location.pathname.startsWith("/admin");
   const baseRoute = isAdminRoute ? "/admin/materials" : "/teacher/materials";
@@ -120,6 +119,14 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     enabled: Boolean(documentId) && !isRemoved,
     retry: false,
   });
+
+  // The full list of versions (newest first). The page shows exactly what the server lists.
+  const {
+    data: versionList,
+    isError: isVersionsError,
+    error: versionsError,
+    refetch: refetchVersions,
+  } = useDocumentVersions({ api, documentId, enabled: !isRemoved });
 
   const latestVersion = doc?.latest_version;
   const isInFlight =
@@ -151,6 +158,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         setAnnouncement(`${doc?.title || "Document"}: failed: ${failure.message}`);
       }
       refetchDoc();
+      refetchVersions();
     },
   });
 
@@ -253,37 +261,35 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
     setDeleteError(null);
   };
 
-  // Synthesize versions list from document
+  // The rows come from the server's version list. Only while that list has not loaded (or failed) the
+  // page falls back to the two versions the document itself carries. The live polled status is laid over
+  // the latest version's row, and only while the document says that version is still in flight.
   const versions: DocumentVersionItem[] = useMemo(() => {
     if (!doc) return [];
-    if (Array.isArray((doc as unknown as { versions?: DocumentVersionItem[] }).versions)) {
-      return (doc as unknown as { versions: DocumentVersionItem[] }).versions;
-    }
-
-    const map = new Map<string, DocumentVersionItem>();
-    if (doc.latest_version) {
-      // Overlay live polling status onto latest version row
-      // Only while the document itself says the version is in flight: once it is ready, published or
-      // failed the document is the truth (a remembered "ready" must not hide a later publish).
-      const liveLatest: DocumentVersionItem = {
-        ...doc.latest_version,
-        status: isInFlight ? polledStatus || doc.latest_version.status : doc.latest_version.status,
-        stage: isInFlight && polledStage !== undefined ? polledStage : doc.latest_version.stage,
-      };
-      // The live status can be ahead of the document: its retryable flag is then not known yet.
-      if (liveLatest.status !== doc.latest_version.status) liveLatest.retryable = null;
-      map.set(doc.latest_version.id, liveLatest);
-    }
-    if (doc.published_version) {
-      if (!map.has(doc.published_version.id)) {
+    let base: DocumentVersionItem[];
+    if (versionList) {
+      base = versionList.items;
+    } else {
+      const map = new Map<string, DocumentVersionItem>();
+      if (doc.latest_version) map.set(doc.latest_version.id, doc.latest_version);
+      if (doc.published_version && !map.has(doc.published_version.id)) {
         map.set(doc.published_version.id, doc.published_version);
       }
+      base = Array.from(map.values());
     }
-    for (const replaced of Object.values(replacedVersions)) {
-      if (!map.has(replaced.id)) map.set(replaced.id, replaced);
-    }
-    return Array.from(map.values()).sort((a, b) => b.version_no - a.version_no);
-  }, [doc, polledStatus, polledStage, isInFlight, replacedVersions]);
+    const rows = base.map((row) => {
+      if (!isInFlight || !doc.latest_version || row.id !== doc.latest_version.id) return row;
+      const live: DocumentVersionItem = {
+        ...row,
+        status: polledStatus || row.status,
+        stage: polledStage !== undefined ? polledStage : row.stage,
+      };
+      // The live status can be ahead of the document: its retryable flag is then not known yet.
+      if (live.status !== row.status) live.retryable = null;
+      return live;
+    });
+    return rows.sort((x, y) => y.version_no - x.version_no);
+  }, [doc, versionList, polledStatus, polledStage, isInFlight]);
 
   const breadcrumbs = useMemo(() => {
     const rootLabel = isAdminRoute ? "Administration" : "Teacher Portal";
@@ -400,9 +406,12 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
         const isCurrentActive = v.id === latestVersion?.id && !isTerminalStatus(v.status);
         const chip = getStatusChip(v.status, v.stage, v.flagged_chunk_count);
 
+        const changedAt = formatChangedAt(v.updated_at);
         return (
           <div className="space-y-1">
             <Badge variant={chip.variant}>{chip.label}</Badge>
+
+            {changedAt && <p className="text-xs text-text-muted break-words">{`Last changed ${changedAt}`}</p>}
 
             {/* In-flight connection lost banner */}
             {isCurrentActive && isConnectionLost && (
@@ -596,6 +605,17 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
               </Alert>
             )}
 
+            {isVersionsError && (
+              <Alert variant="danger" title="Could not load all versions">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <span className="break-words">{getDocumentError(versionsError, "list").message}</span>
+                  <Button size="sm" variant="secondary" onClick={() => refetchVersions()} className="w-full sm:w-auto">
+                    Reload versions
+                  </Button>
+                </div>
+              </Alert>
+            )}
+
             <Table
               columns={columns}
               data={versions}
@@ -603,6 +623,10 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
               responsiveLayout={responsiveLayout}
               mobileActionsLayout="stacked"
             />
+
+            {versionList?.has_more && (
+              <p className="text-sm text-text-muted break-words">Showing the newest 100 versions.</p>
+            )}
           </div>
         </TabContent>
 
@@ -680,13 +704,7 @@ export const MaterialDetailPage: React.FC<MaterialDetailPageProps> = ({
             setSelectedFlagsVersionId(versionId);
             setActiveTab("flags");
           }}
-          onPublished={(published, previous) => {
-            if (previous && previous.id !== published.id) {
-              setReplacedVersions((prev) => ({
-                ...prev,
-                [previous.id]: { ...previous, status: "archived" },
-              }));
-            }
+          onPublished={(published) => {
             setAnnouncement(`${doc.title}: version ${published.version_no} is published`);
           }}
         />

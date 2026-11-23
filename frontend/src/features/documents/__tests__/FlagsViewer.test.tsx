@@ -112,6 +112,7 @@ const SAMPLE_FLAGS_RESPONSE: VersionFlagsItem = {
 function createMockApi(overrides: Partial<DocumentsApi> = {}): DocumentsApi {
   return {
     list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+    versions: vi.fn(() => new Promise<never>(() => undefined)),
     get: vi.fn().mockResolvedValue(createMockDocWithVersion()),
     limits: vi.fn().mockResolvedValue({
       max_file_bytes: 10485760,

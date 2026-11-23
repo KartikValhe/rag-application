@@ -194,7 +194,8 @@ describe("MaterialsUsagePage: admin view", () => {
     expect(within(limits).getByText("Uploads per organisation per hour")).toBeTruthy();
     expect(within(limits).getByText("100")).toBeTruthy();
     expect(screen.getByText(/Deleted materials are not counted/)).toBeTruthy();
-    expect(screen.getByText(/uploads made so far this hour is not shown/i)).toBeTruthy();
+    // 5g-1: the old "not shown here" sentence is replaced by the upload attempts section
+    expect(screen.queryByText(/uploads made so far this hour is not shown/i)).toBeNull();
   });
 
   it("shows when the data was fetched as a real time element", async () => {
@@ -373,7 +374,9 @@ describe("MaterialsUsagePage: loading, errors and refresh", () => {
   it("read-only: the page only ever touches api.usage, even when every button is pressed", async () => {
     const usage = vi.fn().mockResolvedValue(usageData());
     const touched: string[] = [];
-    const api = new Proxy({ usage } as Record<string, unknown>, {
+    // like the real API function, the response goes through the schema (5g-1 added fields the page relies on)
+    const parsed = () => Promise.resolve(usage()).then((d: unknown) => DocumentUsageSchema.parse(d));
+    const api = new Proxy({ usage: parsed } as Record<string, unknown>, {
       get(target, prop) {
         touched.push(String(prop));
         return target[prop as string];

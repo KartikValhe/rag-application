@@ -71,6 +71,7 @@ function makeApi(overrides: Partial<Record<keyof DocumentsApi, unknown>> = {}) {
   return {
     list: vi.fn(),
     get: vi.fn(),
+    versions: vi.fn(() => new Promise<never>(() => undefined)),
     limits: vi.fn(),
     status: vi.fn().mockResolvedValue({
       document_id: "doc-1",

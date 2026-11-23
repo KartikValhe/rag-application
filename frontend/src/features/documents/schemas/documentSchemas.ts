@@ -20,9 +20,17 @@ export const DocumentVersionSchema = z.object({
   chunk_count: z.number().int().nullable().optional(),
   flagged_chunk_count: z.number().int().nullable().optional(),
   created_at: z.string(),
+  // Last time any column of the version changed. Lenient: a missing or null value shows nothing.
+  updated_at: z.string().nullable().optional(),
   published_at: z.string().nullable().optional(),
   retryable: z.boolean().nullable().optional(),
   warnings: z.array(z.string()).default([]),
+});
+
+// Newest version first, at most 100. A missing or non-boolean has_more counts as false.
+export const DocumentVersionListSchema = z.object({
+  items: z.array(DocumentVersionSchema),
+  has_more: z.unknown().transform((value) => value === true),
 });
 
 export const DocumentSchema = z.object({
@@ -144,10 +152,38 @@ export const DocumentLimitsSchema = z.object({
   uploads_per_tenant_per_hour: lenientCount,
 });
 
+const asObject = (value: unknown) =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+
+// Counts of versions per status. A missing key is null (shown as "not available"), never 0.
+export const VersionsByStatusSchema = z.preprocess(
+  asObject,
+  z.object({
+    queued: lenientCount,
+    processing: lenientCount,
+    ready: lenientCount,
+    published: lenientCount,
+    archived: lenientCount,
+    failed: lenientCount,
+  })
+);
+
+// Upload attempts in a rolling 60 minutes. null means the server could not read the counter.
+export const UploadsLastHourSchema = z.preprocess(
+  asObject,
+  z.object({
+    tenant: lenientCount,
+    caller: lenientCount,
+    window_seconds: lenientCount,
+  })
+);
+
 export const DocumentUsageSchema = z.object({
   documents: lenientCount,
   storage_bytes: lenientCount,
   pages: lenientCount,
+  versions_by_status: VersionsByStatusSchema,
+  uploads_last_hour: UploadsLastHourSchema,
   limits: z.preprocess(
     (value) => (typeof value === "object" && value !== null && !Array.isArray(value) ? value : {}),
     DocumentLimitsSchema
@@ -165,6 +201,7 @@ export const DocumentUploadLimitsSchema = z.object({
 
 export type NamedRefItem = z.infer<typeof NamedRefSchema>;
 export type DocumentVersionItem = z.infer<typeof DocumentVersionSchema>;
+export type DocumentVersionListItem = z.infer<typeof DocumentVersionListSchema>;
 export type DocumentItem = z.infer<typeof DocumentSchema>;
 export type DocumentListItem = z.infer<typeof DocumentListSchema>;
 export type DocumentStatusItem = z.infer<typeof DocumentStatusSchema>;

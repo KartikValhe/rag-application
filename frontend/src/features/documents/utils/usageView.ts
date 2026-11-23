@@ -1,6 +1,10 @@
+import { getStatusChip } from "./statusChip.ts";
+
 /** Plain-text formatting for the admin usage page. Nothing here can return NaN, Infinity or "undefined". */
 
 export const NOT_AVAILABLE = "Not available";
+/** Shown for a counter the server could not read. It is never replaced by 0. */
+export const NOT_AVAILABLE_NOW = "Not available right now";
 
 export type MeterLevel = "unknown" | "ok" | "warning" | "full";
 
@@ -75,4 +79,44 @@ export function getMeter(
     levelText,
     progress: { value: Math.min(used, max), max },
   };
+}
+
+export interface Attempts {
+  /** "4 of 20", or just "4" when there is no usable maximum, or "Not available right now". */
+  text: string;
+  level: MeterLevel;
+  /** The level in words; empty when it cannot be worked out. */
+  levelText: string;
+}
+
+/** Upload attempts in the last 60 minutes against the per-hour limit. A null count is never shown as 0. */
+export function formatAttempts(used: number | null | undefined, max: number | null | undefined): Attempts {
+  if (!isCount(used)) return { text: NOT_AVAILABLE_NOW, level: "unknown", levelText: "" };
+  const meter = getMeter(used, max, "count");
+  const text = isCount(max) && max > 0 ? `${formatCount(used)} of ${formatCount(max)}` : formatCount(used);
+  return { text, level: meter.level, levelText: meter.levelText };
+}
+
+export interface StatusRow {
+  key: string;
+  label: string;
+  text: string;
+}
+
+type StatusCounts = Record<"queued" | "processing" | "ready" | "published" | "archived" | "failed", number | null>;
+
+/** The six version statuses in plain words (chip labels where a chip has one of the same meaning). */
+export function getVersionStatusRows(counts: StatusCounts): StatusRow[] {
+  const rows: Array<[keyof StatusCounts, string]> = [
+    ["queued", getStatusChip("queued").label],
+    ["processing", getStatusChip("processing").label],
+    ["ready", "Draft"],
+    ["published", getStatusChip("published").label],
+    ["archived", "Older"],
+    ["failed", getStatusChip("failed").label],
+  ];
+  return rows.map(([key, label]) => {
+    const value = counts[key];
+    return { key, label, text: isCount(value) ? formatCount(value) : NOT_AVAILABLE_NOW };
+  });
 }
