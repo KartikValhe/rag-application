@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     # at 1,369 MB, 16 = 2.7 at 1,447 MB, 32 = 3.0 at 1,818 MB: a bigger batch is not faster and costs memory.
     EMBEDDING_BATCH_SIZE: int = Field(default=8, ge=1, le=256)
     EMBEDDING_THREADS: int = Field(default=1, ge=1, le=64)  # onnxruntime intra-op threads
+    # Load the query model when the app starts (B96: the first search after a restart takes seconds otherwise).
+    # Unset: off in development, on in every other environment. A load failure is logged and does not stop the app.
+    # Read it through `embedding_warm_at_startup`.
+    EMBEDDING_WARM_AT_STARTUP: bool | None = None
 
     # ── Retrieval (step 5d, design A5, docs/phase5d-plan.md section 8) ──────
     RETRIEVAL_VECTOR_K: int = Field(default=20, ge=1, le=200)  # chunks taken from the vector side
@@ -200,6 +204,13 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.ENVIRONMENT.lower() == "development"
+
+    @property
+    def embedding_warm_at_startup(self) -> bool:
+        """EMBEDDING_WARM_AT_STARTUP when set, else on outside development."""
+        if self.EMBEDDING_WARM_AT_STARTUP is None:
+            return not self.is_development
+        return self.EMBEDDING_WARM_AT_STARTUP
 
     @property
     def cors_origins(self) -> list[str]:

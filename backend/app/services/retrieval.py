@@ -675,6 +675,9 @@ class Hit:
     keyword_matched_terms: int | None
     fused_score: float
     injection_flags: tuple[str, ...]
+    # The version's file kind (pdf, docx, pptx, txt, md): a PPTX slide is stored as a page, so a citation
+    # needs this to say "slide 5" instead of "page 5". Always set by search(); None only for a Hit built by hand.
+    file_kind: str | None = None
 
     @property
     def flagged(self) -> bool:
@@ -835,7 +838,7 @@ _DETAILS = """, ids AS (
     SELECT id FROM vec UNION SELECT id FROM kw
 )
 SELECT c.id, c.document_id, d.title, c.document_version_id, v.version_no, v.status, v.original_filename,
-       c.page_start, c.page_end, c.heading_path, c.content, c.injection_flags,
+       v.file_kind, c.page_start, c.page_end, c.heading_path, c.content, c.injection_flags,
        vec.rnk AS vector_rank, vec.sim AS vector_similarity, kw.rnk AS keyword_rank,
        CASE WHEN kw.id IS NULL THEN NULL ELSE cardinality(ARRAY(
            SELECT unnest(tsvector_to_array(c.content_tsv)) INTERSECT SELECT unnest(CAST(:lexemes AS text[]))
@@ -1087,6 +1090,7 @@ async def _search_in_transaction(
                 keyword_matched_terms=row["matched"],
                 fused_score=f.score,
                 injection_flags=tuple(row["injection_flags"] or ()),
+                file_kind=row["file_kind"],
             )
         )
 

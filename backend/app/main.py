@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
 from app.core.redis_client import close_redis, get_redis
-from app.services import retrieval
+from app.services import query_embedding, retrieval
 
 try:
     import email_validator
@@ -47,6 +47,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     retrieval.log_threshold_calibration()
     # Warm up Redis connection pool.
     await get_redis()
+    # Optionally load the query embedder now so the first search after a restart is not slow (B96). It holds
+    # no database connection, and a load failure is logged without stopping the app.
+    if settings.embedding_warm_at_startup:
+        await query_embedding.warm_up_embedder()
     yield
     # Graceful Redis shutdown.
     await close_redis()

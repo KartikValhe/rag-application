@@ -135,6 +135,7 @@ async def seed_document(
     version_no: int = 1,
     model_key: str | None = None,
     original_filename: str = "syllabus.pdf",
+    file_kind: str = "pdf",
 ) -> SeededDocument:
     """Insert a document (or a new version of `document`) with the given chunks and embeddings. Commits."""
     if document is None:
@@ -159,7 +160,7 @@ async def seed_document(
         document_id=document.id,
         version_no=version_no,
         status=status,
-        file_kind="pdf",
+        file_kind=file_kind,
         original_filename=original_filename,
         size_bytes=1000,
         sha256=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),

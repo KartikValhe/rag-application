@@ -63,6 +63,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_injection_scan.py": ("fast", "security"),
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
+    "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag
     "test_ml_real_model.py": ("fast",),  # skipped unless RUN_REAL_MODEL=1 (needs the real model files)
     "test_ml_scripts.py": ("fast",),
     "test_parsed_document.py": ("fast",),
@@ -147,6 +148,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_retrieval_quality.py": ("db",),
     "test_eval_retrieval_db.py": ("db",),
     "test_retrieval_pruning.py": ("db",),
+    "test_retrieval_file_kind.py": ("db",),  # 6a-1b: Hit.file_kind for pdf/pptx/docx; test-search contract unchanged
     "test_retrieval_calibration_db.py": ("db",),  # 5d-5: threshold_calibrated derived at both entry points
     "test_eval_retrieval_compare_db.py": ("db",),
     "test_retrieval_scope.py": ("db", "security"),

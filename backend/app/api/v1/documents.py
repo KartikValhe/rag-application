@@ -29,7 +29,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
@@ -111,6 +111,7 @@ from app.services import (
     document_store,
     document_upload,
     injection_scan,
+    query_embedding,
     retrieval,
 )
 from app.services.audit import record_audit_event
@@ -993,22 +994,13 @@ async def download_version(
 
 # ── Test search and flags (step 5d-2) ────────────────────────────────────────
 
-QueryEmbedderLoader = Callable[[], Awaitable[retrieval.QueryEmbedder]]
-
-
-async def _process_query_embedder() -> retrieval.QueryEmbedder:
-    """The process-wide model, loaded on the first test search of the process (seconds; backlog B96)."""
-    from app.ml import (
-        loader,  # imported here: importing the API never loads a machine-learning library
-    )
-
-    return retrieval.QueryEmbedder.from_embedder(await loader.get_embedder_async())
+QueryEmbedderLoader = query_embedding.QueryEmbedderLoader
 
 
 def get_query_embedder() -> QueryEmbedderLoader:
     """FastAPI dependency: HOW to get the query embedder, not the embedder itself, so the model is only loaded
     after the permission, scope, rate-limit and query checks. Tests override it."""
-    return _process_query_embedder
+    return query_embedding.process_query_embedder
 
 
 async def _test_search_scope(db: AsyncSession, user: User, body: TestSearchRequest) -> retrieval.RetrievalScope:
@@ -1018,25 +1010,6 @@ async def _test_search_scope(db: AsyncSession, user: User, body: TestSearchReque
         db, user, purpose="manage", class_id=body.class_id, subject_id=body.subject_id,
         include_drafts=body.include_drafts,
     )
-
-
-async def _guarded_query_embedder(load: QueryEmbedderLoader) -> retrieval.QueryEmbedder:
-    """The loaded embedder, with every failure (loading or embedding) turned into search_unavailable. Only the
-    exception class is logged: never a path, a library message or the query."""
-    try:
-        loaded = await load()
-    except Exception as exc:
-        logger.error("test_search_embedder_unavailable", stage="load", error=type(exc).__name__)
-        raise api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "search_unavailable") from None
-
-    async def embed(query: str) -> list[float]:
-        try:
-            return await loaded.embed(query)
-        except Exception as exc:
-            logger.error("test_search_embedder_unavailable", stage="embed", error=type(exc).__name__)
-            raise retrieval.SearchUnavailable("search_unavailable") from None
-
-    return retrieval.QueryEmbedder(model_key=loaded.model_key, dim=loaded.dim, embed=embed)
 
 
 def _hit_response(hit: retrieval.Hit, scanned: dict[str, bool]) -> TestSearchHit:
@@ -1101,7 +1074,12 @@ async def test_search(
         except retrieval.QueryError as exc:
             raise api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
     # The model is loaded, and the query embedded, with none of this route's transactions open.
-    query_embedder = await _guarded_query_embedder(load_query_embedder)
+    try:
+        query_embedder = await query_embedding.guarded_query_embedder(
+            load_query_embedder, log_event="test_search_embedder_unavailable"
+        )
+    except retrieval.SearchUnavailable as exc:  # the model could not be loaded (already logged, class only)
+        raise api_error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code) from None
     try:
         if scope.pairs:  # an empty scope has nothing to compare with: nothing is embedded
             query_embedder = await retrieval.embed_query(query_embedder, query)
