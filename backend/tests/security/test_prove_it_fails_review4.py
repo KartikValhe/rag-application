@@ -16,7 +16,6 @@ really checks the protection and does not pass by accident.
 TEST database only: the autouse fixture asserts current_database() ends in _test before anything runs.
 """
 
-import asyncio
 import os
 from pathlib import Path
 
@@ -29,6 +28,7 @@ from app.core import middleware
 from app.workers import db as worker_db
 from app.workers import queue as queue_module
 from app.workers.db import WorkerDatabases
+from app.workers.queue import Job
 from tests.fixtures.academic_world import AcademicWorld
 from tests.fixtures.worker import make_queue, queued_version
 from tests.security.header_assertions import assert_security_headers
@@ -37,10 +37,12 @@ from tests.security.tenant_guard_assertions import (
     assert_tenant_switch_rejected_before_it_takes_effect,
 )
 from tests.security.worker_assertions import (
+    assert_claims_overlapped,
     assert_no_double_claim,
     assert_one_claim_per_tenant_per_round,
     assert_small_tenant_not_stuck_behind_backlog,
     assert_tenant_at_its_cap_is_skipped,
+    claim_round_overlapped,
 )
 from tests.test_security_headers_layer import _call, _responder
 from tests.test_worker_fair_claim import _backlog
@@ -132,20 +134,25 @@ async def test_removing_the_running_cap_is_caught_by_the_cap_helper(
 
 async def _round_scenario(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path
-) -> None:
+) -> list[Job | None]:
     await _backlog(raw_db, academic_world.a, tmp_path, n=8)
     await queued_version(raw_db, academic_world.b, tmp_path)
-    queues = [make_queue(worker_dbs) for _ in range(6)]
-    results = await asyncio.gather(*(q.claim(f"w{i}") for i, q in enumerate(queues)))
-    assert_no_double_claim(list(results))
-    assert_one_claim_per_tenant_per_round(list(results))
+    # Six claim statements that all run before the first commit (proven inside the helper), so the
+    # running-cap cannot hide the rule: the result does not depend on timing.
+    results = await claim_round_overlapped(make_queue(worker_dbs), 6)
+    assert_no_double_claim(results)
+    assert_one_claim_per_tenant_per_round(results)
+    return results
 
 
 async def test_removing_the_one_job_per_tenant_rule_is_caught_by_the_round_helper(
     worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
     quiet_queue: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _round_scenario(worker_dbs, academic_world, raw_db, tmp_path)  # protection ON: passes
+    results = await _round_scenario(worker_dbs, academic_world, raw_db, tmp_path)  # protection ON: passes
+    # exactly one claim for each of the two tenants, the other four claimers find nothing
+    assert sorted(str(j.tenant_id) for j in results if j is not None) == sorted([str(academic_world.a.id), str(academic_world.b.id)])
+    assert sum(1 for j in results if j is None) == 4
 
     sql = queue_module.CLAIM_SQL
     start = sql.index("    AND j.id = (SELECT q.id")
@@ -154,6 +161,50 @@ async def test_removing_the_one_job_per_tenant_rule_is_caught_by_the_round_helpe
     monkeypatch.setattr(queue_module, "CLAIM_SQL", sql[:start] + sql[end:])
     with pytest.raises(AssertionError, match="several claims of the same round"):
         await _round_scenario(worker_dbs, academic_world, raw_db, tmp_path)
+
+
+def test_the_overlap_check_accepts_only_claims_that_all_ran_before_the_first_commit() -> None:
+    good = [("claim", 1), ("claim", 2), ("claim", 3), ("commit", 1), ("commit", 2), ("commit", 3)]
+    assert_claims_overlapped(good, claimers=3)  # passes
+
+    commit_between = [("claim", 1), ("commit", 1), ("claim", 2), ("claim", 3), ("commit", 2), ("commit", 3)]
+    with pytest.raises(AssertionError, match="the round did not overlap"):
+        assert_claims_overlapped(commit_between, claimers=3)
+    serialized = [("claim", 1), ("commit", 1), ("claim", 2), ("commit", 2), ("claim", 3), ("commit", 3)]
+    with pytest.raises(AssertionError, match="the round did not overlap"):
+        assert_claims_overlapped(serialized, claimers=3)
+    with pytest.raises(AssertionError, match="expected 3 claim statements, saw 2"):
+        assert_claims_overlapped([("claim", 1), ("claim", 2), ("commit", 1), ("commit", 2)], claimers=3)
+    with pytest.raises(AssertionError, match="did not run on 3 separate connections"):
+        assert_claims_overlapped([("claim", 1), ("claim", 1), ("claim", 2), ("commit", 1)], claimers=3)
+    with pytest.raises(AssertionError, match="nothing was committed"):
+        assert_claims_overlapped([("claim", 1), ("claim", 2), ("claim", 3)], claimers=3)
+
+
+async def test_the_overlapped_round_gives_every_connection_back_when_a_statement_fails(
+    worker_dbs: WorkerDatabases, academic_world: AcademicWorld, raw_db: AsyncSession, tmp_path: Path,
+    quiet_queue: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _backlog(raw_db, academic_world.a, tmp_path, n=3)
+    queue = make_queue(worker_dbs)
+    real_params = queue.claim_params
+
+    def failing_params(worker_id: str) -> dict[str, object]:
+        if worker_id == "w2":
+            raise RuntimeError("the third claimer fails")
+        return real_params(worker_id)
+
+    monkeypatch.setattr(queue, "claim_params", failing_params)
+    with pytest.raises(RuntimeError, match="the third claimer fails"):
+        await claim_round_overlapped(queue, 6)
+
+    assert worker_dbs.worker_engine.pool.checkedout() == 0  # type: ignore[attr-defined]  # every connection came back
+    running = (
+        await raw_db.execute(
+            text("SELECT count(*) FROM app.ingest_jobs WHERE tenant_id = :t AND status = 'running'"), {"t": academic_world.a.id}
+        )
+    ).scalar_one()
+    assert running == 0  # the claims of the first two statements were rolled back, not committed
 
 
 # ── Tenant guard ─────────────────────────────────────────────────────────────

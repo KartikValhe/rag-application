@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from app.core.slots import SlotManager
 from app.db.models.document import Chunk
@@ -66,6 +66,89 @@ def assert_one_claim_per_tenant_per_round(results: list[Job | None]) -> None:
     for job in got:
         per_tenant[job.tenant_id] = per_tenant.get(job.tenant_id, 0) + 1
     assert all(n == 1 for n in per_tenant.values()), f"one tenant took several claims of the same round: {per_tenant}"
+
+
+@dataclass
+class ClaimEventLog:
+    """
+    Records, in order and at the driver level, every claim statement and every commit of an engine.
+    It is how a round test PROVES that its claim statements really overlapped (see
+    assert_claims_overlapped). Use it as a context manager around the round.
+    """
+
+    engine: AsyncEngine
+    events: list[tuple[str, int]] = field(default_factory=list)  # ("claim" | "commit", id of the connection)
+
+    def __enter__(self) -> "ClaimEventLog":
+        sync = self.engine.sync_engine
+        event.listen(sync, "after_cursor_execute", self._on_execute)
+        event.listen(sync, "commit", self._on_commit)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        sync = self.engine.sync_engine
+        event.remove(sync, "after_cursor_execute", self._on_execute)
+        event.remove(sync, "commit", self._on_commit)
+
+    def _on_execute(self, conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+        # Match the claim statement itself (the sabotaged variants of CLAIM_SQL keep this shape).
+        if statement.lstrip().startswith("WITH next AS") and "app.ingest_jobs" in statement:
+            self.events.append(("claim", id(conn)))
+
+    def _on_commit(self, conn: Any) -> None:
+        self.events.append(("commit", id(conn)))
+
+
+def assert_claims_overlapped(events: list[tuple[str, int]], *, claimers: int) -> None:
+    """
+    A round test is only deterministic when every claim statement ran, on its own connection, BEFORE the
+    first commit: then no statement could see another one's claim (READ COMMITTED). If any commit comes
+    between two statements, a later statement sees the earlier claim and the running-cap hides the very
+    rule the round test is about, so the test would depend on timing again.
+    """
+    claims = [i for i, (kind, _) in enumerate(events) if kind == "claim"]
+    commits = [i for i, (kind, _) in enumerate(events) if kind == "commit"]
+    assert len(claims) == claimers, f"expected {claimers} claim statements, saw {len(claims)}: {events}"
+    assert len({conn for kind, conn in events if kind == "claim"}) == claimers, (
+        f"the claim statements did not run on {claimers} separate connections: {events}"
+    )
+    assert commits, f"nothing was committed: {events}"
+    assert min(commits) > max(claims), f"a commit came before the last claim statement ran, the round did not overlap: {events}"
+
+
+async def claim_round_overlapped(queue: JobQueue, claimers: int) -> list[Job | None]:
+    """
+    One claim round that is DETERMINISTICALLY overlapped: `claimers` connections each run the real claim
+    statement (queue_module.CLAIM_SQL, read at call time so a test can sabotage it) one after another and
+    NONE of them commits until all have executed. Under READ COMMITTED no statement can see another one's
+    uncommitted claim, which is exactly the "two statements take their snapshots before the first commit"
+    case. asyncio.gather over pooled connections does not guarantee that overlap, so a round test built on it
+    depended on timing. The result is built from the rows exactly like JobQueue.claim does.
+
+    Every connection is closed in the end (an open transaction is rolled back), also when a statement or an
+    assertion fails. The overlap itself is proven from the driver events before the results are returned.
+    """
+    results: list[Job | None] = []
+    connections: list[AsyncConnection] = []
+    with ClaimEventLog(queue.engine) as log:
+        try:
+            for i in range(claimers):
+                worker = f"w{i}"
+                conn = await queue.engine.connect()
+                connections.append(conn)
+                rows = (await conn.execute(text(queue_module.CLAIM_SQL), queue.claim_params(worker))).fetchall()
+                results.append(
+                    Job(id=rows[0][0], tenant_id=rows[0][1], version_id=rows[0][2], attempts=rows[0][3], worker_id=worker)
+                    if rows
+                    else None
+                )
+            for conn in connections:  # only now, after every statement has run
+                await conn.commit()
+        finally:
+            for conn in connections:
+                await conn.close()  # rolls back whatever is still open
+    assert_claims_overlapped(log.events, claimers=claimers)
+    return results
 
 
 async def assert_locked_job_is_skipped(queue: JobQueue, engine: AsyncEngine, *, timeout: float = 3.0) -> tuple[Job, Job]:
