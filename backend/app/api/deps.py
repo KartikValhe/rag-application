@@ -141,6 +141,14 @@ async def get_current_user(
     db: AsyncSession = Depends(get_tenant_session),
 ) -> User:
     """Return the authenticated User, fetched from the tenant-scoped DB session."""
+    return await load_active_user(tenant_id, token, db)
+
+
+async def load_active_user(tenant_id: str, token: str, db: AsyncSession) -> User:
+    """
+    The user of the token, read in the given tenant session. A missing or inactive user is a 401.
+    Shared by get_current_user and require_released (app/core/authz.py), so both refuse the same way.
+    """
     try:
         payload = decode_access_token(token)
     except JWTError as exc:

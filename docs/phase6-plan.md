@@ -1315,4 +1315,34 @@ about USD 1.3 a day whatever happens.
 
 ## Build record
 
-(Empty: filled in as the steps are built, with the exact test summary lines, as in `docs/phase5f-plan.md`.)
+(Filled in as the steps are built, with the exact test summary lines, as in `docs/phase5f-plan.md`.)
+
+### 6a-1a Session-free permission check (B100) · 2026-11-24 · not committed
+
+- Built: `require_released(permission)` in `app/core/authz.py`. It runs the user and permission check in its own
+  `tenant_session_context`, closes it before the handler runs and returns a detached user (every column loaded; it
+  fails closed if one is not). It carries the same `__declared_permission__` tag as `require(...)`. There is no scope
+  argument: a route checks scope in its own transaction. `get_current_user` and `require_released` share
+  `load_active_user` (`app/api/deps.py`), so both give the same 401s; both use the same 403 body. No existing route
+  was switched over, and `require(...)` behaves exactly as before.
+- F12 pinned on FastAPI 0.162.2: with the default (`"request"`) scope, a `yield` dependency's exit code runs **after**
+  the whole `StreamingResponse` body has been sent; with `Depends(..., scope="function")` it runs before the body.
+- Tests: `tests/test_auth_released_session.py` (tier `db, security`), 16 tests, run on a test-only app. Pool
+  introspection: 0 checked-out connections while the handler waits and while the body streams, against 1 for
+  `require(...)`. Same 401/403 bodies, deactivated user, revoke between requests, a role matrix shared by both
+  dependencies, `set_config(..., true)` with nothing left after release (one-connection pool), the default-deny guard,
+  and the detached user with no SQL.
+- Red first: `ImportError: cannot import name 'require_released'`, then with a stub that delegated to `require`:
+  `AssertionError: released: 1 checked-out connection(s) while the handler awaited`.
+- Prove-it (each restored afterwards): session kept open → pool tests red; tag dropped → guard tests red; active-user
+  check skipped → `test_deactivated_user_is_rejected` red; expired user (guard on) → `RuntimeError` and 10 tests red;
+  expired user (guard off) → `test_returned_user_is_detached_and_touching_it_runs_no_sql` red; `set_config(..., false)`
+  → tenant-context test red; permission cache → `test_revoked_permission_takes_effect_on_the_next_request` red.
+- `run_tests full tests/test_auth_released_session.py tests/test_authz_rbac.py tests/test_auth.py`:
+  `============================= 33 passed in 32.04s =============================`
+- `run_tests gate --touched`: `= 1 failed, 1839 passed, 11 skipped, 818 deselected, 4 xfailed in 686.63s (0:11:26) =`.
+  The failure, `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`
+  (`SearchUnavailable: search_timeout`), also fails on clean HEAD with this step's changes stashed:
+  `1 failed, 8 passed in 16.72s`. It existed before this step (its superuser search with no filters runs past the
+  5 s statement timeout on the accumulated test database) and is not fixed here.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 96 source files`

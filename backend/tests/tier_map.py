@@ -107,6 +107,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_academic_world.py": ("db",),
     "test_admin.py": ("db",),
     "test_auth.py": ("db",),
+    "test_auth_released_session.py": ("db", "security"),  # 6a-1a (B100): no pooled connection held after the check
     "test_authz_rbac.py": ("db", "security"),
     "test_batch_c.py": ("db",),
     "test_branding.py": ("db",),

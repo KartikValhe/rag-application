@@ -17,10 +17,19 @@ from enum import StrEnum
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_platform_admin, get_current_user, get_tenant_session
+from app.api.deps import (
+    _extract_bearer,
+    _resolve_tenant_from_jwt,
+    get_current_platform_admin,
+    get_current_user,
+    get_tenant_session,
+    load_active_user,
+)
+from app.core.tenant_db import tenant_session_context
 from app.db.models.academic import Class, Enrollment, Subject, TeacherAssignment
 from app.db.models.rbac import Role, RolePermission, UserRole
 from app.db.models.tenant import PlatformAdmin
@@ -225,6 +234,14 @@ async def verify_scope(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GENERIC_NOT_FOUND)
 
 
+def _permission_denied(permission: str) -> dict[str, str]:
+    """The 403 body of require(...) and require_released(...)."""
+    return {
+        "code": "permission_denied",
+        "message": f"Missing required permission: '{permission}'.",
+    }
+
+
 def require(permission: str, scope: Scope | None = None) -> Any:
     """
     FastAPI dependency: checks role permissions AND (if given) the class/subject scope.
@@ -237,13 +254,7 @@ def require(permission: str, scope: Scope | None = None) -> Any:
         # 1. Does any of user's roles include this permission?
         user_perms = await load_user_permissions(user, db)
         if permission not in user_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "permission_denied",
-                    "message": f"Missing required permission: '{permission}'.",
-                },
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_permission_denied(permission))
 
         # 2. Is user authorized for THIS class/subject?
         if scope:
@@ -255,6 +266,44 @@ def require(permission: str, scope: Scope | None = None) -> Any:
     setattr(dep, "__declared_permission__", permission)  # noqa: B010
     setattr(dep, "__declared_scope__", scope)  # noqa: B010
     return dep
+
+
+def require_released(permission: str) -> Any:
+    """
+    FastAPI dependency for routes that do slow work (a streamed answer): the same permission check as
+    require(permission), but it holds NO database connection once it returns (backlog B100).
+
+    require(...) depends on get_tenant_session, a yield dependency, so its connection stays checked out
+    (idle in transaction) until the response, including a streamed body, has been sent. Here the user and
+    their permissions are read in one short tenant transaction of our own, which is closed before the
+    handler runs. The handler gets a detached user with every column loaded, so touching it never goes
+    back to the database. No class/subject scope: a route that needs one checks it in its own
+    transaction. Nothing is cached, so a removed permission or a deactivated user takes effect on the
+    next request.
+    """
+    async def dep(
+        tenant_id: str = Depends(_resolve_tenant_from_jwt),
+        token: str = Depends(_extract_bearer),
+    ) -> User:
+        async with tenant_session_context(tenant_id) as db:
+            user = await load_active_user(tenant_id, token, db)
+            if permission not in await load_user_permissions(user, db):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_permission_denied(permission))
+            _detach_fully_loaded(user, db)
+        return user
+
+    setattr(dep, "__declared_permission__", permission)  # noqa: B010
+    setattr(dep, "__declared_scope__", None)  # noqa: B010
+    return dep
+
+
+def _detach_fully_loaded(user: User, db: AsyncSession) -> None:
+    """Take the user out of the session. Fails closed if any attribute is not loaded yet, because a
+    detached object cannot load it later (the handler would get an error instead of a value)."""
+    unloaded = sa_inspect(user).unloaded
+    if unloaded:
+        raise RuntimeError(f"require_released: user attributes not loaded before release: {sorted(unloaded)}")
+    db.expunge(user)
 
 
 def public_endpoint() -> Any:
