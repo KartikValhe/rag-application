@@ -50,13 +50,6 @@ def test_the_shipped_file_loads_and_every_entry_obeys_the_rules() -> None:
         assert model.key == f"{model.provider}:{model.model_id}"
 
 
-def test_the_shipped_file_pins_nothing_that_was_not_verified() -> None:
-    # Plan 6a-3 verifies and pins the real model ids and limits against the provider consoles. Until then
-    # the file holds none: a guessed id would read as a pin.
-    raw = json.loads(DEFAULT_MODELS_PATH.read_text(encoding="utf-8"))
-    assert raw == {"schema_version": 1, "models": []}
-
-
 def test_a_good_entry_is_accepted_and_found_by_key() -> None:
     registry = parse_registry(doc(GOOD_ENTRY))
     assert isinstance(registry, ModelRegistry)
@@ -177,6 +170,42 @@ def test_the_error_names_the_place_and_never_echoes_the_value() -> None:
 def test_the_file_must_be_an_object(not_a_document: object) -> None:
     with pytest.raises(ModelRegistryError):
         parse_registry(not_a_document)
+
+
+# ── step 6a-4: optional token limits tpm / tpd (data only, not enforced yet) ──────────────────────────
+
+
+def test_tpm_and_tpd_are_optional_and_none_when_absent() -> None:
+    model = parse_registry(doc(GOOD_ENTRY)).get("groq:test-model-1")
+    assert model is not None
+    assert (model.tpm, model.tpd) == (None, None)
+
+
+def test_tpm_and_tpd_may_be_null() -> None:
+    model = parse_registry(doc(entry(tpm=None, tpd=None))).get("groq:test-model-1")
+    assert model is not None
+    assert (model.tpm, model.tpd) == (None, None)
+
+
+def test_tpm_and_tpd_are_read_when_given() -> None:
+    model = parse_registry(doc(entry(tpm=8000, tpd=200_000))).get("groq:test-model-1")
+    assert model is not None
+    assert (model.tpm, model.tpd) == (8000, 200_000)
+    one = parse_registry(doc(entry(tpm=8000))).get("groq:test-model-1")
+    assert one is not None and (one.tpm, one.tpd) == (8000, None)
+
+
+@pytest.mark.parametrize("field", ["tpm", "tpd"])
+@pytest.mark.parametrize("bad", [0, -1, True, False, 1.5, "8000", [8000], 10**10])
+def test_tpm_and_tpd_must_be_positive_integers(field: str, bad: object) -> None:
+    with pytest.raises(ModelRegistryError, match=field):
+        parse_registry(doc(entry(**{field: bad})))
+
+
+def test_the_shipped_file_still_loads_with_the_new_optional_fields() -> None:
+    for model in load_registry().models:
+        assert model.tpm is None or model.tpm > 0
+        assert model.tpd is None or model.tpd > 0
 
 
 # ── reading the file ─────────────────────────────────────────────────────────────────────────────────

@@ -71,6 +71,9 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_adapters.py": ("fast", "security"),  # 6a-3: Groq/OpenRouter/Gemini adapters on httpx.MockTransport (events, errors, timeouts, key canary, no tool fields)
     "test_llm_logging.py": ("fast", "security"),  # 6a-3: credential keys dropped from logs, httpx loggers at WARNING
     "test_llm_models_pinned.py": ("fast",),  # 6a-3: pinned models.json entries and their sources in the build record
+    "test_llm_chain.py": ("db",),  # 6a-4: retries, fallback, breaker in the chain, cooldowns, RPM/RPD slots, timeouts (FakeLLM, test Redis)
+    "test_llm_breaker.py": ("db",),  # 6a-4: breaker open/half-open/probe and cooldown scripts on the test Redis, fail closed
+    "test_llm_chain_imports.py": ("fast", "security"),  # 6a-4: no module but the chain imports an adapter (source scan)
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag

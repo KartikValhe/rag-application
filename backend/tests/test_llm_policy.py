@@ -26,6 +26,7 @@ pytestmark = pytest.mark.usefixtures("no_network_at_all")
 
 SETTING_NAMES = (
     "LLM_ANSWER_CHAIN",
+    "LLM_CONDENSE_CHAIN",
     "LLM_ZDR_CONFIRMED",
     "LLM_ALLOW_TRAINING_PROVIDERS",
     "GROQ_API_KEY",
@@ -212,6 +213,59 @@ def test_openrouter_outside_development_needs_no_attestation_because_every_reque
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     check_llm_policy(settings_for(monkeypatch, "production", LLM_ANSWER_CHAIN="openrouter:vendor/free:free"), registry())
+
+
+# step 6a-4: the condense chain (LLM_CONDENSE_CHAIN) obeys the same rules ----------------------------------
+
+
+def test_an_empty_condense_chain_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_llm_policy(settings_for(monkeypatch, "production", LLM_CONDENSE_CHAIN=""), registry())
+
+
+def test_a_condense_model_is_accepted_in_the_condense_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_llm_policy(settings_for(monkeypatch, "development", LLM_CONDENSE_CHAIN="groq:small"), registry())
+
+
+def test_an_answer_model_is_refused_in_the_condense_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = problems(settings_for(monkeypatch, LLM_CONDENSE_CHAIN="groq:big"))
+    assert any(p.startswith("LLM_CONDENSE_CHAIN") and "groq:big" in p and "condense" in p for p in found)
+
+
+@pytest.mark.parametrize("key", ["groq:not-in-the-file", "nocolon", "evilcorp:model"])
+def test_an_unknown_or_foreign_condense_key_is_refused(key: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    found = problems(settings_for(monkeypatch, LLM_CONDENSE_CHAIN=key))
+    assert all(p.startswith("LLM_CONDENSE_CHAIN") for p in found) and found
+
+
+def test_groq_in_the_condense_chain_needs_zdr_outside_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = problems(settings_for(monkeypatch, "production", LLM_CONDENSE_CHAIN="groq:small"))
+    assert any("groq:small" in p and "LLM_ZDR_CONFIRMED" in p for p in found)
+
+
+def test_a_training_model_in_the_condense_chain_is_refused_outside_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    reg = parse_registry(
+        {
+            "schema_version": 1,
+            "models": [
+                {
+                    "provider": "gemini",
+                    "model_id": "flash-small",
+                    "purposes": ["condense"],
+                    "trains_on_inputs": True,
+                    "rpm": 5,
+                    "rpd": 50,
+                    "pinned_on": "2026-11-24",
+                }
+            ],
+        }
+    )
+    s = settings_for(monkeypatch, "production", LLM_CONDENSE_CHAIN="gemini:flash-small", LLM_ALLOW_TRAINING_PROVIDERS=True)
+    assert any("gemini:flash-small" in p for p in problems(s, reg))
+
+
+def test_both_chains_are_reported_in_one_go(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = problems(settings_for(monkeypatch, LLM_ANSWER_CHAIN="groq:small", LLM_CONDENSE_CHAIN="groq:big"))
+    assert {p.split(":")[0] for p in found} == {"LLM_ANSWER_CHAIN", "LLM_CONDENSE_CHAIN"}
 
 
 # no secret in a policy message ------------------------------------------------------------------------

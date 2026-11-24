@@ -50,6 +50,10 @@ class _Entry(BaseModel):
     trains_on_inputs: StrictBool
     rpm: Limit
     rpd: Limit
+    # Step 6a-4: token limits per minute and per day. Optional (null or absent) and data only: nothing enforces
+    # them yet, a 429 cooldown handles an overrun.
+    tpm: Limit | None = None
+    tpd: Limit | None = None
     pinned_on: Annotated[StrictStr, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
 
     @field_validator("provider")
@@ -98,6 +102,8 @@ class RegisteredModel:
     rpm: int
     rpd: int
     pinned_on: str
+    tpm: int | None = None  # data only (step 6a-4), not enforced
+    tpd: int | None = None
 
     @property
     def key(self) -> str:
@@ -141,6 +147,8 @@ def parse_registry(data: object) -> ModelRegistry:
             rpm=entry.rpm,
             rpd=entry.rpd,
             pinned_on=entry.pinned_on,
+            tpm=entry.tpm,
+            tpd=entry.tpd,
         )
         if model.key in seen:
             problems.append(f"models.json models.{index}: duplicate model key {model.key}")

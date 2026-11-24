@@ -16,6 +16,7 @@ pytestmark = pytest.mark.usefixtures("no_network_at_all")
 
 NEW_NAMES = (
     "LLM_ANSWER_CHAIN",
+    "LLM_CONDENSE_CHAIN",  # step 6a-4
     "LLM_ZDR_CONFIRMED",
     "LLM_ALLOW_TRAINING_PROVIDERS",
     "LLM_TIMEOUT_CONNECT",
@@ -49,6 +50,13 @@ def test_defaults_are_the_plan_values(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_chain_is_a_comma_separated_list(monkeypatch: pytest.MonkeyPatch) -> None:
     s = fresh(monkeypatch, LLM_ANSWER_CHAIN=" groq:a-model , openrouter:vendor/m:free ,, ")
     assert s.llm_answer_chain == ("groq:a-model", "openrouter:vendor/m:free")
+
+
+def test_the_condense_chain_is_empty_by_default_and_a_comma_separated_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # step 6a-4: empty means "no condense" (the caller uses the raw question), never an error
+    assert fresh(monkeypatch).llm_condense_chain == ()
+    s = fresh(monkeypatch, LLM_CONDENSE_CHAIN=" groq:small ,, openrouter:vendor/s:free ")
+    assert s.llm_condense_chain == ("groq:small", "openrouter:vendor/s:free")
 
 
 def test_the_chain_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

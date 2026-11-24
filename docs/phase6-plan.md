@@ -1389,7 +1389,7 @@ about USD 1.3 a day whatever happens.
   6a-3 changed, see below): `run_tests fast` on those six files:
   `============================= 288 passed in 1.65s =============================`.
 
-### 6a-3 Provider adapters · 2026-11-24 · not committed
+### 6a-3 Provider adapters · 2026-11-24 · committed as `8380e8fb`
 
 - Built (`app/llm/`): `groq.py`, `openrouter.py`, `gemini.py` (the three adapters, each a few lines over a shared base),
   `transport.py` (one httpx call, the four timeouts, the SSE reading loop, the order of events), `sse.py` (own SSE line
@@ -1502,3 +1502,85 @@ about USD 1.3 a day whatever happens.
   same failure as in the 6a-1a record: pre-existing, not touched) and the 6a-2 models-file test above. Every other test passed,
   including the 408 new ones (sse 18, adapters 348, logging 38, models_pinned 4).
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 112 source files`
+
+### 6a-4 Chain, retries, breaker, cooldowns, limits · 2026-11-24 · not committed
+
+- Built (`app/llm/`): `chain.py` (`answer_stream(purpose, req, tenant_ctx) -> ChainStream`, `LLMChain`, `TenantLLMContext`,
+  `LLMChainExhausted`, `LLMStreamInterrupted`; `default_chain()` holds the three real adapters, one per process) and `breaker.py`
+  (`Breaker`, `Cooldowns`; every state change is one Lua script). Provider RPM/RPD go through the existing `SlotManager` in one
+  acquire of `llm:rpm:{model_key}` (60 s) and `llm:rpd:{model_key}` (86,400 s). No adapter, error type or fake changed.
+- `models.json` schema: optional `tpm` and `tpd` (positive integers, null or absent allowed; `RegisteredModel.tpm/.tpd`). Data only, not
+  enforced; a 429 cooldown handles an overrun. No entry added, and the two entries got no values (the 6a-3 caveat on which plan the
+  8K/200K figures belong to still stands).
+- New setting `LLM_CONDENSE_CHAIN` (empty by default, `.env.example` documents it). `policy.py` now checks both chains with one per-key
+  function, `key_problems`, which the chain also runs before every call (a key the start-up check would refuse is never called).
+- **Rules as built (plan 7.4 and the owner's 6a-4 decisions)**
+  - Order before each call: start-up policy for the key, cooldown, breaker admission, then the one slot acquire. A refusal at any of
+    them skips the model (result codes `not_allowed`, `cooldown`, `breaker_open`, `rpm_limit`, `rpd_limit`). A probe permit claimed
+    before a slot refusal is given back.
+  - Retry at most once per model, only before the first token: after `random.uniform(0.5, 2.0)`, or after Retry-After when it is
+    5 s or less (0 included). A 429 with a longer Retry-After goes to the next model at once. The retry is a new request and passes all
+    checks again (it can lose its slot). A retry whose wait would pass the total is skipped.
+  - Fallback on `LLMRateLimited`, `LLMUnavailable`, `LLMTimeout` and every skip. Never on `LLMBadRequest`, `LLMContentBlocked`,
+    `LLMAuthError` (raised to the caller unchanged). An auth error opens that provider's breaker (`trip`) and logs `llm_auth_failed`
+    at error level (provider and model key only).
+  - After the first token nothing is retried or failed over: `LLMStreamInterrupted(error, model_key)`.
+  - Breaker `llm:cb:{provider}` (hash) with its window `llm:cb:{provider}:fails` (sorted set): 5 failures in 60 s open it for 60 s,
+    then exactly one probe permit (atomic claim, held at most 60 s). Breaker failures are `LLMUnavailable` and `LLMTimeout`, before or
+    after the first token; a 429 is not one. The probe closes the breaker at its first token (also when the reader then stops), or when
+    the provider answers with a 429 or a refusal; `LLMUnavailable`/`LLMTimeout` on the probe opens it again for 60 s; a probe cancelled
+    before any of these gives its permit back.
+  - Cooldown `llm:cooldown:{model_key}` = end time, `PX` = Retry-After; set on every 429 with a Retry-After above 0 (also the short ones
+    the request waits out itself, and a 429 after the first token); never shortened. A 429 without Retry-After sets none.
+  - Timeouts: the request's four limits. `total` covers the whole answer across attempts; each later attempt gets all four limits cut
+    to what is left, and no attempt starts once it is used up (result `deadline`). The chain checks first token, idle and total itself
+    around every event on its clock, and an `asyncio.timeout` stops a client that never yields.
+  - Empty answer chain: `LLMChainExhausted(not_configured=True)`, no call. Empty condense chain: no error, no event,
+    `stream.configured is False` (the caller uses the raw question). A failing condense chain raises `LLMChainExhausted`.
+  - Redis down outside development: the cooldown and breaker checks raise the same 503 `service_unavailable` as SlotManager, before
+    any call. **In development (my choice):** the call goes ahead with no breaker and no cooldown, SlotManager uses its per-process
+    limits, and `llm_gate_redis_unavailable_dev_allowing` is logged at error level. The records written after a call (failure,
+    success, release, trip, cooldown start) never raise in any environment: the call already happened.
+  - Redis keys hold a provider name or a model key only (no tenant or user id, no text); log lines hold the tenant id, the request id,
+    model keys and result codes. A test checks every key and value and every log line for canaries of the system prompt, the question
+    and the answer.
+- Tests (`tier_map.py` entries added): `test_llm_chain.py` (`db`), `test_llm_breaker.py` (`db`), `test_llm_chain_imports.py`
+  (`fast, security`; AST scan of `app/` for every import form of `groq`, `openrouter`, `gemini` and their parts `transport`,
+  `openai_compat`, `errmap`, `sse`, plus the dotted names as text; only `chain.py` may import an adapter). Added to existing files:
+  `test_llm_models_file.py` (tpm/tpd), `test_llm_policy.py` (condense chain), `test_llm_settings.py` (`LLM_CONDENSE_CHAIN`). All provider
+  calls are FakeLLM; time is a fake clock passed to the chain and to the Lua scripts, whose `sleep` only moves it on. One test uses the
+  real clock with limits of a few milliseconds (about 40 ms in all): a client that never yields, which only a real timer can stop.
+  Concurrency: two requests racing for the last RPM slot (one wins, one falls back, the counter reads 1); ten simultaneous callers on a
+  half-open breaker, on `Breaker` directly and through the chain (exactly one probe, nine on the next model).
+- Red first: `ImportError: cannot import name 'chain' from 'app.llm'`, `ModuleNotFoundError: No module named 'app.llm.breaker'`;
+  `AttributeError: 'RegisteredModel' object has no attribute 'tpm'`, `models.json models.0.tpm: Extra inputs are not permitted`;
+  `Failed: DID NOT RAISE LLMPolicyError` (condense chain); `AttributeError: 'Settings' object has no attribute 'llm_condense_chain'`;
+  `LLM_CONDENSE_CHAIN is missing from .env.example`.
+- Prove-it (each break applied alone, the named test run, the file restored; the working-tree diff compared before and after): retry or
+  fallback after the first token, fallback on bad request, every caller allowed to probe, RPM and RPD taken by two separate acquires, an
+  adapter imported from `services/schedule.py`, the cooldown check skipped, no `trip` on an auth error, Retry-After of exactly 5 s not
+  retried, Retry-After ignored, the 503 not raised outside development, the question bound into the log, answer text written to Redis,
+  the breaker opening at 6, a failure window that never expires, a 429 counted as a breaker failure, an empty condense chain raising,
+  the runtime policy check reduced to "is in models.json", the total per attempt instead of per answer, the probe not given back, a
+  late first token accepted, no probe success at the first token, a cooldown that can be shortened, a failed probe that does not
+  reopen: each turned a named test red. Two breaks first stayed green: (1) "two retries" (`range(3)`, or removing `attempt == 1`),
+  because the one-retry rule is held in two places; with both guards removed `test_only_one_retry_then_the_next_model` is red;
+  (2) "a failed probe does not reopen" left `test_a_failed_probe_opens_it_again_for_60_s` green by coincidence (probe lease and open
+  time are both 60 s); the test now also checks `state == "open"` and is red under the break. Three tests were added after the review:
+  a failure after the first token counts towards the breaker, an auth error after the first token opens it, and the connect limit of a
+  later attempt is cut too.
+- Not covered by a test that can go red: removing the real-time `asyncio.timeout` makes the backstop test hang instead of fail (no
+  pytest timeout plugin), so that break was not run; the probe claim is atomic across processes only through Lua (tested with ten
+  coroutines of one process on one Redis, not with two processes); the expiry of `llm:cb:{provider}:fails` is not asserted; `tpm`/`tpd`
+  are not enforced, on purpose.
+- Not built here (by plan): budgets, token counters and usage rows (6a-5; plan 11.1 lists "budget reserve and correction" under
+  `test_llm_chain.py`, but 12 puts them in 6a-5); closing `default_chain()` in the app lifespan (no caller until 6a-10). The 6a-2
+  models-file test that expects an empty `models.json` still fails and still waits for the owner (6a-3 record).
+- `run_tests full tests/test_llm_chain.py tests/test_llm_breaker.py` (the two `db` files, which the gate does not collect):
+  `============================= 99 passed in 1.39s ==============================`
+- `run_tests full` on every `test_llm_*.py` file plus `test_slots_renew.py`:
+  `======================= 1 failed, 887 passed in 31.83s ========================` (the failure is the 6a-2 models-file test above).
+- `run_tests gate`: `= 2 failed, 2603 passed, 11 skipped, 917 deselected, 4 xfailed in 594.29s (0:09:54) =`. The two failures are
+  the same as in the 6a-3 record: `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`
+  (pre-existing `search_timeout`) and `test_llm_models_file.py::test_the_shipped_file_pins_nothing_that_was_not_verified` (waiting for the owner).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 114 source files`

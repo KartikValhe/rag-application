@@ -205,6 +205,10 @@ class Settings(BaseSettings):
     # app/llm/models.json (checked at start-up by app/llm/policy.py). Empty = no provider is ever called and
     # chat gives retrieval-only answers. Read it through `llm_answer_chain`.
     LLM_ANSWER_CHAIN: str = ""
+    # Step 6a-4: the same for the condense call (rewriting a follow-up into a standalone question). Every key must
+    # be a "condense" model in models.json. Empty = no condense: the caller uses the raw question (not an error).
+    # Read it through `llm_condense_chain`.
+    LLM_CONDENSE_CHAIN: str = ""
     # The operator checked the Groq console and zero data retention is on. Groq models outside development
     # refuse to start until this is true (owner action, step 6a-6).
     LLM_ZDR_CONFIRMED: bool = False
@@ -239,6 +243,11 @@ class Settings(BaseSettings):
     def llm_answer_chain(self) -> tuple[str, ...]:
         """LLM_ANSWER_CHAIN as a tuple of model keys (blank entries dropped, order kept)."""
         return tuple(part.strip() for part in self.LLM_ANSWER_CHAIN.split(",") if part.strip())
+
+    @property
+    def llm_condense_chain(self) -> tuple[str, ...]:
+        """LLM_CONDENSE_CHAIN as a tuple of model keys (blank entries dropped, order kept)."""
+        return tuple(part.strip() for part in self.LLM_CONDENSE_CHAIN.split(",") if part.strip())
 
     @property
     def cors_origins(self) -> list[str]:
