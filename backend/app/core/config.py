@@ -8,7 +8,7 @@ Nothing in this codebase ever reads os.environ directly — always use `settings
 from functools import lru_cache
 
 import email_validator
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Permit local development domains (.local, .localhost, .internal) in EmailStr validation
@@ -200,6 +200,29 @@ class Settings(BaseSettings):
     RETRIEVAL_EMBED_CONCURRENCY: int = Field(default=2, ge=1, le=64)
     RETRIEVAL_EMBED_QUEUE_SECONDS: float = Field(default=5.0, ge=0.0, le=60.0)
 
+    # ── LLM client (step 6a-2, docs/phase6-plan.md 7.2, 7.4, 7.6) ──────────────────────────────────────────
+    # Comma-separated model keys ("provider:model-id") tried in order for answers. Every key must be in
+    # app/llm/models.json (checked at start-up by app/llm/policy.py). Empty = no provider is ever called and
+    # chat gives retrieval-only answers. Read it through `llm_answer_chain`.
+    LLM_ANSWER_CHAIN: str = ""
+    # The operator checked the Groq console and zero data retention is on. Groq models outside development
+    # refuse to start until this is true (owner action, step 6a-6).
+    LLM_ZDR_CONFIRMED: bool = False
+    # A model that trains on inputs (Gemini free tier) starts only when this is true AND ENVIRONMENT=development.
+    LLM_ALLOW_TRAINING_PROVIDERS: bool = False
+    # Timeouts in seconds (plan 7.4): TCP + TLS, request sent to first token, gap between tokens, whole answer.
+    LLM_TIMEOUT_CONNECT: float = Field(default=5.0, gt=0, le=600)
+    LLM_TIMEOUT_FIRST_TOKEN: float = Field(default=10.0, gt=0, le=600)
+    LLM_TIMEOUT_IDLE: float = Field(default=15.0, gt=0, le=600)
+    LLM_TIMEOUT_TOTAL: float = Field(default=45.0, gt=0, le=600)
+    # Output tokens asked of the provider for one chat answer (plan 5.6).
+    CHAT_MAX_OUTPUT_TOKENS: int = Field(default=600, ge=1, le=4096)
+    # Provider keys: from the environment or a secret manager only, never in a file of the repository.
+    # SecretStr keeps them out of repr(), str(), model_dump() and validation errors.
+    GROQ_API_KEY: SecretStr = SecretStr("")
+    OPENROUTER_API_KEY: SecretStr = SecretStr("")
+    GEMINI_API_KEY: SecretStr = SecretStr("")
+
     # ── Derived helpers ─────────────────────────────────────────────────────
     @property
     def is_development(self) -> bool:
@@ -211,6 +234,11 @@ class Settings(BaseSettings):
         if self.EMBEDDING_WARM_AT_STARTUP is None:
             return not self.is_development
         return self.EMBEDDING_WARM_AT_STARTUP
+
+    @property
+    def llm_answer_chain(self) -> tuple[str, ...]:
+        """LLM_ANSWER_CHAIN as a tuple of model keys (blank entries dropped, order kept)."""
+        return tuple(part.strip() for part in self.LLM_ANSWER_CHAIN.split(",") if part.strip())
 
     @property
     def cors_origins(self) -> list[str]:
@@ -289,6 +317,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RETRIEVAL_MIN_KEYWORD_COVERAGE above 0 needs the keyword side: set RETRIEVAL_RRF_KEYWORD_WEIGHT above 0"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _llm_timeouts_must_fit_together(self) -> "Settings":
+        # A stage longer than the whole answer could never fire (plan 7.4)
+        if self.LLM_TIMEOUT_FIRST_TOKEN > self.LLM_TIMEOUT_TOTAL:
+            raise ValueError("LLM_TIMEOUT_FIRST_TOKEN must not be above LLM_TIMEOUT_TOTAL")
+        if self.LLM_TIMEOUT_IDLE > self.LLM_TIMEOUT_TOTAL:
+            raise ValueError("LLM_TIMEOUT_IDLE must not be above LLM_TIMEOUT_TOTAL")
         return self
 
     @model_validator(mode="after")

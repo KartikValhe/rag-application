@@ -10,7 +10,7 @@ TEST_DATABASE_URL and TEST_REDIS_URL env vars (fall back to .env).
 
 import os
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 
 import pytest
@@ -47,6 +47,7 @@ from tests.fixtures.ml import (  # noqa: F401  (pytest fixtures)
     synthetic_e5,
     synthetic_e5_template,
 )
+from tests.fixtures.network_guard import SocketGuard, socket_guard
 from tests.fixtures.search_api import embed_limit, query_embedder  # noqa: F401  (pytest fixtures)
 from tests.fixtures.worker import ingest_slots, quiet_queue, worker_dbs  # noqa: F401  (pytest fixtures)
 from tests.tier_map import apply_tiers, fast_tier_violation_patches
@@ -139,6 +140,25 @@ def _fast_tier_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
         return
     for target, name, replacement in fast_tier_violation_patches():
         monkeypatch.setattr(target, name, replacement)
+
+
+@pytest.fixture(autouse=True)
+def provider_network_guard(monkeypatch: pytest.MonkeyPatch) -> Iterator[SocketGuard]:
+    """Every test, every tier (plan 11.2): a connection or a name lookup for a real LLM provider host is
+    refused, and the test FAILS at the end even if the code under test caught the error. CI has no provider
+    keys at all. Postgres, Redis and every other host are untouched."""
+    from app.llm.providers import PROVIDER_HOSTS
+
+    with socket_guard(monkeypatch, PROVIDER_HOSTS) as guard:
+        yield guard
+
+
+@pytest.fixture
+def no_network_at_all(monkeypatch: pytest.MonkeyPatch) -> Iterator[SocketGuard]:
+    """Stricter: ANY connect, name lookup or datagram send fails the test (used by the LLM tests, which run
+    with the fake provider only)."""
+    with socket_guard(monkeypatch, None) as guard:
+        yield guard
 
 
 @pytest.fixture

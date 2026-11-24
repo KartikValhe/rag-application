@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.middleware import SecurityHeadersMiddleware, TenantResolutionMiddleware
 from app.core.redis_client import close_redis, get_redis
+from app.llm.policy import check_llm_policy
 from app.services import query_embedding, retrieval
 
 try:
@@ -43,6 +44,9 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Run startup and shutdown tasks."""
+    # Refuse to start with a configuration the plan forbids (training provider, Groq without ZDR attestation,
+    # unknown chain key). It runs first and reads only settings and app/llm/models.json: no network, no Redis.
+    check_llm_policy(settings)
     # One line with the retrieval threshold and whether it was calibrated for the configured model (5d-5).
     retrieval.log_threshold_calibration()
     # Warm up Redis connection pool.

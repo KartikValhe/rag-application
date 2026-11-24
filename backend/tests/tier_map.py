@@ -61,6 +61,12 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_ingest_settings.py": ("fast",),
     "test_document_text.py": ("fast",),
     "test_injection_scan.py": ("fast", "security"),
+    "test_llm_types.py": ("fast", "security"),  # 6a-2: request/event/error types, no tool fields, fixed error text
+    "test_llm_fake.py": ("fast",),  # 6a-2: the scripted fake provider and its call log
+    "test_llm_models_file.py": ("fast",),  # 6a-2: models.json schema validation (unknown keys, pins, trains_on_inputs)
+    "test_llm_settings.py": ("fast", "security"),  # 6a-2: LLM_*/CHAT_* settings, provider keys never shown
+    "test_llm_policy.py": ("fast", "security"),  # 6a-2: allow-list and start-up policy (training, Groq ZDR, chain keys)
+    "test_llm_no_network.py": ("fast", "security"),  # 6a-2: provider-host socket guard, no vendor SDK in app/
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag
