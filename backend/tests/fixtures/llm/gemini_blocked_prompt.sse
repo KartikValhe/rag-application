@@ -1,0 +1,5 @@
+: SYNTHETIC fixture, hand-written for tests (step 6a-3). Not recorded from the provider.
+: promptFeedback.blockReason with no candidates (https://aistudio.google.com/api-reference/generate-content, checked 2026-11-24).
+
+data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}}
+

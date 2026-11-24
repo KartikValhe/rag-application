@@ -1,0 +1,11 @@
+: SYNTHETIC fixture, hand-written for tests (step 6a-3). Not recorded from the provider.
+: Field names from the streamGenerateContent reference (https://aistudio.google.com/api-reference/generate-content/stream-generate-content,
+: checked 2026-11-24): candidates[].content.parts[].text, finishReason, usageMetadata. The page shows no
+: example chunk and no end signal, so the stream here just closes after the last chunk.
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"index":0}],"usageMetadata":{"promptTokenCount":90,"totalTokenCount":90},"modelVersion":"x","responseId":"r1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" नमस्कार","thought":false}]},"index":0}],"usageMetadata":{"promptTokenCount":90,"totalTokenCount":90}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hidden thought","thought":true},{"text":"."}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":90,"candidatesTokenCount":6,"thoughtsTokenCount":3,"totalTokenCount":99}}
+

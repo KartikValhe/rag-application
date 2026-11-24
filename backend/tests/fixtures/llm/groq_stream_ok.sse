@@ -1,0 +1,16 @@
+: SYNTHETIC fixture, hand-written for tests (step 6a-3). Not recorded from the provider.
+: Shape: OpenAI-style chat.completion.chunk; usage as x_groq.usage in the last chunk (plan 7.3).
+: The real shape is to be confirmed by a recording in step 6a-6 (docs/phase6-plan.md, 6a-3 build record).
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning":"thinking about it"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" नमस्कार [S1]"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"x_groq":{"id":"req_1","usage":{"queue_time":0.01,"prompt_tokens":120,"completion_tokens":7,"total_tokens":127}}}
+
+data: [DONE]
+

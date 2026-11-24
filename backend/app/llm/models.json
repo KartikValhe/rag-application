@@ -1,4 +1,23 @@
 {
   "schema_version": 1,
-  "models": []
+  "models": [
+    {
+      "provider": "groq",
+      "model_id": "openai/gpt-oss-120b",
+      "purposes": ["answer"],
+      "trains_on_inputs": false,
+      "rpm": 30,
+      "rpd": 1000,
+      "pinned_on": "2026-11-24"
+    },
+    {
+      "provider": "groq",
+      "model_id": "openai/gpt-oss-20b",
+      "purposes": ["answer"],
+      "trains_on_inputs": false,
+      "rpm": 30,
+      "rpd": 1000,
+      "pinned_on": "2026-11-24"
+    }
+  ]
 }

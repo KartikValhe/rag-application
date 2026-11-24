@@ -1,0 +1,8 @@
+: SYNTHETIC fixture, hand-written for tests (step 6a-3). Not recorded from the provider.
+: Shape from https://openrouter.ai/docs/api-reference/streaming (checked 2026-11-24): HTTP 200, then a chunk with a
+: top-level error object and finish_reason "error". The stream ends after it.
+
+data: {"id":"gen-2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Partial"},"finish_reason":null}]}
+
+data: {"id":"gen-2","object":"chat.completion.chunk","provider":"SomeProvider","error":{"code":502,"message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+

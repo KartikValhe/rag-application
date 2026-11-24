@@ -67,6 +67,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_settings.py": ("fast", "security"),  # 6a-2: LLM_*/CHAT_* settings, provider keys never shown
     "test_llm_policy.py": ("fast", "security"),  # 6a-2: allow-list and start-up policy (training, Groq ZDR, chain keys)
     "test_llm_no_network.py": ("fast", "security"),  # 6a-2: provider-host socket guard, no vendor SDK in app/
+    "test_llm_sse.py": ("fast",),  # 6a-3: the SSE line parser (split bytes, CRLF, comments, limits)
+    "test_llm_adapters.py": ("fast", "security"),  # 6a-3: Groq/OpenRouter/Gemini adapters on httpx.MockTransport (events, errors, timeouts, key canary, no tool fields)
+    "test_llm_logging.py": ("fast", "security"),  # 6a-3: credential keys dropped from logs, httpx loggers at WARNING
+    "test_llm_models_pinned.py": ("fast",),  # 6a-3: pinned models.json entries and their sources in the build record
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag

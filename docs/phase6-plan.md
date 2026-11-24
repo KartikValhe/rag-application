@@ -1346,3 +1346,159 @@ about USD 1.3 a day whatever happens.
   `1 failed, 8 passed in 16.72s`. It existed before this step (its superuser search with no filters runs past the
   5 s statement timeout on the accumulated test database) and is not fixed here.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 96 source files`
+
+### 6a-1b File kind, shared query embedder, warm-up flag · 2026-11-24 · committed as `c5412ebf`
+
+- Built: `Hit.file_kind` (the retrieval detail select now carries `v.file_kind`, so a citation can say "slide 5" or "page 5").
+  The guarded query embedder moved from `documents.py` to `app/services/query_embedding.py`
+  (`process_query_embedder`, `guarded_query_embedder`, `warm_up_embedder`); the test-search route uses it and keeps its
+  503 `search_unavailable` body. New setting `EMBEDDING_WARM_AT_STARTUP` (unset: off in development, on elsewhere; read
+  through `settings.embedding_warm_at_startup`), used by the lifespan after Redis; it holds no database connection and a
+  load failure is logged (class only) without stopping the app. `.env.example` documents it.
+- The test-search response did **not** get `file_kind`: its contract (`docs/api/phase5.md`, `TestSearchHit`) stays as it is,
+  and a test pins that.
+- Tests: `tests/test_query_embedding.py` (tier `fast`, 15 test functions: load and embed failures become `search_unavailable`
+  and log only the class, the log event name is the caller's, the `search_busy` cap, the route takes its loader from the shared
+  module, the warm-up default per environment and the explicit override, the lifespan loads once and holds no connection, a
+  load failure does not stop the app, warming up twice loads once, never raises); `tests/test_retrieval_file_kind.py` (tier
+  `db`, 3 tests: `file_kind` for PDF, PPTX and DOCX hits, also on the manage-scope search with drafts, test-search contract
+  unchanged).
+- The original run lines were not kept in this file. Re-run during 6a-3 (2026-11-24, on the 6a-3 working tree, which does not
+  touch these modules): `run_tests fast tests/test_query_embedding.py`:
+  `============================= 21 passed in 0.10s ==============================` (21 items with parametrisation);
+  `run_tests full tests/test_retrieval_file_kind.py`:
+  `============================== 3 passed in 3.59s ==============================`.
+
+### 6a-2 LLM interface, fake, allow-list, settings · 2026-11-24 · committed as `3bab50cd`
+
+- Built (`app/llm/`): `types.py` (`LLMRequest`, `LLMMessage`, `LLMTimeouts`, `TokenEvent`, `UsageEvent`, `DoneEvent`; frozen
+  slotted dataclasses with **no field** for tools, functions, tool_choice or response_format; text left out of every repr),
+  `errors.py` (`LLMRateLimited`, `LLMUnavailable`, `LLMTimeout`, `LLMBadRequest`, `LLMContentBlocked`, `LLMAuthError`:
+  no free text, only the provider name and the model key, each checked against a pattern; `LLMPolicyError` and
+  `ModelRegistryError` are start-up errors and are not `LLMError`), `client.py` (the `LLMClient` Protocol),
+  `providers.py` (allow-list: groq, openrouter, gemini; the fake is not on it), `models.py` and `models.json` (strict schema:
+  unknown keys, missing pins, wrong types, duplicates and a training provider marked as not training are refused; shipped
+  **empty**), `policy.py` (`check_llm_policy`, called at start-up), `fake.py` (`FakeLLM` with scripts, rules, injected errors,
+  delays and a call log). Settings: `LLM_ANSWER_CHAIN`, `LLM_ZDR_CONFIRMED`, `LLM_ALLOW_TRAINING_PROVIDERS`, the four
+  `LLM_TIMEOUT_*`, `CHAT_MAX_OUTPUT_TOKENS`, and `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` as `SecretStr`.
+  `tests/fixtures/network_guard.py` and a conftest autouse fixture refuse any connection or name lookup for a provider
+  host in every test and fail the test even when the code under test swallows the error.
+- Tests (all `fast`; types, policy, settings and no-network also `security`): `test_llm_types.py`, `test_llm_fake.py`,
+  `test_llm_models_file.py`, `test_llm_settings.py`, `test_llm_policy.py`, `test_llm_no_network.py`.
+- The original run lines were not kept in this file. Re-run during 6a-3 (2026-11-24; `test_llm_no_network.py` is the one file
+  6a-3 changed, see below): `run_tests fast` on those six files:
+  `============================= 288 passed in 1.65s =============================`.
+
+### 6a-3 Provider adapters · 2026-11-24 · not committed
+
+- Built (`app/llm/`): `groq.py`, `openrouter.py`, `gemini.py` (the three adapters, each a few lines over a shared base),
+  `transport.py` (one httpx call, the four timeouts, the SSE reading loop, the order of events), `sse.py` (own SSE line
+  parser: any line ending, a CRLF split between pieces, comments, multi-line data, 256 KiB line cap, strict UTF-8),
+  `errmap.py` (status, stream error and `Retry-After` to the 6a-2 errors), `openai_compat.py` (the chunk reader Groq and
+  OpenRouter share). `app/core/logging.py`: processor `drop_credential_keys` (authorization, api_key / apikey /
+  x-goog-api-key, cookie, password, secret; also inside nested dicts and lists) and `quiet_http_loggers()` (httpx and
+  httpcore at WARNING). `models.json` now holds the two models below.
+- Request bodies (exactly these keys, tested on the final JSON of every adapter): Groq `model, messages, max_completion_tokens,
+  temperature, stream`; OpenRouter the same plus `provider: {"data_collection": "deny", "zdr": true}` on every request;
+  Gemini `systemInstruction, contents, generationConfig{maxOutputTokens, temperature}`. No tools, tool_choice, functions,
+  response_format, stream_options, user or metadata; `request_id`, tenant and conversation ids are never sent. The key
+  goes into `Authorization: Bearer` (Groq, OpenRouter) or `x-goog-api-key` (Gemini) only, never into a URL.
+- Timeouts: `connect` goes to httpx (pool and write get the same value, read gets `total`); first token (request sent to first
+  answer text), idle (gap between two answer texts) and total are deadlines checked before every read. Keep-alive comments,
+  reasoning-only chunks and role chunks count as neither a first token nor a reset of the idle clock. All four end in
+  `LLMTimeout`. Redirects are never followed. Nothing is retried inside an adapter.
+- Event order: tokens, at most one `UsageEvent` (`estimated=False`; none when the provider reports nothing: the budget layer,
+  6a-5, estimates), then one `DoneEvent`, held until the stream ends because usage follows the finish chunk. Once a finish
+  reason has arrived the answer is complete: a stall or a drop after it is not an error.
+- **Status and stream error mapping (plan 7.4)**
+
+| Situation | Error | Chain (7.4) |
+|---|---|---|
+| 400, 413, 422, any other 4xx | `LLMBadRequest` | no fallback |
+| 401 | `LLMAuthError` | no fallback, opens the breaker |
+| 403 Groq, Gemini | `LLMAuthError` | no fallback |
+| 403 OpenRouter (moderation, guardrail) | `LLMContentBlocked` | no fallback |
+| 402 (out of credit), 404 (model gone, or no ZDR-eligible route), 424, 498 (Groq flex full), 499 | `LLMUnavailable` | fallback |
+| 408 | `LLMTimeout` | fallback |
+| 429 | `LLMRateLimited(retry_after_s)`: `Retry-After` as plain seconds, cut to 3600; a date, text, negative, NaN or infinity gives `None` | fallback, cooldown |
+| 5xx, 1xx, 3xx, any 2xx but 200 | `LLMUnavailable` | fallback |
+| httpx connect, read, write or pool timeout; our first-token, idle or total deadline | `LLMTimeout` | fallback |
+| any other httpx error, a connection that drops, bad UTF-8, a line over 256 KiB, text that is not JSON, a chunk of the wrong shape, a stream that ends before a finish reason, `[DONE]` with no finish reason, an unknown finish reason | `LLMUnavailable` | fallback only before the first token (the chain decides) |
+| `finish_reason: content_filter` (Groq, OpenRouter); Gemini `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, `RECITATION`, `IMAGE_*`; Gemini `promptFeedback.blockReason` | `LLMContentBlocked` | no fallback |
+| a tool call (`delta.tool_calls`, `function_call`, `finish_reason: tool_calls`; Gemini `functionCall`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `TOO_MANY_TOOL_CALLS`) | `LLMBadRequest` | no fallback |
+| an `error` object inside a 200 stream (OpenRouter mid-stream error) | by its `code` through the same table (a number, or a known name such as `RESOURCE_EXHAUSTED`); no usable code gives `LLMUnavailable` | as above |
+
+- **Pinned models** (`models.json` has no field for a source, so the source is recorded here; `test_llm_models_pinned.py` fails
+  if an entry has no line below with a URL, its pin date and the same limits):
+  - `groq:openai/gpt-oss-120b` · purposes: answer · RPM 30 · RPD 1000 · pinned 2026-11-24 · id: https://console.groq.com/docs/models
+    (listed under "Production Models", 2026-11-24) · limits: https://console.groq.com/docs/rate-limits (2026-11-24)
+  - `groq:openai/gpt-oss-20b` · purposes: answer · RPM 30 · RPD 1000 · pinned 2026-11-24 · id: https://console.groq.com/docs/models
+    (listed under "Production Models", 2026-11-24) · limits: https://console.groq.com/docs/rate-limits (2026-11-24)
+  - `trains_on_inputs` is false for both: Groq's data page (https://console.groq.com/docs/your-data, 2026-11-24) says "By default,
+    Groq does not retain customer data for inference requests"; ZDR can be enabled in Data Controls; data stays in the US.
+  - **Caveats on these limits.** The rate-limits page shows one table (30 RPM, 1K RPD, 8K TPM, 200K TPD for both models) under the tabs
+    "Free Plan Limits" and "Developer Plan Limits", and the text I could read does not say which tab the table belongs to. The models
+    page shows different figures for the paid plan (250K TPM, 1K RPM). The pinned values are the table's, which are also the lower
+    ones. **TPM 8K and TPD 200K are not pinned: the schema holds only rpm and rpd.** At about 3,700 tokens an answer that is about two
+    answers a minute and about 50 a day: this matters for Q1 and for 6a-4. Prices were not recorded.
+- **Left out of `models.json`, on purpose (nothing guessed):**
+  - `groq:llama-3.3-70b-versatile` and `groq:llama-3.1-8b-instant`: the ids exist (models page, "Production Models") but that page shows
+    "ContactSales" in place of rate limits and the rate-limits page has no row for them; the schema requires rpm and rpd. The condense
+    model of plan 7.2 (`llama-3.1-8b-instant`) therefore cannot be in a chain yet. The owner can read the figures in the Groq console and
+    add the entries, or 6a-5 chooses another condense model.
+  - OpenRouter: no `:free` id could be verified (the pages for `openai/gpt-oss-120b:free`, `openai/gpt-oss-20b:free` and
+    `meta-llama/llama-3.3-70b-instruct:free` answered 404, and the model list the fetch returned held ten unrelated entries).
+    `openai/gpt-oss-120b` and `meta-llama/llama-3.3-70b-instruct` (paid) exist (https://openrouter.ai/openai/gpt-oss-120b,
+    https://openrouter.ai/meta-llama/llama-3.3-70b-instruct) but a paid id has "no platform-level request cap"
+    (https://openrouter.ai/docs/api-reference/limits), which the schema (positive rpm and rpd) cannot express, and which of its providers
+    are ZDR-eligible was not shown. Free variants are limited to 20 requests a minute and 50 a day (1000 a day with at least 10 credits
+    bought), same page.
+  - Gemini: the ids exist (`gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` are stable on
+    https://aistudio.google.com/docs/models; `gemini-2.5-flash` is announced to be routed to `gemini-3.5-flash-lite` on 2026-12-01) but
+    the rate-limits page (https://aistudio.google.com/docs/rate-limits) shows no free-tier figures for any flash model, only a link to
+    AI Studio. Free-tier use trains on inputs (https://aistudio.google.com/docs/terms, effective 2026-03-23).
+- **UNVERIFIED (to confirm by a real recording in 6a-6):**
+  1. **Groq stream format.** Groq's pages say a stream is "terminated by a `data: [DONE]` message" and show no chunk. The parser reads the
+     OpenAI-style chunk (`choices[0].delta.content`, `finish_reason`) and takes usage from `x_groq.usage` (plan 7.3) or from a top-level
+     `usage`, whichever is first valid. Whether Groq sends usage at all without `stream_options` is unknown; `stream_options` is not
+     sent (its fields are not documented in the pages read). With no usage the adapter emits no `UsageEvent`.
+  2. **Gemini stream format.** Google's reference lists `candidates[].content.parts[].text`, `finishReason`, `promptFeedback.blockReason`
+     and `usageMetadata` but shows no example stream, no end marker (the connection just closes here) and no `x-goog-api-key` example
+     for this method (its curl examples put `key=` in the URL, which plan 7.6 forbids; the header is documented for the newer
+     Interactions API on the same host). Thinking tokens (`thoughtsTokenCount`) are added to the completion count. Google also says
+     `temperature` is ignored by Gemini 3.6 and newer and "will return 400 errors in a future release": Gemini is development-only.
+  3. **OpenRouter** is documented well (streaming, errors, the `provider` object). Not documented: the exact answer when no route
+     satisfies ZDR. The errors page lists 503 for "no available model provider that meets your routing requirements"; 404 and 503 both
+     map to `LLMUnavailable`. `max_completion_tokens` is used (the parameters page lists it next to the deprecated `max_tokens`).
+  4. **Reasoning models.** On gpt-oss, `max_completion_tokens` also pays for the thinking, so a small limit can end an answer with
+     `finish_reason: length` and little text. The adapters never pass reasoning on. 6a-5 and 6a-6 should size `CHAT_MAX_OUTPUT_TOKENS`
+     from measurements.
+- **Fixtures:** `tests/fixtures/llm/*.sse` are **hand-written** from the providers' documentation (each starts with comment lines that say
+  so and give the source). The plan's recorded streams ("recorded once by the owner with a dev key through `llm_smoke --record`") need
+  6a-6, which does not exist yet and needs a real key; real recordings replace these then.
+- **Existing test changed (approved before the step):** `tests/test_llm_no_network.py::test_the_llm_package_of_this_step_makes_no_network_call`
+  (6a-2) forbade `httpx` anywhere in `app/llm/*.py`. It is now `test_the_llm_package_makes_network_calls_only_through_the_adapter_files`:
+  `httpx` is allowed in `groq.py`, `openrouter.py`, `gemini.py` and `transport.py` (the shared base the three adapters use: one file more
+  than the three that were approved), and every other file of `app/llm/` still may not import it or any other network library.
+- Tests (`tier_map.py` entries added): `test_llm_sse.py` (`fast`), `test_llm_adapters.py` (`fast, security`; `httpx.MockTransport` only, a
+  canary key checked in every URL, body, header, error text, repr, traceback and captured log line on every error path of every adapter,
+  also when the provider's answer echoes the key), `test_llm_logging.py` (`fast, security`), `test_llm_models_pinned.py` (`fast`).
+- Red first: `ModuleNotFoundError: No module named 'app.llm.sse'` (and `app.llm.errmap`; `ImportError: cannot import name
+  'CREDENTIAL_KEY_NAMES' from 'app.core.logging'`); `test_llm_models_pinned.py`: `3 failed` (empty `models.json`, no 6a-3 record).
+- Prove-it (each restored afterwards; a diff of `app/` against a copy taken before is empty): ZDR restriction removed from the OpenRouter
+  body, a `tools` field added to OpenRouter, the Gemini key moved into the URL, a `user` field (the request id) added to Groq, a text-less
+  chunk counting as a token, a timeout error left chained to the httpx error, a drop after the finish chunk raised, OpenRouter 403 mapped to
+  auth, redirects followed, reasoning passed on as text, `Retry-After` not capped, a tool call in the delta ignored, the Gemini model-id check
+  removed, the logging processor not installed, the httpx loggers not quieted, the adapter repr showing the key, an event without its blank
+  line delivered, the SSE line cap removed, the total deadline ignored, the first-token clock not started: each turned a named test red.
+  One break first stayed green (a text-less chunk counted as a token); that exposed a missing test, now added
+  (`test_chunks_with_no_answer_text_do_not_reset_either_clock`), and the same break is red with it.
+- **Existing test that must change, and was NOT changed (waiting for the owner):** `tests/test_llm_models_file.py::test_the_shipped_file_pins_nothing_that_was_not_verified`
+  (6a-2) asserts `models.json == {"schema_version": 1, "models": []}`, with the comment "Plan 6a-3 verifies and pins the real model ids ...
+  Until then the file holds none". 6a-3 is that step, so it fails now that two models are pinned. Proposed change: delete the empty-file
+  assertion and keep the intent in `test_llm_models_pinned.py` (every pinned entry has a source line, a date and the same limits).
+- `run_tests gate`: `= 2 failed, 2555 passed, 11 skipped, 821 deselected, 4 xfailed in 641.39s (0:10:41) =`. The two failures:
+  `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable: search_timeout`, the
+  same failure as in the 6a-1a record: pre-existing, not touched) and the 6a-2 models-file test above. Every other test passed,
+  including the 408 new ones (sse 18, adapters 348, logging 38, models_pinned 4).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 112 source files`

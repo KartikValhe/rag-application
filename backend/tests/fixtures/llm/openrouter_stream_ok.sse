@@ -1,0 +1,18 @@
+: SYNTHETIC fixture, hand-written for tests (step 6a-3). Not recorded from the provider.
+: Shape from https://openrouter.ai/docs/api-reference/streaming (checked 2026-11-24): comment lines,
+: a usage chunk after the finish chunk with a content-free delta that repeats finish_reason, then [DONE].
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1","object":"chat.completion.chunk","provider":"SomeProvider","model":"x/y","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":null}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop","native_finish_reason":"stop"}]}
+
+data: {"id":"gen-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":4,"total_tokens":54}}
+
+data: [DONE]
+

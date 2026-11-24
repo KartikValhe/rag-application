@@ -145,13 +145,19 @@ def test_no_vendor_sdk_is_imported_anywhere_in_the_app() -> None:
     assert offenders == {}
 
 
-def test_the_llm_package_of_this_step_makes_no_network_call() -> None:
-    # 6a-2 builds the interface, the fake and the policy. Real adapters (httpx) arrive in 6a-3.
-    network_modules = {"httpx", "socket", "ssl", "urllib", "requests", "aiohttp", "http", "asyncio.streams"}
+# Step 6a-3: the adapters talk to the providers over httpx. Only these files may import it (the three adapters
+# and the one transport module they share); every other file of app/llm stays free of network code, and no file
+# of app/llm may use any other network library.
+HTTPX_FILES = {"groq.py", "openrouter.py", "gemini.py", "transport.py"}
+
+
+def test_the_llm_package_makes_network_calls_only_through_the_adapter_files() -> None:
+    other_network_modules = {"socket", "ssl", "urllib", "requests", "aiohttp", "http", "asyncio.streams"}
     llm_dir = APP_DIR / "llm"
     offenders = {
-        path.name: sorted(_imported_roots(path) & network_modules)
+        path.name: sorted(_imported_roots(path) & (other_network_modules | ({"httpx"} if path.name not in HTTPX_FILES else set())))
         for path in llm_dir.glob("*.py")
-        if _imported_roots(path) & network_modules
+        if _imported_roots(path) & (other_network_modules | ({"httpx"} if path.name not in HTTPX_FILES else set()))
     }
     assert offenders == {}
+    assert {p.name for p in llm_dir.glob("*.py") if "httpx" in _imported_roots(p)} <= HTTPX_FILES
