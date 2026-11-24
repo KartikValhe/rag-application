@@ -3,6 +3,9 @@
 Status: **PLAN ONLY** (2026-11-23). No code, migration or other file was changed to write it. Not committed.
 **Revised 2026-11-24 for the owner review 6-0b** (design revision only: this file is the only file changed). Every change of that
 review is marked "(review 6-0b)" in the text.
+**Revised again 2026-11-24 for the owner review 6-0c** (design revision only: this file is the only file changed). Every change of
+that review is marked "(review 6-0c)": the stale-pending marking now runs through `app_chat_maint` with a column grant (C22), and
+the purge route hands citation blanking to the worker through an outbox table (C21). The extra owner-context helper in `workers/db.py` is gone.
 Source of truth stays `docs/implementation_plan.md` (Phase 6). This plan makes it concrete against the code in `main`
 and the Phase 5 design (`docs/phase5-design.md` Part B, which already fixed the interfaces at a high level).
 Read with: `docs/api/phase5.md` (sections 10-12), `docs/phase5f-plan.md` (closing section), `docs/backend-small-plan.md`,
@@ -108,7 +111,7 @@ BodyLimitMiddleware (32 KB JSON)  →  TenantResolutionMiddleware  →  route
 **Assistant row lifecycle (review 6-0b).** The assistant row exists from T1 on, with `outcome = 'pending'`; its id is the
 `message_id` of the SSE `meta` event. T3 (or the shielded step of 8.6) updates it to its final outcome. If the process dies
 or T3 fails, the row stays `pending`; the sweeper (9.4) marks `pending` rows older than `CHAT_PENDING_STALE_SECONDS` (120) as
-`interrupted`, and the history route reports such a stale row as `interrupted` at read time (no write). The unique index makes
+`interrupted` **through the `app_chat_maint` connection (review 6-0c)**, and the history route reports such a stale row as `interrupted` at read time (no write). The unique index makes
 "at most one assistant row per user message" a database fact, not a test hope, and gives a duplicate request something to point at (8.4).
 
 No database connection is held during the model load, the query embedding or the LLM call. Every transaction sets
@@ -135,8 +138,9 @@ No database connection is held during the model load, the query embedding or the
 | LLM interface, adapters, chain, breaker, budgets | `app/llm/{client,types,errors,groq,openrouter,gemini,chain,breaker,budget,models.json}` | **external HTTPS** |
 | Fake provider for tests | `app/llm/fake.py` (importable by tests and the eval script only) | |
 | Usage accounting | `app/services/llm_usage.py` | DB insert |
-| Retention sweep | `app/workers/sweeper.py` (changed, new task) | worker; deletes through the `app_chat_maint` connection (9.2), per tenant (review 6-0b: was an app_tenant session with a GUC) |
-| Chat maintenance connection (engine for `app_chat_maint`, retention delete, citation blanking, stale-pending lookup) | `app/services/chat_maintenance.py` (new, review 6-0b) | in-process, DB; the only module that reads `CHAT_MAINT_DATABASE_URL` |
+| Retention sweep | `app/workers/sweeper.py` (changed, new task) | worker; deletes, marks stale pending rows and blanks citations through the `app_chat_maint` connection (9.2), per tenant (review 6-0b: was an app_tenant session with a GUC; review 6-0c: marking and blanking added, no owner-context helper) |
+| Chat maintenance connection (engine for `app_chat_maint`, retention delete, stale-pending marking, citation-blank queue drain) | `app/services/chat_maintenance.py` (new, review 6-0b; extended in 6-0c) | in-process, DB, **worker only**; the only module that reads `CHAT_MAINT_DATABASE_URL`, and the API never imports it (review 6-0c) |
+| Citation-blank outbox (one insert in the purge transaction) | `api/v1/documents.py` `purge_document` and the sweeper's tombstone purge (changed, review 6-0c); table `chat_citation_blank_queue` (9.1) | in-process, DB (`app_tenant` INSERT only) |
 | Phase 7 hooks | `app/services/guardrails.py` (`GuardrailPipeline`, two real checks, rest no-op) | |
 | Operator scripts | `app/scripts/llm_smoke.py`, `app/scripts/eval_chat.py` | development only |
 
@@ -709,7 +713,17 @@ UNIQUE on messages). **`chunk_id`, `document_id`, `version_id` are plain snapsho
 deleted at every publish, and a citation must stay readable. Index `(tenant_id, document_id)` so a document **purge** can blank
 `snippet` and `heading_path` of its citations (*proposed*: a purged document's text should not live on in snippets). Review 6-0b:
 the blanking runs as the `app_chat_maint` role (9.2), which holds `UPDATE (snippet, heading_path)` on this table and nothing else; the tenant routes
-never update a citation row after it is inserted.
+never update a citation row after it is inserted. Review 6-0c: the blanking is triggered through the outbox table below, never called
+from the API process.
+
+**`chat_citation_blank_queue`** (review 6-0c, the outbox for document-purge blanking, C21): `tenant_id`, `id`, `document_id` (uuid NOT
+NULL, a plain snapshot reference like the citation's: the document row is gone when this row is read, so **no FK**), `created_at`
+(timestamptz NOT NULL DEFAULT now()). PK `(tenant_id, id)`; RLS ENABLE + FORCE; FK `(tenant_id)` to `tenants` CASCADE; index `(tenant_id,
+created_at)` for the drain. No `user_id` (it holds no chat content), so there is no `chat_owner` policy on it. Grants: `app_tenant`
+**INSERT only**; `app_chat_maint` SELECT, DELETE. The purge route inserts one row **in the same transaction as the purge** (so a
+rolled-back purge leaves no row, and a committed purge always leaves one), without `RETURNING` (no SELECT grant). The sweeper reads the
+rows, blanks the citations of each document and deletes the queue row (9.4); the blanking is idempotent, so a crash between the two
+steps only repeats it.
 
 **`message_feedback`**: `tenant_id, id, message_id, user_id, rating smallint CHECK in (1, -1), comment text NULL CHECK <= 500,
 created_at, updated_at`; UNIQUE `(tenant_id, message_id, user_id)`; composite FK to messages CASCADE; a trigger-free check in the
@@ -722,19 +736,22 @@ interrupted), attempt, created_at`. No content of any kind. Index `(tenant_id, c
 
 ### 9.2 Row-level security and grants
 Review 6-0b: the table now has a fifth column for the new maintenance role; the `app.chat_maintenance` setting is gone.
+Review 6-0c: `messages` gets a column-level UPDATE grant and split `chat_maint` policies; the new outbox table is added.
 
 | Table | `tenant_isolation` (existing predicate) | `chat_owner` (RESTRICTIVE, **TO app_tenant only**) | `chat_maint` (PERMISSIVE, TO app_chat_maint) | `app_tenant` grants | `app_chat_maint` grants | Other roles |
 |---|---|---|---|---|---|---|
 | `tenant_settings` | yes | no | no | SELECT, INSERT, UPDATE | none | none |
 | `conversations` | yes | yes | yes | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE | none |
-| `messages` | yes | yes | yes | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE | none |
+| `messages` | yes | yes | yes, **split into SELECT, DELETE and UPDATE policies** (review 6-0c) | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE, **UPDATE (outcome, partial, completed_at)** (review 6-0c) | none |
 | `message_citations` | yes | yes | yes | SELECT, INSERT, DELETE (**no UPDATE any more**, review 6-0b) | SELECT, DELETE, **UPDATE (snippet, heading_path)** | none |
 | `message_feedback` | yes | yes | yes | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE | none |
 | `llm_usage_events` | yes | no | yes | SELECT, INSERT (**no DELETE any more**: the retention delete moved to `app_chat_maint`) | SELECT, DELETE | none |
+| `chat_citation_blank_queue` (review 6-0c) | yes | no (no `user_id`) | yes | **INSERT only** | SELECT, DELETE | none |
 
 `app_platform` and `app_worker` get **nothing** on these tables; `anon` and `authenticated` are revoked (the `_secure_table`
 helper of `0008`). The superadmin never reads chat content. `app_chat_maint` gets nothing on any other table (not `tenants`,
-not `documents`, not `audit_log`), no INSERT anywhere, and no UPDATE anywhere except the two citation columns.
+not `documents`, not `audit_log`), no INSERT anywhere, and no UPDATE anywhere except the two citation columns and the three `messages`
+columns above (review 6-0c).
 
 **Owner policy** (defence in depth against a forgotten `WHERE user_id`; review 6-0b: no maintenance bypass inside it):
 ```sql
@@ -742,43 +759,64 @@ CREATE POLICY chat_owner ON app.messages AS RESTRICTIVE FOR ALL TO app_tenant
   USING      (user_id = NULLIF(current_setting('app.user_id', true), '')::uuid)
   WITH CHECK (user_id = NULLIF(current_setting('app.user_id', true), '')::uuid);
 
--- the maintenance role: its own permissive policy, the current tenant only, no owner condition
-CREATE POLICY chat_maint ON app.messages AS PERMISSIVE FOR ALL TO app_chat_maint
-  USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+-- the maintenance role on messages (review 6-0c): three permissive policies, the current tenant only, no owner condition
+CREATE POLICY chat_maint_select ON app.messages AS PERMISSIVE FOR SELECT TO app_chat_maint
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY chat_maint_delete ON app.messages AS PERMISSIVE FOR DELETE TO app_chat_maint
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+-- the sweeper marks stale pending rows: only an assistant row that is still pending can be touched
+CREATE POLICY chat_maint_update ON app.messages AS PERMISSIVE FOR UPDATE TO app_chat_maint
+  USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+              AND role = 'assistant' AND outcome = 'pending')
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+GRANT UPDATE (outcome, partial, completed_at) ON app.messages TO app_chat_maint;  -- no other column, review 6-0c
 ```
-(The same two policies, with the table name changed, go on `conversations`, `message_citations` and `message_feedback`; `llm_usage_events`
-and the policy for it get only the `chat_maint` one. `tenant_isolation` has no `TO` clause, so it already applies to every role, `app_chat_maint`
-included, and `chat_owner` being `TO app_tenant` is what keeps the owner condition off the maintenance role. `chat_maint` repeats the tenant
-condition on purpose so that this role's reach does not depend on `tenant_isolation` staying as it is.)
+(On `conversations`, `message_citations`, `message_feedback`, `llm_usage_events` and `chat_citation_blank_queue` the maintenance role keeps
+one `chat_maint` PERMISSIVE `FOR ALL` policy with the tenant condition in `USING` and `WITH CHECK`; the grants bound it to SELECT, DELETE (and
+the two citation columns). `chat_owner` also goes on `conversations`, `message_citations` and `message_feedback` with the table name changed;
+`llm_usage_events` and the queue table get no `chat_owner` (no `user_id`). `tenant_isolation` has no `TO` clause, so it already applies to every
+role, `app_chat_maint` included, and `chat_owner` being `TO app_tenant` is what keeps the owner condition off the maintenance role. The
+`chat_maint` policies repeat the tenant condition on purpose so that this role's reach does not depend on `tenant_isolation` staying as it is.)
+
+**What the `messages` UPDATE can and cannot do (review 6-0c).** Three layers bound it: the column grant (only `outcome`, `partial`,
+`completed_at`; it cannot change `role`, `user_id`, `content` or the tenant), the `USING` condition (it can only see assistant rows that are
+`pending`, so a finished assistant row, a user row and another tenant's row are untouchable) and `WITH CHECK` (tenant only, so the new row
+still belongs to the tenant). The target value of `outcome` is not bounded by a policy; the sweeper only ever writes `interrupted`, and
+the test (11.1) and the prove-it (11.4) pin that a finished assistant row and every other column are refused.
 
 - **Why the old design failed (review 6-0b).** The first draft let the maintenance transaction see every row through
   `OR app.chat_maintenance = 'on'` in `USING`, but `WITH CHECK` still required `user_id = app.user_id`, which Postgres applies to the new row of every
   UPDATE, so blanking another user's citation row was refused.
 - `chat_session_context(tenant_id, user_id)` sets both `app.tenant_id` and `app.user_id` transaction-locally. Every chat route
   uses it; with no `app.user_id` a query sees zero chat rows (fails closed).
-- **Which connection the sweeper uses (review 6-0b).** A new setting **`CHAT_MAINT_DATABASE_URL`** (a `SecretStr`, like `WORKER_DATABASE_URL`,
-  added to the test-DB guard list in `app/core/test_db_guard.py`) holds the `app_chat_maint` credentials. Only `app/services/chat_maintenance.py`
-  reads it and builds the engine. The sweeper uses it for: the retention delete, the `llm_usage_events` delete, the **lookup** of stale
-  `pending` rows (marking them is not done with this role, see 9.4: it has no UPDATE on `messages`) and the citation blanking. Tenant ids still come from the sweeper's existing claim connection (`app_worker`, `SELECT id FROM
+- **Which connection the sweeper uses (review 6-0b, extended in 6-0c).** A new setting **`CHAT_MAINT_DATABASE_URL`** (a `SecretStr`, like `WORKER_DATABASE_URL`,
+  added to the test-DB guard list in `app/core/test_db_guard.py`) holds the `app_chat_maint` credentials. **It lives only in the worker
+  process; the API never reads it** (review 6-0c). Only `app/services/chat_maintenance.py` reads it and builds the engine. The sweeper uses
+  it for: the retention delete, the `llm_usage_events` delete, the **lookup and the marking** of stale `pending` rows (the column UPDATE
+  grant of 9.2; no owner-context session and no extra `workers/db.py` helper) and the citation blanking from the queue (9.4). Tenant ids still come from the sweeper's existing claim connection (`app_worker`, `SELECT id FROM
   app.tenants` only), because `app_chat_maint` cannot read `tenants`. For each tenant the sweeper opens a maintenance transaction
-  that sets `app.tenant_id` (transaction-local, through a trusted helper like the worker's tenant guard) and does nothing else.
+  that sets `app.tenant_id` (transaction-local, through the `set tenant` helper inside `chat_maintenance.py`) and does nothing else.
   The audit row of a purge is written in a separate `app_tenant` session (`app_chat_maint` has no grant on `audit_log`, 9.4).
-- **Document-purge blanking** is called from two places that delete documents: the admin purge route (an API process) and the
-  sweeper's tombstone purge. Both call one function in `chat_maintenance.py`, so **the API process also needs `CHAT_MAINT_DATABASE_URL`**
-  (see Conflicts C21). The URL is optional in development and tests; when it is missing the blanking is skipped with a warning log
-  (code only) and the owner script `chat_report` shows the count of citations of purged documents that were not blanked.
+- **Document-purge blanking goes through the outbox (review 6-0c, C21).** The two places that delete documents, the admin purge route (an
+  API process) and the sweeper's tombstone purge (which runs in a tenant session), do **not** call the maintenance role. Each inserts one
+  `chat_citation_blank_queue` row for the document in the same transaction as the purge, as `app_tenant` (INSERT only). The sweeper, which
+  holds the URL, drains the queue (9.4). So the API process needs no `CHAT_MAINT_DATABASE_URL`, and an API without the worker only
+  grows the queue; nothing is lost. The owner script `chat_report` shows the queue depth and the age of the oldest row.
 - The role is created where the other roles are (`infra/postgres/init.sql`, `prepare_test_db`, CI setup, the production runbook);
   migration `0013` checks that it exists (the `_require_role` pattern of `0008`) and fails with a clear message if not. The dev
   database `ragplatform` gets the role by a one-off statement the owner runs; no agent runs experiments there (CLAUDE.md).
 - A **source-scan test** fails if `CHAT_MAINT_DATABASE_URL`, the maintenance engine or `chat_maintenance` is referenced in `app/`
-  outside `chat_maintenance.py`, the sweeper and the document-purge path (the `for_operator` pattern), and a second scan fails if the
+  outside `chat_maintenance.py`, `core/config.py` (the setting itself), `core/test_db_guard.py` and the worker (`workers/sweeper.py` and the
+  wiring that builds it) (the `for_operator` pattern). **Review 6-0c:** the document-purge path is no longer on the allowed list: nothing
+  under `app/api/`, `app/main.py` or any other service may read the URL or import `chat_maintenance`. A second scan fails if the
   string `chat_maintenance` appears as a Postgres setting anywhere (so the old bypass cannot come back).
 - Foreign-key cascades (user, class deletion) are not subject to RLS (Postgres runs referential actions as the owner); a test
   confirms the cascade still works with the policy in place.
 - Admin reading (Q4, later): would add a separate, audited code path with its own setting, not a widening of this policy.
-- Honest limit: a process that holds the maintenance URL (the sweeper, and the API for purge blanking) can read and delete chat
-  rows of the tenant it sets. The grants bound what that role can do (no INSERT, no other tables, two updatable columns); they
+- Honest limit: a process that holds the maintenance URL (the worker only, review 6-0c) can read and delete chat
+  rows of the tenant it sets. The grants bound what that role can do (no INSERT, no other tables, five updatable columns: two on citations,
+  three on pending assistant rows); they
   do not stop code in that process from setting another tenant id. Code review and the source scan are the control for that, as in `workers/db.py`.
 
 ### 9.3 Who can read a conversation
@@ -792,19 +830,23 @@ readable by `settings:manage` in aggregate later (Phase 8 usage page).
   `last_message_at` is older than `chat_retention_days` (cascades messages, citations, feedback), in batches of 500, and
   `llm_usage_events` older than `LLM_USAGE_RETENTION_DAYS` (400). Audited once per run per tenant as `chat:retention_purge` with
   counts only (system actor); the audit row is written in a separate `app_tenant` session, because `app_chat_maint` has no grant on `audit_log`.
-- **Stale pending rows (review 6-0b):** each run, the sweeper looks up (through `app_chat_maint`, SELECT only) assistant rows with
-  `outcome = 'pending'` and `created_at` older than `CHAT_PENDING_STALE_SECONDS` (120), and marks them `interrupted` (`partial = true`,
-  `completed_at` set). `app_chat_maint` has no UPDATE on `messages` (owner decision), so the marking UPDATE runs in an `app_tenant`
-  session opened with `chat_session_context(tenant_id, owner_user_id)` for each owner found, i.e. the normal owner policy holds and
-  nothing is widened. This needs one more trusted helper in `workers/db.py` (a tenant session that also sets `app.user_id`), and
-  is listed as a conflict (C22) for the owner to confirm or to replace by a column grant. The row stays readable as `interrupted` at
-  read time even before the sweeper runs (2.1).
+- **Stale pending rows (review 6-0b, changed in 6-0c, C22):** each run, per tenant, the sweeper marks assistant rows with
+  `outcome = 'pending'` and `created_at` older than `CHAT_PENDING_STALE_SECONDS` (120) as `interrupted` (`partial = true`,
+  `completed_at` set) with **one UPDATE through `app_chat_maint`**, in the same tenant-set maintenance transaction as the other steps.
+  The role holds `UPDATE (outcome, partial, completed_at)` on `messages` and the `chat_maint_update` policy of 9.2 limits it to pending
+  assistant rows of the current tenant, so a finished row is untouchable. There is no owner-context `app_tenant` session and no extra
+  helper in `workers/db.py`. The row stays readable as `interrupted` at read time even before the sweeper runs (2.1).
 - **Student delete:** `DELETE /conversations/{id}` removes it at once (hard delete, cascade). Usage events keep their numbers
   (no content, `message_id` dangling by design). Audited as `chat:conversation_delete` with the conversation id and message
   count only.
 - **User deactivation:** chats stay until retention (a deactivated user cannot log in). Anonymisation on user deletion is Phase 9.
-- **Document purge:** blanks `snippet` and `heading_path` of citations pointing at it (9.1), through the `app_chat_maint`
-  connection (the admin purge route and the sweeper's tombstone purge both call the same function; review 6-0b).
+- **Document purge (outbox, review 6-0c, C21):** the purge (admin route or the sweeper's tombstone purge) inserts a
+  `chat_citation_blank_queue` row for the document in the same transaction (9.1). Each sweeper run, per tenant, in one maintenance
+  transaction through `app_chat_maint`: read a batch of queue rows, blank `snippet` and `heading_path` of the citations whose
+  `document_id` matches (all users' rows of the tenant), delete the queue rows it handled, commit. A crash before the commit leaves the
+  queue row, and the next run repeats the (idempotent) blanking. Then one `chat:citation_blank` audit row per document, written in a
+  separate `app_tenant` session (counts only). The citations stay readable until the sweeper runs (at most one sweep interval);
+  the purged document's text is gone from the chunks at once, only the snippet copy lags.
 - **Tenant offboarding:** cascades from `tenants` (existing pattern), Redis keys expire on their own (all have TTLs).
 
 ### 9.5 Privacy decisions
@@ -825,7 +867,7 @@ readable by `settings:manage` in aggregate later (Phase 8 usage page).
 | `chat:settings_update` | admin | changed keys with old and new values (provider names, numbers) |
 | `chat:conversation_delete` | owner | conversation id, message count |
 | `chat:retention_purge` | system | conversations, messages, usage events deleted, stale pending rows marked `interrupted` (review 6-0b) |
-| `chat:citation_blank` | system | document id, citation count (on document purge) |
+| `chat:citation_blank` | system | document id, citation count (written by the sweeper when it drains the blank queue after a document purge; review 6-0c) |
 Conversation creation, messages and feedback are **not** audited (high volume, the rows themselves are the record).
 
 ### 9.7 Migration plan (numbered)
@@ -833,18 +875,26 @@ Conversation creation, messages and feedback are **not** audited (high volume, t
    9.2, narrower than the helper's default: no UPDATE and (review 6-0b) no DELETE on usage events for `app_tenant`, no DELETE on settings); backfill one `tenant_settings`
    row per existing tenant; the API inserts a row when a tenant is created (platform create path, in the tenant's context).
    Downgrade drops both. Isolation registry: both in `TENANT_TABLES`.
-2. **`0013_chat.py`**: create `conversations`, `messages`, `message_citations`, `message_feedback` with the composite keys and
+2. **`0013_chat.py`**: create `conversations`, `messages`, `message_citations`, `message_feedback` **and
+   `chat_citation_blank_queue`** (review 6-0c) with the composite keys and
    FKs of 9.1 (including the partial UNIQUE index on `messages (tenant_id, reply_to_id) WHERE role = 'assistant'` and the pending
    index, review 6-0b); `_secure_table` for each, **then narrow the grants** (`_secure_table` grants SELECT, INSERT, UPDATE, DELETE:
-   revoke UPDATE on `message_citations` from `app_tenant`); then the four `chat_owner` RESTRICTIVE policies, `TO app_tenant`, with no
+   revoke UPDATE on `message_citations` from `app_tenant`; **review 6-0c:** revoke SELECT, UPDATE, DELETE on `chat_citation_blank_queue`
+   from `app_tenant`, leaving INSERT only); then the four `chat_owner` RESTRICTIVE policies, `TO app_tenant`, with no
    maintenance bypass. **Review 6-0b:** the migration first checks that the role `app_chat_maint` exists (`_require_role`), then
-   grants it SELECT, DELETE on `conversations`, `messages`, `message_citations`, `message_feedback` and `llm_usage_events`, plus
-   `UPDATE (snippet, heading_path)` on `message_citations`, and creates the five `chat_maint` PERMISSIVE policies `TO app_chat_maint`
-   (9.2; the one on `llm_usage_events`, created in `0012`, is added here so that `0012` does not need the new role). `app_tenant`
-   already has no DELETE on `llm_usage_events` since `0012`. Downgrade drops the policies and
-   the four tables in reverse order and revokes the grants of `app_chat_maint`. Isolation registry: all four, plus a dedicated
+   grants it SELECT, DELETE on `conversations`, `messages`, `message_citations`, `message_feedback`, `llm_usage_events` and
+   `chat_citation_blank_queue`, plus
+   `UPDATE (snippet, heading_path)` on `message_citations` and **(review 6-0c) `UPDATE (outcome, partial, completed_at)` on `messages`**, and creates the
+   `chat_maint` PERMISSIVE policies `TO app_chat_maint` (9.2): **on `messages` three policies (`FOR SELECT`, `FOR DELETE`, and `FOR UPDATE` with `USING`
+   = tenant condition AND `role = 'assistant'` AND `outcome = 'pending'` and `WITH CHECK` = tenant condition only)**, and one `FOR ALL` policy on each of
+   the other four chat-side tables and the queue (the one on `llm_usage_events`, created in `0012`, is added here so that `0012` does not need the new role).
+   `app_tenant` already has no DELETE on `llm_usage_events` since `0012`. Downgrade drops the policies and
+   the five tables in reverse order and revokes the grants of `app_chat_maint`. Isolation registry: all five, plus a dedicated
    owner-isolation test (`CUSTOM_COVERAGE`) because the generic loop sets only `app.tenant_id`, plus a maintenance-role test
-   (it sees only the tenant it set, cannot INSERT, cannot UPDATE any column but the two, cannot touch any other table).
+   (it sees only the tenant it set, cannot INSERT, cannot UPDATE any column but the five granted ones, **cannot update a finished
+   assistant row or a user row, or any other column of a pending one (review 6-0c)**, cannot touch any other table), plus a queue test
+   (`app_tenant` can INSERT and cannot SELECT, UPDATE or DELETE; `app_chat_maint` can SELECT and DELETE and cannot INSERT; another tenant's
+   queue rows are invisible).
 3. Each migration runs `upgrade head` / `downgrade -1` / `upgrade head` in CI (existing job) and has a schema test
    (`test_phase6_schema.py`) for FORCE RLS, the policies, the grants per role and the FK actions.
 4. No data migration of existing tables. Both are additive (expand only); nothing to contract.
@@ -903,8 +953,8 @@ A small `app/scripts/chat_report.py` (development and operators) prints these pe
 | `test_chat_leaks.py` | db, security | canaries (11.2) |
 | `test_chat_route_matrix.py` | db, security | every chat route x role (admin, teacher in scope, teacher out of scope, student enrolled, student not enrolled, other tenant, custom role without `chat:use`): expected status, generated from the route table |
 | `test_chat_logs.py` | db, security | question, answer, chunk and key canaries never appear in captured logs on every path |
-| `test_chat_retention.py` | db | sweep deletes only expired, **only through the `app_chat_maint` connection** (the `app_tenant` role cannot delete another user's rows or any usage event), audit counts (written by an `app_tenant` session); purge blanking updates `snippet` and `heading_path` of other users' citations (the case the old design broke) and nothing else; stale `pending` rows are marked `interrupted` by the sweeper (fake clock), fresh ones are not (review 6-0b) |
-| `test_phase6_schema.py` | db, security | FORCE RLS, policies, grants per role (incl. `app_chat_maint`: SELECT, DELETE, the one column UPDATE, no INSERT, no other table), FK actions, the partial unique index on assistant `reply_to_id`, isolation registry guard; source scans for the maintenance URL and for the retired `chat_maintenance` setting (review 6-0b) |
+| `test_chat_retention.py` | db | sweep deletes only expired, **only through the `app_chat_maint` connection** (the `app_tenant` role cannot delete another user's rows or any usage event), audit counts (written by an `app_tenant` session); purge blanking updates `snippet` and `heading_path` of other users' citations (the case the old design broke) and nothing else; stale `pending` rows are marked `interrupted` by the sweeper **through `app_chat_maint`** (fake clock), fresh ones are not (review 6-0b, 6-0c). **Review 6-0c, outbox:** the purge route inserts exactly one queue row in the purge transaction (and none when the purge rolls back); the sweeper blanks the citations of that document for all users, deletes the queue row, and a run that fails before commit leaves the row so the next run repeats it; the API process works with `CHAT_MAINT_DATABASE_URL` unset |
+| `test_phase6_schema.py` | db, security | FORCE RLS, policies, grants per role (incl. `app_chat_maint`: SELECT, DELETE, the column UPDATEs on citations and on `messages`, no INSERT, no other table; `app_tenant`: INSERT only on the queue), FK actions, the partial unique index on assistant `reply_to_id`, isolation registry guard; source scans for the maintenance URL (worker only, the API never reads it) and for the retired `chat_maintenance` setting (review 6-0b, 6-0c). **Review 6-0c, maintenance-role UPDATE test:** as `app_chat_maint` with the tenant set, an UPDATE of a finished assistant row (any outcome but `pending`) changes zero rows, an UPDATE of a user row changes zero rows, an UPDATE of any column outside `outcome`, `partial`, `completed_at` (`content`, `role`, `user_id`, `tenant_id`) is refused by the grant, and marking a stale pending assistant row `interrupted` works |
 | `test_auth_released_session.py` | db, security | the B100 fix: no connection held after the permission check (pool introspection) |
 | `test_sse_transport.py` | db | stream not buffered through the middleware stack; disconnect reaches the generator (F11) |
 | `test_eval_chat_script.py` | fast | harness parsing, refusal and citation metrics with a scripted fake |
@@ -935,7 +985,10 @@ provider host (all tiers); CI has no provider keys at all.
 Each breaks one defence on purpose and checks that a named test goes red: remove the owner `WHERE` (owner policy holds; then
 also drop the policy in a test transaction: the test fails); **(review 6-0b)** grant `app_tenant` `UPDATE` on `message_citations`
 again, or widen the maintenance role (an INSERT grant, an UPDATE on all citation columns, a `chat_maint` policy without the
-tenant condition): the maintenance-role test fails; run the retention sweep through an `app_tenant` session instead of `app_chat_maint`
+tenant condition): the maintenance-role test fails; **(review 6-0c)** widen the `messages` UPDATE of the maintenance role (grant UPDATE on
+`content` or on all columns, or drop `role = 'assistant' AND outcome = 'pending'` from the `chat_maint_update` USING): the test that the role
+cannot update a finished assistant row or any other column fails; give `app_tenant` SELECT on the blank queue, or make the purge skip the queue
+insert: the queue test and the blanking test fail; run the retention sweep through an `app_tenant` session instead of `app_chat_maint`
 (it deletes nothing for other users: the retention test fails); build the scope from `class_id` without `authorized_pairs` (leak test
 fails); let `search_for_chat` return hits when insufficient (not-found test fails); turn the label filter off (forgery test fails);
 log the question (log test fails); keep the permission session open (B100 test fails); skip the verdict gate (refusal test fails).
@@ -1021,13 +1074,17 @@ high-effort model.
 - Builds: `0013_chat.py`, ORM models (including the assistant `pending` outcome and the partial unique index), `chat_session_context`,
   isolation registry, owner-isolation custom test. **Review 6-0b:** the role `app_chat_maint` (LOGIN, NOSUPERUSER, NOBYPASSRLS) in
   `infra/postgres/init.sql`, `prepare_test_db` and the CI setup; the setting `CHAT_MAINT_DATABASE_URL` (and its entry in
-  `test_db_guard.py`); `app/services/chat_maintenance.py` (engine, `set tenant` helper, delete and blanking functions); the grants and the
-  `chat_maint` policies of 9.2; the narrowed `app_tenant` grants; the two source scans (maintenance URL only in the allowed modules,
-  no `chat_maintenance` Postgres setting). The old maintenance-flag scan is removed.
-- Tests first: `test_phase6_schema.py`, `test_chat_isolation.py` (incl. prove-it variants), the maintenance-role test.
+  `test_db_guard.py`); `app/services/chat_maintenance.py` (engine, `set tenant` helper, delete, stale-pending marking and queue-drain
+  blanking functions; worker only); the new table `chat_citation_blank_queue` with its model, registry entry and narrowed grants (review 6-0c);
+  the grants (including `UPDATE (outcome, partial, completed_at)` on `messages`) and the
+  `chat_maint` policies of 9.2 (three on `messages`, review 6-0c); the narrowed `app_tenant` grants; the two source scans (maintenance URL only in the worker and its
+  allowed modules, the API never reads it; no `chat_maintenance` Postgres setting). The old maintenance-flag scan is removed.
+- Tests first: `test_phase6_schema.py`, `test_chat_isolation.py` (incl. prove-it variants), the maintenance-role test (incl. the
+  finished-assistant-row and other-column cases of 11.1, review 6-0c), the queue grants test.
 - Acceptance: with only `app.tenant_id` set, chat tables show zero rows; owner policy blocks other users even without a `WHERE`;
-  `app_chat_maint` can delete and blank (the two citation columns) across users of its tenant, and cannot read another tenant, INSERT,
-  update anything else or touch other tables; cascades work; downgrade clean.
+  `app_chat_maint` can delete and blank (the two citation columns) across users of its tenant, can mark a pending assistant row
+  `interrupted`, and cannot read another tenant, INSERT, update a finished assistant row or any other column, or touch other tables;
+  `app_tenant` can only INSERT into the blank queue; cascades work; downgrade clean.
 
 **6a-9a Chat API: conversation routes and route matrix** · depends on: 6a-1a, 6a-8 · risk M (review 6-0b: first half of the old 6a-9)
 - Builds: `api/v1/chat.py` with the conversation routes (create, list, get, delete), every route behind `require_released("chat:use")`
@@ -1067,13 +1124,15 @@ high-effort model.
   a provider.
 
 **6a-12 Feedback, history, settings, retention** · depends on: 6a-10 · risk M
-- Builds: feedback routes, message history paging, admin chat settings routes (audited), retention sweep and purge blanking
-  through the `app_chat_maint` connection (9.2, 9.4: the API purge route and the sweeper's tombstone purge both call the blanking
-  function), the stale-`pending` pass (lookup through `app_chat_maint`, marking in an owner-context `app_tenant` session, C22), and the
-  trusted worker helper for that session.
-- Tests first: `test_chat_retention.py`, feedback and settings tests.
+- Builds: feedback routes, message history paging, admin chat settings routes (audited), retention sweep through the
+  `app_chat_maint` connection (9.2, 9.4), the **outbox** for purge blanking (review 6-0c: the API purge route and the sweeper's tombstone purge
+  each insert a `chat_citation_blank_queue` row in the purge transaction; the sweeper drains the queue through `app_chat_maint`, blanks the
+  citations and deletes the queue row), and the stale-`pending` pass (one UPDATE through `app_chat_maint` with the column grant, C22). No
+  owner-context session and no new helper in `workers/db.py`; the API process never reads `CHAT_MAINT_DATABASE_URL`.
+- Tests first: `test_chat_retention.py` (incl. the outbox and stale-pending cases of 11.1), feedback and settings tests.
 - Acceptance: feedback visible in the database (plan exit criterion); retention deletes only expired rows and only through the
-  maintenance role; purge blanking works on other users' citation rows; stale `pending` rows become `interrupted`, fresh ones do not;
+  maintenance role; purge blanking works on other users' citation rows via the queue, repeats after a failed run, and works with
+  the API's maintenance URL unset; stale `pending` rows become `interrupted` through the maintenance role, fresh and finished ones do not;
   settings changes audited without content.
 
 **6a-13 Security suite, leaks, docs, B108 measurement** · depends on: 6a-11, 6a-12 · risk **H** · **HE**
@@ -1134,7 +1193,8 @@ high-effort model.
 | R3 | Indirect prompt injection through an acknowledged or unflagged chunk | medium | Data delimiting with a random boundary, no tools, label filter, flagged marking, UI renders no images or links, measured red-team rates |
 | R4 | Pool exhaustion during streaming (B100) or cold model load (B96) | high if not fixed | 6a-1a first; no transaction across slow steps; warm-up flag (6a-1b) |
 | R5 | Cross-class leakage through a scope bug | low | Scope rebuilt per message from `authorized_pairs`; canary tests on prompts, answers and citations; RLS underneath |
-| R6 | Another student's chat read through a missing `WHERE` | low | Owner RLS policy (no maintenance bypass inside it; the separate `app_chat_maint` role with narrow grants does the sweeps, review 6-0b), prove-it test || R7 | Proxy buffering makes streaming look frozen | medium | Headers, heartbeat, deployment checklist, transport test |
+| R6 | Another student's chat read through a missing `WHERE` | low | Owner RLS policy (no maintenance bypass inside it; the separate `app_chat_maint` role with narrow grants does the sweeps, review 6-0b), prove-it test |
+| R7 | Proxy buffering makes streaming look frozen | medium | Headers, heartbeat, deployment checklist, transport test |
 | R8 | Groq ZDR not available on the free plan, or US processing not acceptable to the institution | medium | Launch gate (6a-6), OpenRouter ZDR-only, paid provider path (Q2) |
 | R9 | Marathi answer quality too low on the chosen model | medium | Measured in 6a-6 before students use it; language can stay disabled |
 | R10 | Token estimates off for Devanagari, budgets wrong | medium | Use provider-reported usage; measure the ratio in 6a-6 |
@@ -1147,7 +1207,7 @@ high-effort model.
 | R17 | Verdict format ignored by a model | medium | Tolerant verdict parsing (whitespace, emphasis, trailing colon; 4.5, review 6-0b); citation requirement as the second line; measured format compliance per model in 6a-6 |
 | R18 | Chat scope stays tied to one class: a student enrolled in two classes must pick one per conversation | low | Explicit picker; history per class |
 | R19 | A turn dies between T1 and T3 and leaves a `pending` assistant row (review 6-0b) | medium | Unique index, 120 s stale rule, sweeper marks `interrupted`, read-time view, duplicate request returns the existing row |
-| R20 | The maintenance credential (`CHAT_MAINT_DATABASE_URL`) sits in the sweeper and the API process (review 6-0b) | low | Narrow grants (no INSERT, two updatable columns, no other table), one module reads it, source scan, honest limit in 9.2 |
+| R20 | The maintenance credential (`CHAT_MAINT_DATABASE_URL`) sits in the worker (review 6-0b; **only the worker since review 6-0c**, the API never reads it) | low | Narrow grants (no INSERT, five updatable columns: two on citations, three on pending assistant rows; no other table), the `messages` UPDATE policy limits it to pending assistant rows, one module reads it, source scan (the API is not on the allowed list), outbox queue instead of an API call, honest limit in 9.2. Side risk: an unreachable worker lets the blank queue grow and the stale `pending` rows stay `pending` (readable as `interrupted` at read time); `chat_report` shows queue depth and oldest age |
 
 ---
 
@@ -1245,10 +1305,10 @@ about USD 1.3 a day whatever happens.
 | C18 | `schedule.get_tenant_zoneinfo` silently falls back to Asia/Kolkata for an invalid timezone string, while the service promises "no silent default" (said for an invisible tenant row) | `services/schedule.py:40-47` vs its docstring and plan Phase 4 "tenant timezone vs server timezone" | Not changed in Phase 6; noted for the backlog (a wrong lecture time in a chat answer would come from here) |
 | C19 | Backlog B96 puts the embedder warm-up in Phase 8; chat makes the cold start user-facing | `backlog.md` B96 vs Phase 6 latency target | Optional flag in 6a-1b (review 6-0b) |
 | C20 | `pyproject.toml` allows `fastapi>=0.115`; installed 0.162. The `yield` dependency exit timing around streaming responses differs across that range | `pyproject.toml` vs environment | Chat holds no dependency session (6a-1a) and a test pins the behaviour; consider a tighter lower bound |
-| C21 | **(review 6-0b)** The document-purge route runs in an **API process**, so blanking citations through `app_chat_maint` there means the API process must hold `CHAT_MAINT_DATABASE_URL` too, not only the sweeper | owner decision 1 (sweeper uses the maintenance role) vs 9.4 "document purge blanks citations" and `documents.py` `purge_document` | Both callers use one function; the URL is optional in development and tests (9.2). Alternative if the owner does not want the secret in the API: the purge route only records the document ids and the sweeper blanks (needs a small outbox table; not planned) |
-| C22 | **(review 6-0b)** The stale-pending marking (owner decision 2) needs an UPDATE on `messages`, but the maintenance role's grants (owner decision 1) allow UPDATE only on two `message_citations` columns | owner decisions 1 and 2 | The sweeper looks up stale rows with `app_chat_maint` (SELECT) and marks them in an owner-context `app_tenant` session (`app.user_id` = the row's owner, so the owner policy still holds), through one more trusted helper in `workers/db.py`. Alternative the owner can choose instead: `GRANT UPDATE (outcome, partial, completed_at) ON messages TO app_chat_maint` (simpler, one more granted column) |
+| C21 | **Decided (review 6-0c): outbox.** (review 6-0b) The document-purge route runs in an **API process**, so blanking citations through `app_chat_maint` there would have meant the API process holds `CHAT_MAINT_DATABASE_URL` too | owner decision 1 (sweeper uses the maintenance role) vs 9.4 "document purge blanks citations" and `documents.py` `purge_document` | New tenant table `chat_citation_blank_queue` (`tenant_id`, `id`, `document_id`, `created_at`; PK `(tenant_id, id)`; RLS ENABLE + FORCE; `app_tenant` INSERT only; `app_chat_maint` SELECT, DELETE), created in `0013`. The purge route inserts a row in the same transaction as the purge; the sweeper blanks the citations and deletes the queue row. `CHAT_MAINT_DATABASE_URL` lives only in the worker; the API never reads it (source scan updated). See 2.2, 9.1, 9.2, 9.4, 9.7, 11.1, R20, 6a-8, 6a-12 |
+| C22 | **Decided (review 6-0c): column grant.** (review 6-0b) The stale-pending marking (owner decision 2) needs an UPDATE on `messages`, but the maintenance role's grants (owner decision 1) allowed UPDATE only on two `message_citations` columns | owner decisions 1 and 2 | `GRANT UPDATE (outcome, partial, completed_at) ON app.messages TO app_chat_maint`. On `messages` only, the `chat_maint` policy is split into `FOR SELECT`, `FOR DELETE` (tenant condition) and `FOR UPDATE` (`USING`: tenant condition AND `role = 'assistant'` AND `outcome = 'pending'`; `WITH CHECK`: tenant condition only). The sweeper marks stale pending rows `interrupted` through `app_chat_maint`. The owner-context `app_tenant` marking and the extra `workers/db.py` helper are removed everywhere (9.2, 9.4, 9.7, 11.1, 11.4, 6a-8, 6a-12). Test and prove-it: the role cannot update a finished assistant row or any other column (11.1, 11.4) |
 | C23 | **(review 6-0b)** The draft tenant token default (300,000) covers about 80 of the ~650 LLM answers that 1,000 questions a day need (about 12%), while Q9 asks to "accept for the pilot" and the cost section assumes 1,000 questions a day | 7.7 vs Q9 and the cost estimate | No new number chosen: both token defaults are marked "set after Q1"; the volume table in 7.7 shows the gap |
-| C24 | **(review 6-0b)** Owner decision 1 removes DELETE on `llm_usage_events` from `app_tenant` (the retention delete moves to `app_chat_maint`); the first draft granted it to `app_tenant` for retention | 9.2 first draft vs decision 1 | Done as a consequence of decision 1: `app_tenant` keeps SELECT, INSERT on usage events. Owner to say if a tenant-side delete is wanted for another reason |
+| C24 | **Decided (review 6-0c): keep as is.** (review 6-0b) Owner decision 1 removes DELETE on `llm_usage_events` from `app_tenant` (the retention delete moves to `app_chat_maint`); the first draft granted it to `app_tenant` for retention | 9.2 first draft vs decision 1 | Done as a consequence of decision 1: `app_tenant` keeps SELECT, INSERT on usage events. No tenant-side delete (owner confirmed in review 6-0c) |
 | C25 | **(review 6-0b)** Fact F11 named step 6a-8 (the migration step) for the transport test, and 5.2 said the system prompt is reviewed in 6a-9 (the API step) | this file, first draft | Corrected to 6a-9b and 6a-10 |
 
 ---
