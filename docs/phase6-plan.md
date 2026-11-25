@@ -1584,3 +1584,118 @@ about USD 1.3 a day whatever happens.
   the same as in the 6a-3 record: `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`
   (pre-existing `search_timeout`) and `test_llm_models_file.py::test_the_shipped_file_pins_nothing_that_was_not_verified` (waiting for the owner).
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 114 source files`
+
+### 6a-5 Migration 0012, usage accounting, daily token budgets · 2026-11-25 · not committed
+
+- Built: `alembic/versions/0012_llm_usage_tenant_settings.py`; models `app/db/models/tenant_settings.py` (`TenantSettings`) and
+  `app/db/models/llm_usage.py` (`LLMUsageEvent`, the purpose and outcome lists, the name patterns); `app/services/tenant_settings.py`
+  (`create_default_settings`, `create_for_new_tenant`, `read_token_budget_override`); `app/services/llm_usage.py` (`record_usage`);
+  `app/services/llm_budget.py` (`TokenBudget`, `default_budget`, `Reservation`, `BudgetExhausted`, the estimate, the override rule);
+  four settings in `config.py` and `.env.example`. **Nothing is wired into a route or the chain** (no caller until 6a-10/6a-11).
+- **Migration 0012 (plan 9.7 step 1).** `tenant_settings`: PK `tenant_id` (plan 9.1: one row per tenant, FK tenants CASCADE), the
+  columns of 9.1 with `CHECK chat_retention_days BETWEEN 1 AND 730` and `CHECK chat_daily_token_budget > 0`, `updated_by` with the
+  composite FK `(tenant_id, updated_by) -> users ON DELETE SET NULL (updated_by)`. `llm_usage_events`: PK `(tenant_id, id)`, the
+  columns of 9.1, `user_id` with the composite FK `(tenant_id, user_id) -> users ON DELETE SET NULL (user_id)`, **no FK on
+  `message_id`**, index `(tenant_id, created_at)`; CHECKs on purpose and outcome (the model's lists), counts `>= 0`, attempt `>= 1`,
+  and the shape of `provider` and `model_key` (the `split_model_key` pattern, and the key must start with `provider:`), so no text
+  fits in a name. Both: `_secure_table` (ENABLE + FORCE RLS, `tenant_isolation`, anon/authenticated revoked), then narrowed:
+  `REVOKE DELETE ON tenant_settings FROM app_tenant`, `REVOKE UPDATE, DELETE ON llm_usage_events FROM app_tenant`, `REVOKE ALL ... FROM
+  app_platform, app_worker`. Result: `tenant_settings` app_tenant SELECT, INSERT, UPDATE; `llm_usage_events` app_tenant SELECT, INSERT;
+  nobody else anything. No `chat_maint` policy and no `app_chat_maint` grant (0013). Backfill `INSERT ... SELECT id FROM app.tenants ON
+  CONFLICT DO NOTHING`, after a check that the migration role is a superuser or has BYPASSRLS (app.tenants has FORCE RLS since 0010;
+  without it the backfill would silently insert nothing). Downgrade drops both tables.
+- **Tenant creation.** `POST /platform/tenants` now writes the tenant and its branding in its own platform transaction, commits, then
+  `tenant_settings.create_for_new_tenant` inserts the default row as **app_tenant in the new tenant's context** (app_platform has no
+  grant; the FK check of the insert cannot see an uncommitted tenants row of another connection). Idempotent (`ON CONFLICT DO
+  NOTHING`). Honest limit: the two steps are not one transaction (see the conflicts below). `app/scripts/seed.py` inserts the same
+  default row for its two demo tenants, because the seed runs after the migration's backfill.
+- **`record_usage(session, *, tenant_id, user_id, message_id, purpose, provider, model_key, prompt_tokens, completion_tokens,
+  estimated, latency_ms, outcome, attempt)`**: keyword-only, no parameter that could hold text. Refuses (with `UsageRecordError`
+  naming the field only, never the value, nothing written) an unknown purpose or outcome, a provider off the allow-list, a model key
+  that is not `provider:model-id` of that provider, a bool or float as a count, a negative count, attempt 0, out-of-range integers,
+  ids that are not UUIDs. Runs in the caller's tenant session; another tenant's row is refused by RLS WITH CHECK.
+- **Budgets (plan 7.7).** Keys `usage:t:{tenant}:d:{yyyymmdd}:tokens` and `usage:platform:d:{yyyymmdd}:tokens`, the UTC day of an
+  injectable clock (a naive datetime is refused).
+  - `reserve(tenant_id, amount, tenant_override=...)` runs ONE Lua script: both limits are checked before anything is written, then
+    INCRBY on both counters; a refusal consumes nothing on either. The amount is `reservation_amount(req)` = estimated prompt (system
+    prompt and every message) + `max_output_tokens`. Exactly filling a budget is allowed, one more token is not.
+  - Exhausted is a returned `BudgetExhausted(scope="tenant"|"platform", limit, used, requested, code="budget_exhausted")`, never an
+    exception (6a-11 turns it into `budget_retrieval_only`).
+  - `settle(reservation, used_tokens)` corrects both counters by `used - reserved` (down or up), once only (a second settle or
+    `release` is a no-op), on the keys of the day the reservation was made (a correction after midnight goes to the old day). A
+    counter never goes below zero. `release()` = settle to 0, for a call that was never made. A reservation never settled (a crash)
+    stays counted: an over-count.
+  - TTL 48 h (`COUNTER_TTL_SECONDS`), set when a counter is first written and never extended by later writes; a correction on a
+    counter Redis lost recreates it at 0 with the TTL.
+  - Limits: `LLM_TENANT_DAILY_TOKENS` 300,000 and `LLM_PLATFORM_DAILY_TOKENS` 2,000,000, **PLACEHOLDERS, set after Q1** (marked so in
+    `config.py` and `.env.example`, unchanged). A start-up check refuses a tenant default above the platform one. The tenant override
+    (`tenant_settings.chat_daily_token_budget`, read by `read_token_budget_override`) replaces the default; one above the platform
+    ceiling is **refused**: the default applies and `llm_budget_override_refused` is logged (my choice; capping at the ceiling was the
+    alternative). `check_budget_override(value)` gives the 6a-12 settings route its 422 codes (`token_budget_invalid`,
+    `token_budget_above_platform_ceiling`).
+  - Estimate when a provider reports nothing: `ceil(other chars / LLM_ESTIMATE_CHARS_PER_TOKEN_LATIN + Devanagari chars /
+    LLM_ESTIMATE_CHARS_PER_TOKEN_DEVANAGARI)`, defaults 3 and 2, exact fractions (no float rounding), Devanagari = U+0900-U+097F and
+    U+A8E0-U+A8FF, everything else (spaces, digits, other scripts) on the Latin ratio. **Still UNVERIFIED**; settings only, so 6a-6 sets
+    them without a code change.
+  - Redis down: `reserve` outside development raises the same 503 `service_unavailable` as SlotManager. **In development (my choice,
+    the same as SlotManager's fallback):** a per-process in-memory counter with the same limits, logged at error level as
+    `llm_budget_redis_unavailable_dev_memory`; the reservation records its backend and is settled only there. `settle` never raises in
+    any environment (`llm_budget_correction_lost` is logged and the full reservation stays counted).
+- Tests (`tier_map.py` entries added): `test_phase6_schema.py` (`db, security`), `test_tenant_settings.py` (`db`), `test_llm_usage.py`
+  (`db`), `test_llm_budget.py` (`db`), `test_llm_budget_pure.py` (`fast`), `security/test_prove_it_fails_usage.py` (`db, security`),
+  shared helpers `tests/security/usage_assertions.py`. `test_isolation.py`: both tables in `TENANT_TABLES` with update probes,
+  `llm_usage_events` in `APPEND_ONLY_TABLES`, new `NO_DELETE_TABLES` (append-only plus `tenant_settings`) for the DELETE probe, and the
+  guard requires both. Concurrency: two tests (10 reservations on one tenant against its limit, 8 tenants against the platform limit)
+  hold the first Redis call of every reservation at an `asyncio.Barrier` until all have sent it, and assert that every reservation was
+  in flight before the first finished (`assert_all_overlapped`), the `claim_round_overlapped` pattern.
+- Red first: `ImportError: cannot import name 'llm_budget' from 'app.services'` (and `tenant_settings`; `No module named
+  'app.db.models.llm_usage'` for the isolation suite); with the code and before the migration: `AssertionError: app.tenant_settings
+  does not exist`, `UndefinedTableError: relation "app.tenant_settings" does not exist` (`109 failed, 38 passed`; the 38 were the Redis
+  budget tests, whose first red was the ImportError).
+- Migration on the **test database only** (`ragplatform_test`, URLs rewritten by `apply_test_database_env`), up, down, up, down, up:
+  each upgrade `Running upgrade 0011 -> 0012` gave `settings_rows=38510 tenants_without_row=0 duplicate_rows=0` for 38,510 tenants;
+  each downgrade `Running downgrade 0012 -> 0011` left neither table.
+- Concurrency, 20 fresh processes each: `test_concurrent_reservations_never_exceed_the_tenant_limit` 20 of 20 passed,
+  `test_concurrent_reservations_never_exceed_the_platform_limit` 20 of 20 passed.
+- Prove-it (test database, every break inside a rolled-back transaction, in `test_prove_it_fails_usage.py`): with the application's
+  tenant filter replaced by `TRUE`, tenant A still reads only its own `tenant_settings` value and only its own `llm_usage_events` rows
+  (RLS alone); the same reads through the superuser show tenant B's rows and the helpers catch it (`MultipleResultsFound`, `rows of
+  other tenants are visible`). A wider grant (UPDATE, DELETE, a column UPDATE on usage events; DELETE on settings; anything for
+  app_platform, app_worker or PUBLIC; UPDATE revoked from settings), `NO FORCE` / `DISABLE ROW LEVEL SECURITY`, and an extra permissive
+  policy each fail the shared assertion and pass again after the rollback.
+- Self-review (each break alone, the named tests run, the file restored; hashes compared): persisted in the test DB and undone:
+  `GRANT UPDATE ON llm_usage_events TO app_tenant` (red: `test_grants_are_exactly_the_plan_for_every_role[llm_usage_events]`,
+  `test_app_tenant_cannot_delete_settings_or_change_usage_rows`, `test_update_cannot_affect_other_tenant_rows[LLMUsageEvent]`,
+  `test_a_usage_row_cannot_be_changed_or_removed_by_the_tenant`), `GRANT DELETE` on it (grants, isolation delete, usage tests red),
+  DELETE on settings, SELECT on settings for app_platform, `NO FORCE ROW LEVEL SECURITY` (`test_rls_is_enabled_and_forced`, the
+  isolation catalog test), a `question` column (`test_llm_usage_events_holds_numbers_and_names_only`), the model-key CHECK dropped
+  (`test_llm_usage_events_checks_refuse`). In code: FORCE removed, backfill removed, backfill without ON CONFLICT, the usage REVOKE
+  removed, a grant to app_platform (migration statement and backfill tests); no settings row on tenant creation, the row written through
+  app_platform (`test_tenant_settings.py`); settle a no-op, no TTL, no TTL after a correction, TTL refreshed on every write, 300,000
+  hard-coded, the Latin ratio hard-coded, an override above the ceiling applied, a tenant INCRBY before the platform check, a
+  read-check-write reserve in Python (both concurrency tests red), exhausted raised, Redis down allowed outside development, settle
+  raising, the correction on today's key, a `question` parameter, the model-key checks removed, the error repeating the value, the
+  isolation registry entry removed: each turned a named test red. No break stayed green. One break left debris: while the model-key
+  CHECK was dropped, the red test committed three bad rows, so the CHECK could not be re-added; those rows were deleted on the test DB,
+  the CHECK restored and 0012 rebuilt (down, up) before the final runs.
+- Not covered by a test that can go red: the seed's settings row (the seed is not run by any test); a failure between the tenant commit
+  and the settings insert (documented, reads as defaults); atomicity across two processes (one process, one Redis, many coroutines; Lua
+  is atomic on the server); the development memory fallback keeps old days' counters until the process ends; the Supabase `anon` /
+  `authenticated` revoke (no such roles locally, as in 0008); that nothing calls the budget or `record_usage` yet (no scan).
+- **Conflicts with the plan, and choices:** (1) 9.7 says the API inserts the settings row "when a tenant is created"; with no
+  app_platform grant (9.2) and an FK that cannot see an uncommitted tenant, it is a second transaction after the tenant commit, not one
+  atomic step. Making it atomic would need `INSERT` for app_platform on `tenant_settings`, against 9.2: owner decision. (2) 7.7 says
+  "6a-5 measures" the ratios against Groq's usage; this step's brief and 6a-6 say the measurement is 6a-6 (no key, no caller here): not
+  measured, still UNVERIFIED. (3) 11.1 puts budget reserve/correct in `test_llm_chain.py`; they are in `test_llm_budget.py`, because
+  nothing is wired into the chain yet. (4) `test_phase6_schema.py` covers 0012 only; its `app_chat_maint` checks and source scans (11.1)
+  belong to 6a-8. (5) Not in the plan, added: the composite FK on `tenant_settings.updated_by`, NOT NULL token counts (a failed call
+  records 0 or the estimate), the CHECKs on purpose, outcome, counts and name shapes. (6) The brief's `python -m tests.run_tests gate`
+  is `python -m app.scripts.run_tests gate` (CLAUDE.md); that is what ran.
+- `run_tests full` on the six new files plus `test_isolation.py`, `test_platform.py`, `test_document_permissions.py`,
+  `test_timetable_endpoints.py`, `test_branding.py`, `test_tenants_rls.py`, `test_security_review.py`, `test_llm_settings.py`,
+  `test_llm_chain.py`, `test_llm_breaker.py`, `test_slots_renew.py`:
+  `======================= 579 passed in 154.28s (0:02:34) =======================`
+- `run_tests gate`: `= 1 failed, 2707 passed, 11 skipped, 1006 deselected, 4 xfailed in 639.17s (0:10:39) =`. The failure is
+  `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable("search_timeout")`,
+  the same pre-existing failure as in the 6a-1a, 6a-3 and 6a-4 records; not touched).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 119 source files`

@@ -25,6 +25,7 @@ from app.db.models.document import (
     IngestJob,
     StorageDeletion,
 )
+from app.db.models.llm_usage import LLMUsageEvent
 from app.db.models.rbac import (
     Permission,
     Role,
@@ -32,6 +33,7 @@ from app.db.models.rbac import (
     UserRole,
 )
 from app.db.models.tenant import PlatformAdmin, Tenant
+from app.db.models.tenant_settings import TenantSettings
 from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 
@@ -63,4 +65,6 @@ __all__ = [
     "ChunkEmbedding",
     "StorageDeletion",
     "IngestJob",
+    "TenantSettings",
+    "LLMUsageEvent",
 ]

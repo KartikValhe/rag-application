@@ -18,7 +18,7 @@ Usage:
 import asyncio
 from datetime import time
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -422,6 +422,13 @@ async def seed() -> None:
                     )
                 )
                 print(f"[OK] Seeded branding for '{slug}'")
+
+            # 6b. Default chat settings row (step 6a-5). Migration 0012 backfills only the tenants that existed when it
+            # ran, and the seed runs after it. Idempotent.
+            await session.execute(
+                text("INSERT INTO app.tenant_settings (tenant_id) VALUES (:t) ON CONFLICT (tenant_id) DO NOTHING"),
+                {"t": tenant.id},
+            )
 
             # 7. Dev Demo Timetable for Acme (Class 10-A and Class 10-B)
             if settings.is_development and slug == "acme":

@@ -54,6 +54,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "security/test_prove_it_fails_review5b3.py": ("db", "subprocess", "security"),
     "security/test_prove_it_fails_uploads.py": ("fast", "security"),
     "security/test_prove_it_fails_worker.py": ("db", "security"),
+    "security/test_prove_it_fails_usage.py": ("db", "security"),  # 6a-5: RLS alone, wider grants, missing FORCE on 0012
     # ── tests that need no infrastructure ──
     "test_body_limit_routes.py": ("fast", "security"),
     "test_chunker.py": ("fast",),
@@ -74,6 +75,11 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_chain.py": ("db",),  # 6a-4: retries, fallback, breaker in the chain, cooldowns, RPM/RPD slots, timeouts (FakeLLM, test Redis)
     "test_llm_breaker.py": ("db",),  # 6a-4: breaker open/half-open/probe and cooldown scripts on the test Redis, fail closed
     "test_llm_chain_imports.py": ("fast", "security"),  # 6a-4: no module but the chain imports an adapter (source scan)
+    "test_llm_budget_pure.py": ("fast",),  # 6a-5: token estimate, budget settings, override rule, keys (no Redis)
+    "test_llm_budget.py": ("db",),  # 6a-5: daily token counters on the test Redis: reserve, correct, exhausted, overlap
+    "test_llm_usage.py": ("db",),  # 6a-5: record_usage writes one content-free llm_usage_events row
+    "test_tenant_settings.py": ("db",),  # 6a-5: one tenant_settings row per tenant, written on tenant creation
+    "test_phase6_schema.py": ("db", "security"),  # 6a-5: migration 0012: FORCE RLS, policies, grants per role, FKs, backfill
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag

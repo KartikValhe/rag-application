@@ -48,12 +48,14 @@ from app.db.models.document import (
     IngestJob,
     StorageDeletion,
 )
+from app.db.models.llm_usage import LLMUsageEvent
 from app.db.models.rbac import (
     Role,
     RolePermission,
     UserRole,
 )
 from app.db.models.tenant import Tenant
+from app.db.models.tenant_settings import TenantSettings
 from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 from app.ml.model_keys import E5_SMALL_DIM, E5_SMALL_MODEL_KEY
@@ -256,6 +258,20 @@ TENANT_TABLES = [
     (ChunkEmbedding, _chunk_embeddings_row),
     (StorageDeletion, _storage_deletions_row),
     (IngestJob, _ingest_jobs_row),
+    # Phase 6 (migration 0012). tenant_settings has one row per tenant (PK tenant_id); the fixtures make fresh
+    # tenants without one, so the harness can insert it. llm_usage_events is append-only for app_tenant.
+    (TenantSettings, {"chat_daily_token_budget": 5000}),
+    (LLMUsageEvent, {
+        "purpose": "answer",
+        "provider": "groq",
+        "model_key": "groq:openai/gpt-oss-120b",
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "estimated": False,
+        "latency_ms": 250,
+        "outcome": "ok",
+        "attempt": 1,
+    }),
 ]
 
 
@@ -379,10 +395,15 @@ UPDATE_PROBES: dict[str, tuple[str, object]] = {
     "chunk_embeddings": ("embedding", [0.02] * E5_SMALL_DIM),
     "storage_deletions": ("reason", "hacked"),
     "ingest_jobs": ("last_error_code", "hacked"),
+    "tenant_settings": ("chat_retention_days", 30),
+    "llm_usage_events": ("latency_ms", 999),
 }
 # Append-only tables: app_tenant has no UPDATE or DELETE grant at all, so "permission denied" is
 # the expected answer there. For every other table the statement must run and affect 0 rows.
-APPEND_ONLY_TABLES = {"audit_log"}
+APPEND_ONLY_TABLES = {"audit_log", "llm_usage_events"}
+# Tables app_tenant may update but never delete from (plan 9.2: tenant_settings has no DELETE grant).
+# Their DELETE probe expects "permission denied" too; their UPDATE probe runs as for any other table.
+NO_DELETE_TABLES = APPEND_ONLY_TABLES | {"tenant_settings"}
 
 
 async def _snapshot(raw_db: AsyncSession, table: str, tenant_id: uuid.UUID) -> list[str]:
@@ -483,8 +504,8 @@ async def test_delete_cannot_affect_other_tenant_rows(
 
     can_delete = await _tenant_role_can(raw_db, table, "DELETE")
     statement = delete(tbl).where(tbl.c.tenant_id == tenant_b.id)
-    if table in APPEND_ONLY_TABLES:
-        assert not can_delete, f"{table} is meant to be append-only"
+    if table in NO_DELETE_TABLES:
+        assert not can_delete, f"{table} must not be deletable by app_tenant"
         with pytest.raises(DBAPIError, match="permission denied"):
             async with tenant_session_context(str(tenant_a.id)) as session:
                 await session.execute(statement)
@@ -814,6 +835,7 @@ NEW_DOCUMENT_TABLES = {
     "storage_deletions",
     "ingest_jobs",
 }
+NEW_PHASE6_TABLES = {"tenant_settings", "llm_usage_events"}  # migration 0012
 
 
 def _orm_tenant_table_names() -> list[str]:
@@ -844,6 +866,7 @@ async def test_guard_every_tenant_table_is_registered_or_explained() -> None:
         )
     assert registered <= known
     assert registered >= NEW_DOCUMENT_TABLES
+    assert registered >= NEW_PHASE6_TABLES
 
 
 async def test_guard_detects_an_unregistered_tenant_table() -> None:

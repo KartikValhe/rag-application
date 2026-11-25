@@ -29,7 +29,7 @@ from app.core.tenant_db import tenant_session_context
 from app.db.engine import PlatformSessionLocal, SessionLocal
 from app.db.models.tenant import PlatformAdmin, Tenant
 from app.schemas.document import DocumentLimitsModel, TenantDocumentLimitsResponse
-from app.services import document_limits
+from app.services import document_limits, tenant_settings
 from app.services.audit import record_audit_event
 from app.services.email import send_temp_password_email
 from app.services.invitation import create_admin_user
@@ -137,46 +137,54 @@ async def list_tenants(
 @router.post("/tenants", response_model=TenantResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(platform_endpoint())])
 async def create_tenant(
     body: TenantCreateRequest,
-    db: PlatformDB,
     _admin: PlatformAdminUser,
 ) -> TenantResponse:
-    """Create a new tenant."""
-    # Check slug uniqueness.
-    existing = await db.execute(select(Tenant).where(Tenant.slug == body.slug))
-    if existing.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "slug_taken", "message": "This slug is already in use."},
-        )
-    tenant = Tenant(
-        slug=body.slug,
-        name=body.name,
-        kind=body.kind,
-        registration_mode=body.registration_mode,
-    )
-    db.add(tenant)
-    await db.flush()
+    """
+    Create a new tenant, its default branding and its default chat settings row.
 
-    # Seed default branding for the new tenant within the same transaction.
-    # Set app.tenant_id locally so the RLS WITH CHECK clause allows the row.
+    The tenant and its branding are written in one platform transaction, which commits before the settings row is
+    written: app_platform has no grant on tenant_settings (plan 9.2), so that row is inserted by app_tenant in the
+    new tenant's own context, and its foreign key check needs the committed tenants row. If the settings insert
+    fails, the route fails and the tenant reads as default settings until the row exists (the insert is idempotent).
+    """
     from sqlalchemy import text
 
     from app.db.models.branding import TenantBranding
     from app.schemas.branding import DEFAULT_TOKENS
 
-    await db.execute(
-        text("SELECT set_config('app.tenant_id', :tid, true)"),
-        {"tid": str(tenant.id)},
-    )
-    branding = TenantBranding(
-        tenant_id=tenant.id,
-        tokens=DEFAULT_TOKENS,
-        display_name=tenant.name,
-        version=1,
-    )
-    db.add(branding)
-    await db.flush()
+    async with PlatformSessionLocal() as db, db.begin():
+        # Check slug uniqueness.
+        existing = await db.execute(select(Tenant).where(Tenant.slug == body.slug))
+        if existing.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "slug_taken", "message": "This slug is already in use."},
+            )
+        tenant = Tenant(
+            slug=body.slug,
+            name=body.name,
+            kind=body.kind,
+            registration_mode=body.registration_mode,
+        )
+        db.add(tenant)
+        await db.flush()
 
+        # Seed default branding for the new tenant within the same transaction.
+        # Set app.tenant_id locally so the RLS WITH CHECK clause allows the row.
+        await db.execute(
+            text("SELECT set_config('app.tenant_id', :tid, true)"),
+            {"tid": str(tenant.id)},
+        )
+        branding = TenantBranding(
+            tenant_id=tenant.id,
+            tokens=DEFAULT_TOKENS,
+            display_name=tenant.name,
+            version=1,
+        )
+        db.add(branding)
+        await db.flush()
+
+    await tenant_settings.create_for_new_tenant(tenant.id)
     return _to_tenant_response(tenant)
 
 

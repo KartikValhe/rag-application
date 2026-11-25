@@ -221,6 +221,18 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_TOTAL: float = Field(default=45.0, gt=0, le=600)
     # Output tokens asked of the provider for one chat answer (plan 5.6).
     CHAT_MAX_OUTPUT_TOKENS: int = Field(default=600, ge=1, le=4096)
+    # ── Daily token budgets (step 6a-5, plan 7.7), counted in Redis per UTC day ──
+    # PLACEHOLDERS, set after Q1: both numbers come from the first draft and are not decisions. They are fixed
+    # only after the owner answers Q1 (paid tier and answer model) and the 6a-6 token measurement. Do not
+    # change them in code: set them in the environment.
+    # Tokens one tenant may use per UTC day when its tenant_settings.chat_daily_token_budget is NULL (set after Q1).
+    LLM_TENANT_DAILY_TOKENS: int = Field(default=300_000, ge=1, le=1_000_000_000)
+    # Tokens all tenants together may use per UTC day; also the ceiling of a tenant override (set after Q1).
+    LLM_PLATFORM_DAILY_TOKENS: int = Field(default=2_000_000, ge=1, le=10_000_000_000)
+    # Token estimate when a provider reports no usage: characters per token. UNVERIFIED ratios (design B1):
+    # step 6a-6 measures them against Groq's reported usage and sets them here, with no code change.
+    LLM_ESTIMATE_CHARS_PER_TOKEN_LATIN: float = Field(default=3.0, gt=0, le=20)
+    LLM_ESTIMATE_CHARS_PER_TOKEN_DEVANAGARI: float = Field(default=2.0, gt=0, le=20)
     # Provider keys: from the environment or a secret manager only, never in a file of the repository.
     # SecretStr keeps them out of repr(), str(), model_dump() and validation errors.
     GROQ_API_KEY: SecretStr = SecretStr("")
@@ -335,6 +347,13 @@ class Settings(BaseSettings):
             raise ValueError("LLM_TIMEOUT_FIRST_TOKEN must not be above LLM_TIMEOUT_TOTAL")
         if self.LLM_TIMEOUT_IDLE > self.LLM_TIMEOUT_TOTAL:
             raise ValueError("LLM_TIMEOUT_IDLE must not be above LLM_TIMEOUT_TOTAL")
+        return self
+
+    @model_validator(mode="after")
+    def _token_budgets_must_fit_together(self) -> "Settings":
+        # A tenant default above the whole platform could never be used (plan 7.7)
+        if self.LLM_TENANT_DAILY_TOKENS > self.LLM_PLATFORM_DAILY_TOKENS:
+            raise ValueError("LLM_TENANT_DAILY_TOKENS must not be above LLM_PLATFORM_DAILY_TOKENS")
         return self
 
     @model_validator(mode="after")
