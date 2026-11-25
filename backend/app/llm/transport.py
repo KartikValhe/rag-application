@@ -17,24 +17,38 @@ Rules this module keeps:
   * event order out: TokenEvents as they come, then at most one UsageEvent, then one DoneEvent. The Done is
     held until the stream ends because the providers send usage AFTER the finish chunk. A stream that ends
     before any finish reason is LLMUnavailable (truncated), and so is a connection that breaks half-way.
-    Once a finish reason has arrived the answer is complete: a stall or a drop after it is not an error.
+    Once a finish reason has arrived the answer is complete: a stall or a drop after it is not an error;
+  * the dev-only recording hook (step 6a-6, `SseRecorder` below) is the one exception to "nothing leaves this
+    module": it is OFF unless the environment variable LLM_RECORD_SSE_PATH names a file, it refuses to turn on
+    unless ENVIRONMENT=development, and it writes the raw lines of the response BODY and nothing else (no
+    header, no request body, no URL; a line that holds the key has the key replaced).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Self
 
 import httpx
 from pydantic import SecretStr
 
+from app.core import config
 from app.llm.errmap import ErrorContext, error_for_status
-from app.llm.errors import LLMAuthError, LLMBadRequest, LLMError, LLMTimeout, LLMUnavailable
+from app.llm.errors import (
+    LLMAuthError,
+    LLMBadRequest,
+    LLMError,
+    LLMPolicyError,
+    LLMTimeout,
+    LLMUnavailable,
+)
 from app.llm.providers import split_model_key
 from app.llm.sse import SSEError, SSEParser
 from app.llm.types import (
@@ -83,13 +97,102 @@ def load_json(data: str) -> object | None:
     return value
 
 
+# ── the dev-only recording hook (step 6a-6) ──────────────────────────────────────────────────────────
+
+RECORD_ENV: Final = "LLM_RECORD_SSE_PATH"
+# The one folder a recording may go to. A test points this at a temporary folder.
+RECORD_DIR: Path = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "llm"
+MAX_RECORDING_BYTES: Final = 1_048_576
+_REDACTED: Final = b"[redacted]"
+
+
+class SseRecorder:
+    """Collects the raw lines of ONE response body and writes them to one new file when the answer is complete.
+
+    It is built with a path and the key (to blank the key if a provider ever echoes it) and sees nothing else:
+    the transport hands it body bytes only, so headers, the request and the URL cannot reach the file."""
+
+    def __init__(self, path: Path, key: str) -> None:
+        self._path = path
+        self._key = key.encode("utf-8")
+        self._buffer = b""
+        self._lines: list[bytes] = []
+        self._size = 0
+        self._dropped = False
+
+    def _scrub(self, line: bytes) -> bytes:
+        return line.replace(self._key, _REDACTED) if self._key else line
+
+    def feed(self, piece: bytes) -> None:
+        if self._dropped:
+            return
+        self._size += len(piece)
+        if self._size > MAX_RECORDING_BYTES:  # a runaway body is not a fixture
+            self._dropped = True
+            self._lines.clear()
+            self._buffer = b""
+            return
+        self._buffer += piece
+        while b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            self._lines.append(self._scrub(line))
+
+    def save(self) -> None:
+        if self._dropped:
+            return
+        if self._buffer:
+            self._lines.append(self._scrub(self._buffer))
+            self._buffer = b""
+        if not self._lines:
+            return
+        try:
+            with self._path.open("xb") as handle:  # "x": never overwrites a file
+                handle.write(b"\n".join(self._lines) + b"\n")
+        except FileExistsError:
+            return
+
+
+def recorder_from_environment(key: str) -> SseRecorder | None:
+    """None (the normal case) unless LLM_RECORD_SSE_PATH is set. Refuses (LLMPolicyError, before any request is
+    sent) when it is set outside development, or names anything but a NEW `.sse` file directly inside RECORD_DIR."""
+    raw = os.environ.get(RECORD_ENV, "")
+    if not raw:
+        return None
+    problems: list[str] = []
+    if not config.settings.is_development:
+        problems.append(f"{RECORD_ENV} is set, but recording works only when ENVIRONMENT=development")
+    else:
+        path = Path(raw)
+        resolved = path.resolve()
+        if not path.is_absolute():
+            problems.append(f"{RECORD_ENV} must be an absolute path")
+        elif (
+            os.path.normcase(str(resolved.parent)) != os.path.normcase(str(RECORD_DIR.resolve()))
+            or resolved.suffix != ".sse"
+        ):
+            problems.append(f"{RECORD_ENV} must name a .sse file directly inside tests/fixtures/llm")
+        elif resolved.exists():
+            problems.append(f"{RECORD_ENV} names a file that already exists; recordings are never overwritten")
+    if problems:
+        raise LLMPolicyError(problems)
+    return SseRecorder(Path(raw).resolve(), key)
+
+
 # ── one open response ────────────────────────────────────────────────────────────────────────────────
 
 
 class Stream:
     """An open 200 response. `next_data()` gives the data of the next SSE event, or None at the end."""
 
-    def __init__(self, response: httpx.Response, ctx: ErrorContext, timeouts: LLMTimeouts, started: float) -> None:
+    def __init__(
+        self,
+        response: httpx.Response,
+        ctx: ErrorContext,
+        timeouts: LLMTimeouts,
+        started: float,
+        recorder: SseRecorder | None = None,
+    ) -> None:
+        self._recorder = recorder
         self._bytes = response.aiter_bytes().__aiter__()
         self._ctx = ctx
         self._timeouts = timeouts
@@ -137,6 +240,8 @@ class Stream:
             if failure is not None:
                 raise failure
             if piece is not None:
+                if self._recorder is not None:
+                    self._recorder.feed(piece)
                 try:
                     self._queue.extend(self._parser.feed(piece))
                 except SSEError:
@@ -148,7 +253,13 @@ class Stream:
 
 @asynccontextmanager
 async def open_stream(
-    http: httpx.AsyncClient, ctx: ErrorContext, url: str, headers: dict[str, str], body: bytes, timeouts: LLMTimeouts
+    http: httpx.AsyncClient,
+    ctx: ErrorContext,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeouts: LLMTimeouts,
+    recorder: SseRecorder | None = None,
 ) -> AsyncIterator[Stream]:
     """POST, wait for the response headers (inside the first-token limit) and check the status.
     The response is always closed when the block ends, also when the reader stops early."""
@@ -177,7 +288,7 @@ async def open_stream(
     try:
         if response.status_code != 200:
             raise error_for_status(ctx, response.status_code, response.headers)
-        yield Stream(response, ctx, timeouts, started)
+        yield Stream(response, ctx, timeouts, started, recorder)
     finally:
         await response.aclose()
 
@@ -297,6 +408,9 @@ class HTTPAdapter:
             failure = LLMBadRequest(provider=ctx.provider, model_key=ctx.model_key)
         if failure is not None:
             raise failure
-        async with open_stream(self._get_http(), ctx, url, self._headers(key), payload, req.timeouts) as stream:
+        recorder = recorder_from_environment(key)  # None unless the dev-only hook is on (refuses before any request)
+        async with open_stream(self._get_http(), ctx, url, self._headers(key), payload, req.timeouts, recorder) as stream:
             async for event in read_events(stream, ctx, self._parse, self.DONE_SENTINEL):
                 yield event
+        if recorder is not None:  # reached only when the answer was complete: a failed or cut stream leaves no file
+            recorder.save()

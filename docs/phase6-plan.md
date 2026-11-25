@@ -1700,6 +1700,75 @@ about USD 1.3 a day whatever happens.
   the same pre-existing failure as in the 6a-1a, 6a-3 and 6a-4 records; not touched).
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 119 source files`
 
+### 6a-6 (code part) `llm_smoke` and the recording hook · 2026-11-25 · not committed
+
+- **The owner's part is still open:** the real runs below, the ZDR check in the Groq console, the provider spending cap, and reading the
+  answers. Nothing here used a real key or reached a provider; `LLM_ZDR_CONFIRMED` stays false.
+- Built: `app/scripts/llm_smoke.py` (the script), `app/scripts/llm_smoke_data.py` (SAMPLE sources and questions), and the hook in
+  `app/llm/transport.py` (`SseRecorder`, `recorder_from_environment`, constants `RECORD_ENV = "LLM_RECORD_SSE_PATH"` and `RECORD_DIR`;
+  the three adapter files are untouched).
+- **Script rules as built:** refuses unless `ENVIRONMENT=development`; `--out` (default `<OS temp>/llm_smoke`) is refused when it
+  resolves inside the repo (links and `..` included), checked before anything is created; refuses when `LLM_RECORD_SSE_PATH` is already set;
+  checks the model with the start-up policy (`key_problems`, one key only) and, for the real chain, only that the provider key setting is
+  not empty (the key is never unwrapped, printed, logged or written); sets `LLM_ANSWER_CHAIN` to that one model for the run and puts it
+  back; goes through `chain.answer_stream` and imports no adapter or transport (`test_llm_chain_imports.py` scans `app/` and covers it).
+  Per question one JSON line (answer, first-line class, labels used and not existing, reported and estimated tokens, first-token and
+  total latency, finish reason, outcome, error type, 429 waits) in `<model>_<lang>.jsonl`, and `<model>_<lang>.md` with format
+  compliance (exact / only because of whitespace, emphasis or colon / neither), refusals of near-topic and unrelated questions, label
+  counts, token ratios, p50 latency, finish reasons and failure types. A failure of any type (also an unexpected exception) is recorded
+  by type and the run goes on; a failure after the first token is `interrupted`. A 429 is waited out (Retry-After + 1 s, or the
+  cooldown the chain set + 1 s, or `--pause`) and the question is asked again, at most 4 times; a wait above 300 s is a daily limit and is
+  recorded as `RateLimitedTooLong`, not waited. `--pause` (default 30 s) goes between answered questions only. `--resume` skips questions
+  whose latest line is `ok` for this model and language (a half-written last line is ignored). `--record` records the first answerable
+  and the first near-topic question that has no recording yet.
+- **Hook rules as built:** off unless the environment variable names a file; when set it raises `LLMPolicyError` BEFORE any request
+  unless `ENVIRONMENT=development`, the path is absolute, a new `.sse` file directly inside `tests/fixtures/llm/`; it receives body bytes
+  only (never headers, request or URL), writes whole lines, replaces the key with `[redacted]` if a provider echoes it, writes only when
+  the answer completed (a failed or cut stream leaves no file), opens the file with `"x"` (never overwrites), and drops a body over 1 MiB.
+  The variable is read by `transport.py` alone (no setting, so no `.env` can switch it on). **My choice:** outside development a set
+  variable stops the call with an error instead of being ignored quietly, so a half-on hook cannot hide in production.
+- **TEMPORARY, replaced in 6a-10 and with the stream filter:** the system prompt (plan 5.2 text, one line per rule), the SOURCES builder
+  (5.3: random 16-hex boundary per request, labels by position, escaped attributes; the sample text has no injection material, so content
+  neutralising is not repeated) and the first-line classifier (4.5 tolerant rule).
+- Sample material: 6 passages and 20 questions per language (12 answerable, 4 near-topic that the sources do not answer: Angular route
+  guard, Redux Toolkit createSlice, React useReducer, Angular Input decorator; 4 unrelated), interleaved in blocks of five so `--count 10`
+  still has every kind. Marathi keeps framework names in Latin letters. The Marathi was written by the model, not by a native speaker:
+  **the owner should read it for naturalness** before the answers are judged. No quality score is computed.
+- Tests (`tier_map.py` entries added): `test_llm_recording.py` (`fast, security`), `test_llm_smoke.py` (`fast, security`; one test skips
+  on a machine without the symlink right), `test_llm_smoke_data.py` (`fast`), `test_llm_smoke_chain.py` (`db`: the real `LLMChain` with
+  FakeLLM, including waiting out a cooldown the chain set). No network, no real key (a canary stands in). 134 passed, 1 skipped.
+- Red first: `ImportError: cannot import name 'llm_smoke' from 'app.scripts'` (and `llm_smoke_data`); `AttributeError: module
+  'app.llm.transport' has no attribute 'RECORD_DIR'` (23 errors) / `'RECORD_ENV'`.
+- Self-review (each break applied alone, the named test run, the file restored byte-identical): key printed, output folder inside the repo
+  (check removed, and default folder moved into the repo), hook on by default, hook writing the response headers, hook not blanking an
+  echoed key, hook allowed outside development, hook writing anywhere, hook overwriting, script importing an adapter, script running outside
+  development, 429 not waited, resume re-asking, no pause, own token estimate instead of `llm_budget`, record switch left on, chain not
+  narrowed to one model, a failed question stopping the run, case-folding classifier: all turned a named test red. Two breaks first
+  stayed green and led to test changes: (1) "script runs outside development" stayed green because the Groq ZDR rule also refuses a
+  production run, so the test now confirms ZDR and checks the message; (2) "hook overwrites" stayed green because the exists-check comes
+  first, so a test now creates the file while the request runs.
+- **Rules without a test that can go red:** a `--record` run writing into the real `tests/fixtures/llm/` is checked only through the
+  environment value (the real write is tested in a temporary folder); the pause fallback when the chain's cooldown hint fails (Redis down
+  in development) has no test; the Marathi sample text is checked only for script share and shape; `--max-output-tokens` has no test of
+  its own; the symlink case skips without the right.
+- `run_tests gate` (run alone): `= 1 failed, 3384 passed, 12 skipped, 1010 deselected, 4 xfailed in 596.51s (0:09:56) =`. The one failure is
+  the pre-existing `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (see 6a-1a). An earlier gate
+  run reported 3 failures because two runs overlapped on the test database (my mistake: a stray first run); it is not counted.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 124 source files`
+- **Commands for the owner** (from `backend/`, `GROQ_API_KEY` in the environment, `ENVIRONMENT=development`; one run per model and language;
+  add `--resume` to continue after an interruption; answers go to `<temp>/llm_smoke/`; `--record` writes the raw streams into
+  `tests/fixtures/llm/`, which the owner then reviews before committing):
+  `python -m app.scripts.llm_smoke --model groq:openai/gpt-oss-120b --lang en --record`
+  `python -m app.scripts.llm_smoke --model groq:openai/gpt-oss-120b --lang mr --record`
+  `python -m app.scripts.llm_smoke --model groq:openai/gpt-oss-20b --lang en --record`
+  `python -m app.scripts.llm_smoke --model groq:openai/gpt-oss-20b --lang mr --record`
+  Expected time at the free-tier limits (8K tokens a minute, about 2 answers a minute): the prompt is about 1,500 tokens (estimate) plus
+  up to 600 output tokens (a reasoning model may spend all of it on thinking), so about 2,000-3,000 tokens a question, more in Marathi if
+  the real Devanagari ratio is worse than the 2 characters a token assumed. 20 questions with the 30 s pause take about 10 min plus the
+  answer time (5-15 s each): about 12-15 min a run and about an hour for the four, longer if Groq answers 429 (each wait is the
+  Retry-After). Each model's two runs use about 100,000-160,000 tokens against the 200K a day that the 6a-3 record could not attribute
+  to a plan: if the daily limit is hit, the remaining questions are recorded as `RateLimitedTooLong`; run again with `--resume` the next day.
+
 ### 6a-7 Chat router and language detection · 2026-11-25 · not committed
 
 - Built: `app/services/chat_router.py` (`route`, `RouterContext`, `RouteDecision`, `NamedRef`, `normalise`, `build_phrase_index`, `RULE_IDS`),

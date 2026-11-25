@@ -78,6 +78,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_budget_pure.py": ("fast",),  # 6a-5: token estimate, budget settings, override rule, keys (no Redis)
     "test_llm_budget.py": ("db",),  # 6a-5: daily token counters on the test Redis: reserve, correct, exhausted, overlap
     "test_llm_usage.py": ("db",),  # 6a-5: record_usage writes one content-free llm_usage_events row
+    "test_llm_recording.py": ("fast", "security"),  # 6a-6: dev-only SSE recording hook in transport.py (off by default, body lines only, no key)
+    "test_llm_smoke.py": ("fast", "security"),  # 6a-6: llm_smoke script on a stub chain + FakeLLM (dev only, key canary, out folder, 429 wait, resume)
+    "test_llm_smoke_data.py": ("fast",),  # 6a-6: shape of the SAMPLE sources and questions (en/mr)
+    "test_llm_smoke_chain.py": ("db",),  # 6a-6: llm_smoke through the real LLMChain on the test Redis (cooldown wait)
     "test_chat_router.py": ("fast",),  # 6a-7: pure rule router (intents en/mr, look-alikes, names only from the caller's scope, total on any string, no I/O imports)
     "test_chat_language.py": ("fast",),  # 6a-7: Devanagari share, mr/hi function words, tie gives the tenant default, pure
     "test_tenant_settings.py": ("db",),  # 6a-5: one tenant_settings row per tenant, written on tenant creation
