@@ -78,6 +78,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_budget_pure.py": ("fast",),  # 6a-5: token estimate, budget settings, override rule, keys (no Redis)
     "test_llm_budget.py": ("db",),  # 6a-5: daily token counters on the test Redis: reserve, correct, exhausted, overlap
     "test_llm_usage.py": ("db",),  # 6a-5: record_usage writes one content-free llm_usage_events row
+    "test_chat_router.py": ("fast",),  # 6a-7: pure rule router (intents en/mr, look-alikes, names only from the caller's scope, total on any string, no I/O imports)
+    "test_chat_language.py": ("fast",),  # 6a-7: Devanagari share, mr/hi function words, tie gives the tenant default, pure
     "test_tenant_settings.py": ("db",),  # 6a-5: one tenant_settings row per tenant, written on tenant creation
     "test_phase6_schema.py": ("db", "security"),  # 6a-5: migration 0012: FORCE RLS, policies, grants per role, FKs, backfill
     "test_ml_fetch_model.py": ("fast",),

@@ -1699,3 +1699,95 @@ about USD 1.3 a day whatever happens.
   `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable("search_timeout")`,
   the same pre-existing failure as in the 6a-1a, 6a-3 and 6a-4 records; not touched).
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 119 source files`
+
+### 6a-7 Chat router and language detection · 2026-11-25 · not committed
+
+- Built: `app/services/chat_router.py` (`route`, `RouterContext`, `RouteDecision`, `NamedRef`, `normalise`, `build_phrase_index`, `RULE_IDS`),
+  `app/services/chat_router_phrases.py` (the tables: `LanguageTable`, `PhraseRule`, `ENGLISH`, `MARATHI`, `LANGUAGE_TABLES`),
+  `app/services/chat_language.py` (`detect`, the two function-word lists). **Nothing is wired into a route** (no caller until 6a-9b).
+  Pure: the three modules import only the standard library, `app.services.document_text` (for `clean_text`) and each other; no
+  database, network, clock, random or file access, no `app.db`, `app.llm`, `app.services.schedule`, `sqlalchemy`, `httpx`, `redis`.
+- **How `route(text, ctx)` decides** (plan 3.3). Text is cut to 500 characters, then normalised: ingest `clean_text` rules, NFKC, case
+  fold, apostrophes dropped (`today's` -> `todays`), punctuation and symbols to spaces, every decimal digit to ASCII, a space between a
+  letter and a digit (`10A` -> `10 a`), spaces collapsed. The words are read left to right: names of the caller's classes and subjects
+  first (difflib ratio >= 0.85, exact match preferred, windows of as many words as the name has), then the longest phrase of the tables,
+  then filler words; every other word is "unexplained". A **candidate** needs one of: schedule noun + time or order word; subject +
+  "when" (or subject + noun + time word); subject + room noun; a class or "all classes" + a timetable or lecture noun. No candidate:
+  plain rag, no rule id. A candidate with **any unexplained word**: rag, low, rules that fired + `miss.unexplained_tokens` (this is
+  what keeps "what is the next class in the inheritance hierarchy" and "when was the exam of physics" out of the timetable; it also
+  means "what is the next topic in physics" never reaches a rule: no schedule noun). Then: two different days, or "now" with a day or
+  with "next": `miss.conflicting_time` (a day word beats "next"). Intent order: room, subject_when, time intent (day word > now > next),
+  `miss.no_target` ("when is my lecture"), class_named. Two or more matched classes or subjects: `clarify`.
+- **Decision contract.** `RouteDecision(route, intent, class_ids, subject_id, day, rule_ids, confidence, subject_ids=())`, frozen.
+  `class_ids` None = all of the caller's classes. `rule_ids` = rules in the order the words were read, last the `intent.<intent>` rule.
+  schedule and clarify are `high`, **every** rag is `low`. A rag decision lists no rule (plain) or ends in a `miss.*` id. `day` is set
+  for today, tomorrow, weekday and for subject_when and room when exactly one day word is there (weekday = the next date, today
+  included, in the tenant timezone; naive `now` is read as tenant-local). 22 intent, name and miss ids plus the table ids are the registry
+  `RULE_IDS` (unique; a test checks it).
+- **Never raises.** Any exception inside the router (a broken context, a bug) returns rag with `miss.router_error`; non-string input is
+  plain rag. Tests: ~3,080 generated strings (random Unicode in six ranges incl. lone surrogates, very long, control and bidi characters,
+  punctuation only, digits only in three scripts, vocabulary soup, 500-character repeats and near-matches), seed 20261125, against three
+  normal and four hostile contexts (empty, one-letter, "Today", 400-character and duplicate names, role "root"); every decision is
+  checked against the invariants (no id outside the context, rag is low, schedule ends with its intent rule, ...). No timing assertion.
+- Tests (`tier_map.py`: both `fast`): `test_chat_router.py` and `test_chat_language.py`.
+  Counts: **English** 112 schedule phrases, 47 look-alikes (34 plain rag, 13 recorded misses); **Marathi** 131 schedule phrases (73
+  Devanagari, 58 Romanised), 34 look-alikes (25 plain, 9 misses); Hindi: 2 phrases that must go to rag (no table, Q5). Plus role cases
+  (student with one and with several classes, teacher, admin with one class and all classes), clarify (two classes in the text, two
+  classes with one name, two subjects, a typo near two subjects), fuzzy borders (a pair at exactly 0.85 matches, 0.80 and 0.844 do not;
+  the table asserts the difflib ratio itself), the unauthorised-name probe equal to same-shape random text for three roles x 7 names x 12
+  sentence shapes, the 500-character cut at exactly 500 and 501, normalisation (20 rows + idempotence), the time rules (tenant timezone,
+  naive now, weekday arithmetic), every rule id produced by some case, and the source scans (AST of imports, allow-list and deny-list,
+  transitive scan of the app modules the router loads, no clock/random/file call, no global state). 547 tests in the two files.
+- Red first: `ImportError: cannot import name 'chat_router' from 'app.services'` and `... 'chat_language' ...` (`2 errors in 0.39s`, the
+  modules did not exist). First green run of the code: one test was my own error (a count of 2,981 generated strings against 3,000),
+  fixed in the test; one language test used a tail inside the 2,000-character bound (test error, fixed). After `ruff --fix` the purity
+  allow-list was missing `collections.abc` for the phrases module (a test error that the self-review harness exposed, see below).
+- **Self-review** (each break alone in the real file, both test files run, file restored; the harness compares SHA-256 of all three
+  files after every break). 54 breaks, **all red**, among them: an extra hard-coded subject that no caller is authorised for
+  (probe, id-in-context and same-shape tests); the schedule-noun requirement dropped (11 look-alikes, `test_the_schedule_noun_is_required`);
+  the noun requirement dropped for subject_when; ratio 0.80 (`test_typo_just_below_the_border_does_not_match`), 0.90 and `>` instead of
+  `>=` (`test_typo_at_exactly_the_border_matches`); `import sqlalchemy`, `from app.services import schedule`, `import time`, `import httpx` in
+  the tables (`test_router_modules_import_only_pure_things`, the transitive scan); `datetime.now()` and `fromtimestamp` in the router
+  (`test_router_modules_read_no_clock_no_random_no_file`, the clock tests); the catch-all narrowed so an exception escapes (`test_an_internal_error_...`,
+  `test_a_broken_context_...`); no truncation and a 501 limit; the unexplained-word miss removed (27 tests); students allowed `class_named`;
+  no conflict check; clarify never returned; ordinary-word names matched; apostrophes to spaces; Devanagari digits unconverted; no
+  `clean_text`; no case fold; no letter/digit split; timezone ignored; same weekday giving next week; "what is on now" not a noun; rag
+  with high confidence; intent rule id not appended (253 tests); room without a subject; a filler removed; a `kadhi` removed;
+  a duplicate rule id; a phrase claimed by two rules; a Hindi table added without the tests noticing; language: `>=` at 30 %, tie to
+  "mr", lists swapped, `import time`, no scan bound, unknown default passed through, a word in both lists, digits counted as letters.
+  **Two breaks stayed green on the first round** and got a test each: exact match no longer preferred over a fuzzy neighbour
+  (`test_an_exact_match_is_not_made_ambiguous_by_a_close_name`), and names looked at even when the text has no schedule word
+  (`test_names_are_only_looked_at_when_a_schedule_word_is_there`, a spy on `_find_names`). The harness's first report also showed
+  five "still green" lines that were red with test ids containing spaces (its FAILED-line parser); re-run with a fixed parser, all red.
+- **Rules and behaviours without a test that can go red:** each single spelling in the tables (the cases cover every rule id, not every
+  phrase: `tommorow`, `tmrw`, `ata`, `kevhaa`, `kiti vajta`, `thurs`, `classrooms` ...); fuzzy matching of Devanagari names and a fuzzy
+  match that hits two classes (only two subjects and two identical class names are tested); `class_ids` of the Romanised "all classes"
+  phrases (the coverage test only checks that the rule ids appear); large rosters (no timing check, as asked); time zones other than
+  Asia/Kolkata and UTC, and DST edges; that the `real_quick_ratio` / `quick_ratio` pre-filters never drop a match (covered only through
+  the border and typo cases); the Hindi path beyond two phrases; Marathi inflected subject names ("गणिताचा") fall to rag by design and
+  that is asserted nowhere.
+- **Conflicts with the plan, and choices (owner to confirm):**
+  1. 3.1 gives `class_ids: list` and `rule_ids: list`; frozen dataclasses hold **tuples**. `subject_ids` is an **extra field** (clarify
+     with two subjects needs to list them; `subject_id` is then None). `RouterContext.timezone` is a **`tzinfo` object**, not the name
+     (building a `ZoneInfo` reads a file; the caller already has `get_tenant_zoneinfo`). `route` has an optional keyword `index=` (tests
+     add a language with it). The phrase tables are a third module, `chat_router_phrases.py`.
+  2. 3.2 lists `class_named` for "next lecture for 10-A". I made a named class **narrow `class_ids` of the time intent** (the consumer
+     needs to know which schedule call to make), and `class_named` is "a class or all classes + timetable/lecture noun, no time word"
+     (the weekly timetable, `class_schedule`), allowed for admin and teacher only; a student gets `miss.role_not_allowed` and rag.
+  3. 3.5 says a name that matches nothing authorised gives RAG **or** the general schedule answer when the intent is clear. This router
+     always gives RAG (any unexplained word is a miss). Stricter, never answers for a class the caller did not name; costs: a long polite
+     question with a word outside the tables goes to RAG, which is scoped and refuses when it finds nothing.
+  4. 3.2 examples without a schedule noun: "when is physics" routes (a "when" word replaces the noun), "what's on now" routes (own
+     phrase). **"सोमवारचे" alone, "कोणत्या खोलीत" alone, "which room" alone and "my timetable" (no time word) go to RAG**, as 3.3 requires a
+     noun and a time word. If the owner wants a weekly "my timetable" for students, that is a new intent.
+  5. 3.5 "router raises: logged as `chat_router_error`, goes to RAG": the router cannot log (pure) and never raises; the caller gets
+     rag + `miss.router_error` on the stored message instead.
+  6. Hindi: no table (Q5). The shared Devanagari words (आज, लेक्चर, टाइमटेबल, वेळापत्रक ...) sit in the Marathi table, so "आज का
+     टाइमटेबल" routes to `today` through it; "अगला लेक्चर कब है" goes to rag. `chat_language`: a tie gives the tenant default **even when
+     it is "en"** (plan 5.7 literally); "का", "की", "हो", "तो" are in neither list; word lists match whole words only (Marathi endings
+     like "भारताच्या" are not recognised); only the first 2,000 characters are read (my bound).
+  7. A class or subject whose name is only ordinary words ("A", "Today", "next lecture") is never matched.
+- Environment: the `python` on this machine's PATH has no dependencies; everything ran with `backend/.venv/Scripts/python.exe` (`ruff.exe`,
+  `mypy.exe` from the same folder). No database, Redis or Docker was started for this step (fast tier only; the gate runs `security` tests too).
+- `run_tests gate`: `= 1 failed, 3254 passed, 11 skipped, 1006 deselected, 4 xfailed in 614.59s (0:10:14) =`. The one failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same pre-existing failure as in the 6a-1a, 6a-3, 6a-4 and 6a-5 records (not touched). The two new files alone: `547 passed in 2.09s`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 122 source files`
