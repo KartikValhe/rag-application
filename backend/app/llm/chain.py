@@ -15,6 +15,16 @@ Rules (plan 7.4):
     cooling down, the provider's breaker admits it, and one atomic SlotManager acquire takes a slot on both
     `llm:rpm:{model_key}` (60 s) and `llm:rpd:{model_key}` (86,400 s). A full slot consumes nothing on the
     other key. Any of these refusing means: skip the model, go to the next one;
+  * token window (step 6a-10b): a model whose models.json entry has a `tpm` first reserves the estimated prompt
+    plus max_output_tokens (the budget service's estimator) in `llm:tpm:{model_key}` with one atomic script
+    (app/llm/tpm.py). That comes BEFORE the RPM/RPD acquire, so a full window takes nothing from them, and a
+    reservation that a full RPM/RPD slot then refuses is given back. A full window skips the model (`tpm_limit`,
+    the attempt carries the retry-after) and never waits; no cooldown is set, because a lighter request may fit. A
+    request heavier than the model's whole `tpm` can never fit: `tpm_oversize`, at once, no Redis call for it. Each
+    model is checked against its OWN limit; a model without `tpm` gets no check and no Redis call. After the call
+    the window is corrected to the provider-reported prompt + completion tokens; a failure before the first token
+    refunds the whole reservation; a cancel or an interruption after tokens corrects to the best known count (the
+    reported usage if it arrived, else the prompt estimate plus the estimate of the text sent);
   * retry at most once on the same model, and ONLY before the first token: after full jitter of 0.5-2 s, or
     after Retry-After when it is 5 s or less. A 429 with a longer Retry-After goes straight to the next model.
     The retry is a new request: it passes the checks above again (and takes its own slot);
@@ -36,9 +46,9 @@ Rules (plan 7.4):
     codes. An empty ANSWER chain raises it with `not_configured=True` (the caller answers retrieval-only, plan
     7.5). An empty CONDENSE chain is not an error: the stream yields nothing, `configured` is False and the
     caller uses the raw question;
-  * Redis down: outside development the breaker and cooldown checks and SlotManager raise the 503
-    `service_unavailable` before any call. In development the call goes ahead without breaker or cooldown
-    (SlotManager uses its per-process limits) and an error is logged;
+  * Redis down: outside development the breaker and cooldown checks, the token window and SlotManager raise the
+    503 `service_unavailable` before any call. In development the call goes ahead without breaker or cooldown
+    (SlotManager and the token window use their per-process limits) and an error is logged;
   * nothing of the question, the system prompt or the answer is written to Redis or to a log: keys hold model
     keys or provider names, log lines hold ids, model keys and result codes.
 """
@@ -76,7 +86,9 @@ from app.llm.models import ModelRegistry, Purpose, RegisteredModel, load_registr
 from app.llm.openrouter import OpenRouterClient
 from app.llm.policy import chain_keys, key_problems
 from app.llm.providers import split_model_key
-from app.llm.types import LLMEvent, LLMRequest, LLMTimeouts, TokenEvent
+from app.llm.tpm import TpmReservation, TpmWindow
+from app.llm.types import LLMEvent, LLMRequest, LLMTimeouts, TokenEvent, UsageEvent
+from app.services.llm_budget import estimate_prompt_tokens, estimate_text_tokens, reservation_amount
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -121,10 +133,12 @@ class TenantLLMContext:
 
 @dataclass(frozen=True, slots=True)
 class Attempt:
-    """One model the chain tried or skipped, and a fixed result code (never text from a provider)."""
+    """One model the chain tried or skipped, and a fixed result code (never text from a provider).
+    `retry_after_s` is set only by `tpm_limit`: the seconds until the model's token window would take this request."""
 
     model_key: str
     result: str
+    retry_after_s: int | None = None
 
 
 class LLMChainExhausted(Exception):
@@ -217,6 +231,7 @@ class LLMChain:
         registry: ModelRegistry | None = None,
         settings: Settings | None = None,
         slots: SlotManager | None = None,
+        tpm: TpmWindow | None = None,
         breaker: Breaker | None = None,
         cooldowns: Cooldowns | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -227,6 +242,7 @@ class LLMChain:
         self._registry = registry if registry is not None else load_registry()
         self._settings = settings  # None: the app settings, read at every call
         self._slots = slots if slots is not None else default_manager
+        self._tpm = tpm if tpm is not None else TpmWindow()
         self._breaker = breaker if breaker is not None else Breaker()
         self._cooldowns = cooldowns if cooldowns is not None else Cooldowns()
         self._clock = clock
@@ -307,9 +323,20 @@ class LLMChain:
         log.warning("llm_chain_exhausted", attempts=len(report.attempts))
         raise LLMChainExhausted(tuple(report.attempts))
 
-    def _record(self, report: ChainStream, log: structlog.stdlib.BoundLogger, key: str, result: str, attempt: int) -> None:
-        report.attempts.append(Attempt(model_key=key, result=result))
-        log.info("llm_attempt", model_key=key, attempt=attempt, result=result)
+    def _record(
+        self,
+        report: ChainStream,
+        log: structlog.stdlib.BoundLogger,
+        key: str,
+        result: str,
+        attempt: int,
+        retry_after_s: int | None = None,
+    ) -> None:
+        report.attempts.append(Attempt(model_key=key, result=result, retry_after_s=retry_after_s))
+        if retry_after_s is None:
+            log.info("llm_attempt", model_key=key, attempt=attempt, result=result)
+        else:
+            log.info("llm_attempt", model_key=key, attempt=attempt, result=result, retry_after_s=retry_after_s)
 
     def _retry_delay(self, error: LLMError, attempt: int) -> float | None:
         if attempt > 0:
@@ -341,7 +368,17 @@ class LLMChain:
             self._record(report, log, key, "breaker_open", attempt)
             return
         reported = False  # whether the probe (if this is one) has been reported or handed back
+        window: TpmReservation | None = None  # the token window's reservation, settled exactly once in the finally
+        usage: UsageEvent | None = None
+        sent_text: list[str] = []
         try:
+            if model.tpm is not None:
+                outcome = await self._tpm.reserve(key, model.tpm, reservation_amount(req))
+                if not isinstance(outcome, TpmReservation):
+                    full = outcome.reason == "full"
+                    self._record(report, log, key, "tpm_limit" if full else "tpm_oversize", attempt, outcome.retry_after_seconds)
+                    return
+                window = outcome
             try:
                 await self._slots.acquire(
                     [
@@ -369,6 +406,10 @@ class LLMChain:
                                 reported = True
                         if isinstance(event, TokenEvent):
                             tokens += 1
+                            if window is not None:
+                                sent_text.append(event.text)
+                        elif isinstance(event, UsageEvent):
+                            usage = event
                         yield event
             except LLMError as error:
                 reported = await self._after_error(error, key, provider, permit, reported, log) or reported
@@ -390,8 +431,32 @@ class LLMChain:
             self._record(report, log, key, "ok", attempt)
             step.done = True
         finally:
+            if window is not None:
+                await self._settle_window(window, req, usage, sent_text, step.done, log)
             if permit.state is Admission.PROBE and not reported:
                 await self._breaker.release(provider, permit)
+
+    async def _settle_window(
+        self,
+        window: TpmReservation,
+        req: LLMRequest,
+        usage: UsageEvent | None,
+        sent_text: list[str],
+        completed: bool,
+        log: structlog.stdlib.BoundLogger,
+    ) -> None:
+        """Correct the token window to the best known count, whichever way the attempt ended (never raises):
+        the provider's reported prompt + completion tokens when they arrived; else, when the answer completed or
+        any text was sent, the prompt estimate plus the estimate of the text sent; else nothing was used (a
+        failure, a skip or a cancel before the first token) and the whole reservation is given back."""
+        if usage is not None:
+            used = usage.prompt_tokens + usage.completion_tokens
+        elif completed or sent_text:
+            used = estimate_prompt_tokens(req) + estimate_text_tokens("".join(sent_text))
+        else:
+            used = 0
+        await self._tpm.settle(window, used)
+        log.info("llm_tpm_settled", model_key=window.model_key, reserved=window.weight, used=used)
 
     async def _after_error(
         self,

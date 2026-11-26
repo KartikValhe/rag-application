@@ -50,8 +50,8 @@ class _Entry(BaseModel):
     trains_on_inputs: StrictBool
     rpm: Limit
     rpd: Limit
-    # Step 6a-4: token limits per minute and per day. Optional (null or absent) and data only: nothing enforces
-    # them yet, a 429 cooldown handles an overrun.
+    # Step 6a-4: token limits per minute and per day. Optional (null or absent). `tpm` is enforced by the chain's
+    # token window (step 6a-10b); `tpd` is data only, a 429 cooldown handles an overrun.
     tpm: Limit | None = None
     tpd: Limit | None = None
     pinned_on: Annotated[StrictStr, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")]
@@ -102,8 +102,8 @@ class RegisteredModel:
     rpm: int
     rpd: int
     pinned_on: str
-    tpm: int | None = None  # data only (step 6a-4), not enforced
-    tpd: int | None = None
+    tpm: int | None = None  # enforced by the chain's token window (step 6a-10b); None: no weighted check
+    tpd: int | None = None  # data only, not enforced
 
     @property
     def key(self) -> str:

@@ -2311,3 +2311,73 @@ about USD 1.3 a day whatever happens.
   The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable:
   search_timeout`), the same pre-existing failure as in the 6a-1a to 6a-9b records (not touched).
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 136 source files`
+
+### 6a-10b Token-weighted TPM window in the chain · 2026-11-26 · not committed
+
+- **Built (`app/llm/` only; no route, no chat service, no frontend, no migration, no dependency, no setting; `LLM_ZDR_CONFIRMED` and the
+  start-up policy untouched):** `app/llm/tpm.py` (`TpmWindow.reserve/settle/release`, `TpmReservation`, `TpmRejected`, `tpm_key`) and the wiring in
+  `app/llm/chain.py` (`LLMChain(tpm=...)`, `Attempt.retry_after_s`, result codes `tpm_limit` and `tpm_oversize`, `_settle_window`). `models.json`
+  and the schema are unchanged (two comments in `models.py` now say `tpm` is enforced; `tpd` is still data only).
+- **The window.** `llm:tpm:{model_key}` is a sorted set: member `<random token>:<weight>`, score = expiry in ms (reserved at + 60 s). One Lua
+  script per reservation (purge, sum, refuse or add, `PEXPIRE` one window): a single Redis call, never two commands. A refusal consumes
+  nothing and returns the seconds until enough weight has left the window (oldest entries first, rounded up). One more script corrects a
+  reservation in place (weight = `max(0, weight + delta)`, same expiry, removed at 0); an entry that already left the window is not brought
+  back. A reservation is settled once. Keys and members hold a model key, a random token and a number: no tenant, no user, no text.
+- **In the chain.** A model with `tpm` reserves `reservation_amount(req)` (the 6a-5 function, imported from `app.services.llm_budget`; the
+  chain has no estimator or ratio constant of its own, a test scans for it) after the cooldown and breaker checks and BEFORE the RPM/RPD
+  acquire. A model without `tpm` takes no window code path and sends no Redis command for it (tested with a recording Redis).
+  After the call (success, failure, cancel, close, deadline, a refused RPM/RPD slot) one `finally` settles the window: the provider-reported
+  prompt + completion tokens when the usage event arrived (hidden reasoning is in the completion count, tested with 3,000 reported for two
+  tokens of text); else, when the answer completed or text was sent, the prompt estimate + the estimate of the text sent; else (nothing was
+  sent) the whole reservation is given back. More than reserved is added, less is refunded. Nothing sleeps in the chain.
+- **Full window / oversize.** Full: the model is skipped with `tpm_limit` and `Attempt.retry_after_s`; the chain's existing loop goes to the
+  next model, or ends in `LLMChainExhausted` whose attempts carry the retry-after (6a-11 turns that into `budget_retrieval_only` or the
+  fallback; nothing waits here). Oversize (`weight > tpm`, so it can never fit): `tpm_oversize` at once, decided in Python with no Redis
+  command, nothing taken from RPM/RPD, per request (a lighter request to the same model is served). A fallback is checked against its own
+  `tpm` and its own key; a model without `tpm` is never held to another model's limit.
+- **Redis down = the policy of the RPM/RPD acquire.** Outside development `reserve` raises the same 503 `service_unavailable`; in development a
+  per-process window with the same rules is used and `llm_tpm_redis_unavailable_dev_memory` is logged at error level. A reservation records its
+  backend, and a Redis-held one is never settled in memory. `settle`/`release` never raise (the call already happened): a lost correction is
+  logged (`llm_tpm_correction_lost`) and the entry leaves with its window. RPM and RPD behave as before (`test_llm_chain.py` is unchanged and green).
+- **Decisions where the plan was unclear (owner to confirm):** (1) **Order:** the plan says "next to" the RPM/RPD acquire; the window is taken
+  FIRST, because for the 120b (8,000 tokens, about 3,700 per answer) the window is the limit that fills, and a refusal then costs one Redis
+  command and takes no RPM/RPD slot; a reservation that a full RPM/RPD slot then refuses is given back. (2) **No cooldown on `tpm_limit`:** a
+  cooldown would also block a lighter request that still fits. The retry-after is on the attempt record (and in the log line). (3) **Clock:**
+  the window takes its own injectable wall-clock `now_ms` (default `time.time`) and passes it to the scripts, not Redis `TIME` as `SlotManager`
+  does: the chain's `clock` is monotonic (per process) and cannot be shared between processes. Skew between app servers is milliseconds
+  against a 60 s window. (4) **Cancel or timeout before the first token is a full refund** (the brief says "failure before the first token"; a
+  provider may already have counted the prompt, so this under-counts slightly; a 429 from the provider is the backstop). (5) **A correction
+  above the limit is applied** (the tokens were spent); the next request then waits for the window. (6) **An entry that expired before the
+  correction is not re-added** (calls end within the 60 s total, so this is a corner; re-adding would charge a later window for old tokens).
+  (7) `UsageEvent(estimated=True)` is used as given: it is the best known count. (8) `app/llm/chain.py` imports `app.services.llm_budget` (the
+  one estimator); there is no import cycle. (9) `tpd` stays data only.
+- **Tests (`tier_map.py`, both `db`):** `test_llm_tpm.py` (48: reserve, exact fit, sliding window, retry-after, expiry, oversize with no Redis
+  call, one command per reserve and per correction, forced-overlap races for reserve and for correction, settle up/down/zero/once, never below
+  zero, expired entry, Redis down in and out of development, input validation) and `test_llm_chain_tpm.py` (36: weight and shared estimator,
+  correction to reported usage, hidden reasoning, refund on failure/retry/deadline/RPM refusal, best known count on interruption, `aclose`
+  and a cancelled task, a model without `tpm`, full window, oversize, own limit per model, a six-stream race with forced overlap, Redis down,
+  canary text). Shared helper `tests/fixtures/llm_tpm.py` (`SpyRedis`: records every command and holds the first window command of each task
+  at a barrier; `assert_all_overlapped`, the same pattern as `OverlapGate` in `test_llm_budget.py`). No sleeps (the fake clock's `sleep` is
+  asserted never to have been called), no real provider, no key.
+- **Red first:** `2 errors during collection` (`ModuleNotFoundError: No module named 'app.llm.tpm'`) for both files; the window tests were
+  green on the first run of the code and the chain tests' only first-run failure was one over-broad assertion of my own test (it counted the
+  cooldown lookup), narrowed.
+- **Self-review (20 breaks, each alone in the real file, both new test files run, original bytes written back, SHA-256 of `tpm.py` and
+  `chain.py` compared after every break and at the end: identical; the baseline was `84 passed`).** Red under every break: the script split
+  into two commands (7 red, including both overlap tests and the one-command test); weight counted as 1 (13); success never corrected (14);
+  never refunded on failure (5); settle only on the success path (9); cancel/interruption after tokens refunding everything (3); no give-back
+  when RPM/RPD refuses (1); window never expires (13); negative weight allowed (1); a negative reported count accepted (5); overage never added
+  (2); a correction that moves the expiry (1); an expired entry brought back (1); one shared key for all models (6); fallback checked against the
+  primary's tpm (3); tpm applied to a model with none (5); a sleep in the chain on a full window (6); the chain sleeping on oversize (2);
+  oversize treated as a full window (6); Redis failure failing open outside development (2). Not run as a break: moving the window after the
+  RPM/RPD acquire (a reorder, not a one-line change; `test_a_full_window_takes_nothing_from_rpm_or_rpd` pins the order's effect).
+  Not covered: the chain-level Redis-down test cannot see the window's 503 apart from the breaker's (the cooldown/breaker lookup raises first
+  outside development); the window's own 503 is pinned in `test_llm_tpm.py`.
+- `run_tests full tests/test_llm_tpm.py tests/test_llm_chain_tpm.py tests/test_llm_chain.py tests/test_llm_models_file.py
+  tests/test_llm_models_pinned.py tests/test_llm_chain_imports.py`: `251 passed in 4.66s`.
+- `run_tests gate` (the full gate, run alone, test database only): `= 1 failed, 3962 passed, 12 skipped, 1172 deselected, 4 xfailed in 844.09s (0:14:04) =`.
+  The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same pre-existing
+  failure as in the 6a-1a to 6a-10a records (not touched). The gate does not select `db`-only files, so the two new files were run by name (above).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 137 source files`
+- **Environment note:** Docker Desktop was not running; it was started and `docker compose up -d` run (this also started the `rag-api`
+  container of the compose file); `prepare_test_db` migrated `ragplatform_test` only. The dev database was not touched by any test.
