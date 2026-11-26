@@ -71,6 +71,22 @@ async def test_app_tenant_updates_only_its_own_pending_row_and_deletes_no_messag
     await ca.check_tenant_message_writes(chat_conn)
 
 
+@pytest.mark.parametrize("outcome", ca.FINAL_OUTCOMES)
+async def test_app_tenant_finishes_its_pending_answer_with_every_final_outcome_once(
+    outcome: str, chat_conn: AsyncConnection
+) -> None:
+    """T3 / the cancel step: one UPDATE that sets the outcome moves the pending row to any final outcome; the same
+    UPDATE on an already-final row changes 0 rows."""
+    await ca.check_tenant_finishes_pending_answer(chat_conn, outcome)
+
+
+def test_final_outcomes_are_every_planned_outcome_but_pending() -> None:
+    from app.db.models.chat import MESSAGE_OUTCOMES
+
+    assert set(ca.FINAL_OUTCOMES) == set(MESSAGE_OUTCOMES) - {"pending"}
+    assert len(ca.FINAL_OUTCOMES) == len(set(ca.FINAL_OUTCOMES)) == 14
+
+
 # ── the citation-blank queue (C21) ───────────────────────────────────────────────────────────────────
 
 

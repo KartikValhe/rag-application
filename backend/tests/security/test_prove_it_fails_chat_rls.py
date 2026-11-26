@@ -194,6 +194,21 @@ async def test_tenant_pending_only_policy_dropped_is_caught(owner_conn: AsyncCon
     breaks = ["DROP POLICY chat_tenant_update_pending ON app.messages"]
     await _broken_then_restored(owner_conn, breaks, ca.check_tenant_message_writes)
     await _broken_then_restored(owner_conn, breaks, _catalog("messages"))
+    # Without the policy a final row can be rewritten: the second UPDATE changes 1 row.
+    await _broken_then_restored(owner_conn, breaks, lambda c: ca.check_tenant_finishes_pending_answer(c, "answered"))
+
+
+@pytest.mark.parametrize("outcome", ["answered", "cancelled", "interrupted", "error"])
+async def test_tenant_pending_policy_without_with_check_is_caught(outcome: str, owner_conn: AsyncConnection) -> None:
+    """With no WITH CHECK, Postgres applies USING (role = 'assistant' AND outcome = 'pending') to the NEW row too, so
+    T3 could never write a final outcome."""
+    breaks = [
+        "DROP POLICY chat_tenant_update_pending ON app.messages",
+        "CREATE POLICY chat_tenant_update_pending ON app.messages AS RESTRICTIVE FOR UPDATE TO app_tenant "
+        "USING (role = 'assistant' AND outcome = 'pending')",
+    ]
+    await _broken_then_restored(owner_conn, breaks, lambda c: ca.check_tenant_finishes_pending_answer(c, outcome))
+    await _broken_then_restored(owner_conn, breaks, _catalog("messages"))
 
 
 async def test_an_extra_permissive_policy_is_caught(owner_conn: AsyncConnection) -> None:

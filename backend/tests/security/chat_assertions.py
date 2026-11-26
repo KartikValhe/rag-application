@@ -528,6 +528,64 @@ async def check_tenant_message_writes(conn: AsyncConnection) -> None:
         await savepoint.rollback()
 
 
+# Every outcome the plan (9.1) lists except 'pending': the values T3 and the cancel step may write. A literal on purpose.
+FINAL_OUTCOMES = (
+    "answered",
+    "not_found",
+    "refused_by_model",
+    "no_valid_citations",
+    "schedule_answered",
+    "schedule_no_timetable",
+    "clarify",
+    "fallback_retrieval_only",
+    "budget_retrieval_only",
+    "interrupted",
+    "cancelled",
+    "truncated",
+    "blocked_leak",
+    "error",
+)
+
+
+async def check_tenant_finishes_pending_answer(conn: AsyncConnection, outcome: str) -> None:
+    """As app_tenant (user A): ONE UPDATE that sets `outcome` moves A's pending answer to the final `outcome` (1 row,
+    stored as written), and the very same UPDATE on a row that is already final changes 0 rows: on that row right
+    after (now final) and on A's answer that was final from the start. Needs a WITH CHECK that accepts a non-pending
+    new row: without one, Postgres would apply USING (outcome = 'pending') to the new row and refuse every outcome."""
+    w = await seed_chat_world(conn)
+    finish = text(
+        "UPDATE app.messages SET outcome = :o, content = :c, partial = :p, completed_at = now() WHERE id = :id"
+    )
+    params = {"o": outcome, "c": f"text for {outcome}", "p": outcome in ("cancelled", "interrupted")}
+    savepoint = await conn.begin_nested()
+    try:
+        await conn.execute(text("SET LOCAL ROLE app_tenant"))
+        await conn.execute(text("SELECT set_config('app.tenant_id', :v, true)"), {"v": str(w.x)})
+        await conn.execute(text("SELECT set_config('app.user_id', :v, true)"), {"v": str(w.a.user)})
+        try:
+            first = await conn.execute(finish, {**params, "id": w.a.pending})
+        except DBAPIError as exc:
+            raise AssertionError(f"pending -> {outcome}: refused: {exc.orig}") from exc
+        assert first.rowcount == 1, f"pending -> {outcome}: changed {first.rowcount} row(s), expected 1"
+        again = await conn.execute(finish, {**params, "id": w.a.pending})
+        assert again.rowcount == 0, f"{outcome} -> {outcome} again: a final row changed ({again.rowcount} row(s))"
+        finished = await conn.execute(finish, {**params, "id": w.a.answer})
+        assert finished.rowcount == 0, f"answered -> {outcome}: a final row changed ({finished.rowcount} row(s))"
+        await conn.execute(text("RESET ROLE"))
+        stored = (
+            await conn.execute(
+                text("SELECT id, role, user_id, outcome FROM app.messages WHERE tenant_id = :t AND id = ANY(:ids)"),
+                {"t": w.x, "ids": [w.a.pending, w.a.answer]},
+            )
+        ).all()
+        assert {tuple(r) for r in stored} == {
+            (w.a.pending, "assistant", w.a.user, outcome),
+            (w.a.answer, "assistant", w.a.user, "answered"),
+        }, f"stored rows after the {outcome} update: {stored}"
+    finally:
+        await savepoint.rollback()
+
+
 async def check_queue_grants(conn: AsyncConnection) -> None:
     """C21: app_tenant can only INSERT into the blank queue; app_chat_maint can only SELECT and DELETE, in its tenant."""
     w = await seed_chat_world(conn)
