@@ -55,6 +55,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "security/test_prove_it_fails_uploads.py": ("fast", "security"),
     "security/test_prove_it_fails_worker.py": ("db", "security"),
     "security/test_prove_it_fails_usage.py": ("db", "security"),  # 6a-5: RLS alone, wider grants, missing FORCE on 0012
+    "security/test_prove_it_fails_chat_rls.py": ("db", "security"),  # 6a-8: owner policy, FORCE, grants, pending policy, reply index, queue on 0013
     # ── tests that need no infrastructure ──
     "test_body_limit_routes.py": ("fast", "security"),
     "test_chunker.py": ("fast",),
@@ -86,7 +87,9 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_chat_router.py": ("fast",),  # 6a-7: pure rule router (intents en/mr, look-alikes, names only from the caller's scope, total on any string, no I/O imports)
     "test_chat_language.py": ("fast",),  # 6a-7: Devanagari share, mr/hi function words, tie gives the tenant default, pure
     "test_tenant_settings.py": ("db",),  # 6a-5: one tenant_settings row per tenant, written on tenant creation
-    "test_phase6_schema.py": ("db", "security"),  # 6a-5: migration 0012: FORCE RLS, policies, grants per role, FKs, backfill
+    "test_phase6_schema.py": ("db", "security"),  # 6a-5/6a-8: migrations 0012 and 0013: FORCE RLS, policies, grants per role, FKs, down/up
+    "test_chat_migration_0013.py": ("fast", "security"),  # 6a-8: the SQL 0013 issues (fake op), where app_chat_maint is created
+    "test_chat_isolation.py": ("db", "security"),  # 6a-8: owner/tenant isolation, maint role, queue grants as the real roles
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag

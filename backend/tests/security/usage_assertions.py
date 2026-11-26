@@ -18,19 +18,26 @@ from sqlalchemy import text
 PHASE6_USAGE_TABLES = ("tenant_settings", "llm_usage_events")
 
 # Plan 9.2: app_tenant only, narrower than _secure_table's default. Nobody else gets anything (app_platform,
-# app_worker, PUBLIC). The chat maintenance role arrives in 0013, not here.
+# app_worker, PUBLIC). Since 0013 (step 6a-8) the chat maintenance role may SELECT and DELETE usage events (the
+# retention delete moved to it, C24) through its own chat_maint policy; it gets nothing on tenant_settings.
 EXPECTED_TABLE_PRIVILEGES: dict[str, frozenset[tuple[str, str]]] = {
     "tenant_settings": frozenset({("app_tenant", "SELECT"), ("app_tenant", "INSERT"), ("app_tenant", "UPDATE")}),
-    "llm_usage_events": frozenset({("app_tenant", "SELECT"), ("app_tenant", "INSERT")}),
+    "llm_usage_events": frozenset(
+        {("app_tenant", "SELECT"), ("app_tenant", "INSERT"), ("app_chat_maint", "SELECT"), ("app_chat_maint", "DELETE")}
+    ),
 }
 
-ROLES = ("app_tenant", "app_platform", "app_worker")
+ROLES = ("app_tenant", "app_platform", "app_worker", "app_chat_maint")
 PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 
 ISOLATION_PREDICATE = "(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
-EXPECTED_POLICIES = frozenset(
-    {("tenant_isolation", "ALL", "PERMISSIVE", ("public",), ISOLATION_PREDICATE, ISOLATION_PREDICATE)}
-)
+_ISOLATION = ("tenant_isolation", "ALL", "PERMISSIVE", ("public",), ISOLATION_PREDICATE, ISOLATION_PREDICATE)
+EXPECTED_POLICIES_BY_TABLE: dict[str, frozenset[tuple[Any, ...]]] = {
+    "tenant_settings": frozenset({_ISOLATION}),
+    "llm_usage_events": frozenset(
+        {_ISOLATION, ("chat_maint", "ALL", "PERMISSIVE", ("app_chat_maint",), ISOLATION_PREDICATE, ISOLATION_PREDICATE)}
+    ),
+}
 
 
 async def table_privileges(conn: Any, table: str) -> set[tuple[str, str]]:
@@ -112,7 +119,8 @@ async def assert_policies(conn: Any, table: str) -> None:
         )
     ).all()
     actual = {(r[0], r[1], r[2], tuple(sorted(r[3])), r[4], r[5]) for r in rows}
-    assert actual == set(EXPECTED_POLICIES), f"{table}: policies differ: {sorted(actual ^ set(EXPECTED_POLICIES))}"
+    expected = set(EXPECTED_POLICIES_BY_TABLE[table])
+    assert actual == expected, f"{table}: policies differ: {sorted(actual ^ expected)}"
 
 
 def assert_rows_belong_to(tenant_ids: Iterable[uuid.UUID], tenant_id: uuid.UUID, what: str) -> None:

@@ -741,10 +741,10 @@ Review 6-0c: `messages` gets a column-level UPDATE grant and split `chat_maint` 
 | Table | `tenant_isolation` (existing predicate) | `chat_owner` (RESTRICTIVE, **TO app_tenant only**) | `chat_maint` (PERMISSIVE, TO app_chat_maint) | `app_tenant` grants | `app_chat_maint` grants | Other roles |
 |---|---|---|---|---|---|---|
 | `tenant_settings` | yes | no | no | SELECT, INSERT, UPDATE | none | none |
-| `conversations` | yes | yes | yes | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE | none |
-| `messages` | yes | yes | yes, **split into SELECT, DELETE and UPDATE policies** (review 6-0c) | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE, **UPDATE (outcome, partial, completed_at)** (review 6-0c) | none |
-| `message_citations` | yes | yes | yes | SELECT, INSERT, DELETE (**no UPDATE any more**, review 6-0b) | SELECT, DELETE, **UPDATE (snippet, heading_path)** | none |
-| `message_feedback` | yes | yes | yes | SELECT, INSERT, UPDATE, DELETE | SELECT, DELETE | none |
+| `conversations` | yes | yes | yes | SELECT, INSERT, DELETE, UPDATE (3 columns, 6a-8) | SELECT, DELETE | none |
+| `messages` | yes | yes | yes, **split into SELECT, DELETE and UPDATE policies** (review 6-0c) | SELECT, INSERT, UPDATE (T3 columns only, own pending assistant row only; **no DELETE**, 6a-8) | SELECT, DELETE, **UPDATE (outcome, partial, completed_at)** (review 6-0c) | none |
+| `message_citations` | yes | yes | yes | SELECT, INSERT (**no UPDATE any more**, review 6-0b; **no DELETE**, 6a-8) | SELECT, DELETE, **UPDATE (snippet, heading_path)** | none |
+| `message_feedback` | yes | yes | yes | SELECT, INSERT, DELETE, UPDATE (3 columns, 6a-8) | SELECT, DELETE | none |
 | `llm_usage_events` | yes | no | yes | SELECT, INSERT (**no DELETE any more**: the retention delete moved to `app_chat_maint`) | SELECT, DELETE | none |
 | `chat_citation_blank_queue` (review 6-0c) | yes | no (no `user_id`) | yes | **INSERT only** | SELECT, DELETE | none |
 
@@ -775,9 +775,28 @@ GRANT UPDATE (outcome, partial, completed_at) ON app.messages TO app_chat_maint;
 (On `conversations`, `message_citations`, `message_feedback`, `llm_usage_events` and `chat_citation_blank_queue` the maintenance role keeps
 one `chat_maint` PERMISSIVE `FOR ALL` policy with the tenant condition in `USING` and `WITH CHECK`; the grants bound it to SELECT, DELETE (and
 the two citation columns). `chat_owner` also goes on `conversations`, `message_citations` and `message_feedback` with the table name changed;
-`llm_usage_events` and the queue table get no `chat_owner` (no `user_id`). `tenant_isolation` has no `TO` clause, so it already applies to every
-role, `app_chat_maint` included, and `chat_owner` being `TO app_tenant` is what keeps the owner condition off the maintenance role. The
-`chat_maint` policies repeat the tenant condition on purpose so that this role's reach does not depend on `tenant_isolation` staying as it is.)
+`llm_usage_events` and the queue table get no `chat_owner` (no `user_id`). **Review 6a-8 (C26, owner decision):** on the five tables of `0013`,
+`tenant_isolation` (same predicate) is created **`TO app_tenant`**, as on `ingest_jobs` since `0009`. Postgres ORs the permissive policies of a
+role, so a `tenant_isolation` without `TO` would also apply to `app_chat_maint` and would let it update every row of its tenant: the pending
+condition of `chat_maint_update` would add nothing (proved on the test database). With it, only the `chat_maint*` policies apply to
+`app_chat_maint`, and no policy at all applies to any other role (default deny). `chat_owner` being `TO app_tenant` keeps the owner condition
+off the maintenance role. `llm_usage_events` keeps its `0012` `tenant_isolation` without `TO`; its `chat_maint` policy has the same predicate, so
+the OR changes nothing there.)
+
+**Narrowed `app_tenant` grants on the chat tables (review 6a-8, owner brief: no UPDATE or DELETE beyond the request flow).** `_secure_table`
+grants SELECT, INSERT, UPDATE, DELETE; `0013` narrows it to:
+- `conversations`: SELECT, INSERT, DELETE (the delete route; the cascade runs as the table owner), `UPDATE (title, last_message_at,
+  message_count)` (T1 sets the title and bumps the counters, T3 moves `last_message_at`).
+- `messages`: SELECT, INSERT (T1), **no DELETE** (no route deletes a message; conversation delete cascades), `UPDATE` only on the columns
+  T3 and the shielded cancel step (8.6) write: `content, route, outcome, partial, intent, rule_ids, router_confidence, language,
+  retrieval_query, provider, model_key, prompt_version, prompt_tokens, completion_tokens, tokens_estimated, latency_ms, retrieval,
+  invalid_citation_count, flagged_sources_used, needs_review, completed_at`. Never `tenant_id, id, conversation_id, user_id, role,
+  reply_to_id, client_request_id, created_at`; `guardrail` is left for Phase 7 to grant. A RESTRICTIVE policy `chat_tenant_update_pending`
+  (`FOR UPDATE TO app_tenant`, `USING (role = 'assistant' AND outcome = 'pending')`, `WITH CHECK (role = 'assistant')`) limits the UPDATE to
+  the caller's own pending assistant row, so a finished answer or a question cannot be rewritten.
+- `message_citations`: SELECT, INSERT (T3); no UPDATE (review 6-0b) and **no DELETE** (cascade only).
+- `message_feedback`: SELECT, INSERT, DELETE (the feedback delete route), `UPDATE (rating, comment, updated_at)` (the upsert).
+- `chat_citation_blank_queue`: INSERT only (C21). Nobody has TRUNCATE.
 
 **What the `messages` UPDATE can and cannot do (review 6-0c).** Three layers bound it: the column grant (only `outcome`, `partial`,
 `completed_at`; it cannot change `role`, `user_id`, `content` or the tenant), the `USING` condition (it can only see assistant rows that are
@@ -878,9 +897,10 @@ Conversation creation, messages and feedback are **not** audited (high volume, t
 2. **`0013_chat.py`**: create `conversations`, `messages`, `message_citations`, `message_feedback` **and
    `chat_citation_blank_queue`** (review 6-0c) with the composite keys and
    FKs of 9.1 (including the partial UNIQUE index on `messages (tenant_id, reply_to_id) WHERE role = 'assistant'` and the pending
-   index, review 6-0b); `_secure_table` for each, **then narrow the grants** (`_secure_table` grants SELECT, INSERT, UPDATE, DELETE:
+   index, review 6-0b); `_secure_table` for each (**review 6a-8, C26:** with `tenant_isolation TO app_tenant`), **then narrow the grants** (`_secure_table` grants SELECT, INSERT, UPDATE, DELETE:
    revoke UPDATE on `message_citations` from `app_tenant`; **review 6-0c:** revoke SELECT, UPDATE, DELETE on `chat_citation_blank_queue`
-   from `app_tenant`, leaving INSERT only); then the four `chat_owner` RESTRICTIVE policies, `TO app_tenant`, with no
+   from `app_tenant`, leaving INSERT only; **review 6a-8:** the column lists and DELETE revokes of 9.2 "Narrowed `app_tenant` grants", and the
+   `chat_tenant_update_pending` RESTRICTIVE policy on `messages`); then the four `chat_owner` RESTRICTIVE policies, `TO app_tenant`, with no
    maintenance bypass. **Review 6-0b:** the migration first checks that the role `app_chat_maint` exists (`_require_role`), then
    grants it SELECT, DELETE on `conversations`, `messages`, `message_citations`, `message_feedback`, `llm_usage_events` and
    `chat_citation_blank_queue`, plus
@@ -1310,6 +1330,7 @@ about USD 1.3 a day whatever happens.
 | C23 | **(review 6-0b)** The draft tenant token default (300,000) covers about 80 of the ~650 LLM answers that 1,000 questions a day need (about 12%), while Q9 asks to "accept for the pilot" and the cost section assumes 1,000 questions a day | 7.7 vs Q9 and the cost estimate | No new number chosen: both token defaults are marked "set after Q1"; the volume table in 7.7 shows the gap |
 | C24 | **Decided (review 6-0c): keep as is.** (review 6-0b) Owner decision 1 removes DELETE on `llm_usage_events` from `app_tenant` (the retention delete moves to `app_chat_maint`); the first draft granted it to `app_tenant` for retention | 9.2 first draft vs decision 1 | Done as a consequence of decision 1: `app_tenant` keeps SELECT, INSERT on usage events. No tenant-side delete (owner confirmed in review 6-0c) |
 | C25 | **(review 6-0b)** Fact F11 named step 6a-8 (the migration step) for the transport test, and 5.2 said the system prompt is reviewed in 6a-9 (the API step) | this file, first draft | Corrected to 6a-9b and 6a-10 |
+| C26 | **Decided (6a-8, owner): `tenant_isolation TO app_tenant` on the five `0013` tables.** 9.2 kept `tenant_isolation` without a `TO` clause, so it also applied to `app_chat_maint`; permissive policies are ORed, so the role could UPDATE `outcome`, `partial`, `completed_at` of a finished assistant row or a user row (proved on the test database in a rolled-back transaction: 1 row changed; with `TO app_tenant`: 0) | 9.2 SQL and text vs C22 ("only an assistant row that is still pending") | `tenant_isolation` of the five tables is `TO app_tenant` (the `ingest_jobs` pattern of `0009`); the `chat_maint*` policies alone decide what `app_chat_maint` reaches. 9.2, 9.7 updated |
 
 ---
 
@@ -1967,3 +1988,53 @@ about USD 1.3 a day whatever happens.
   (24 red), usage never read (18), only `x_groq.usage` read (1: the top-level-alone case), only the top-level usage read (1: the `x_groq`-alone case), usage marked estimated (10),
   `stop` mapped to `length` (8), token text stripped (5), NFKC applied to the text (5), full-width brackets replaced by ASCII ones (1: the pass-through test), the `NOT` piece dropped
   (8), a wrong completion count (10). **Not proven red:** the secret-word test (the recordings are untracked files with no copy, so none was edited to hold a secret).
+
+### 6a-8 Migration 0013, chat tables, row-level security, the chat maintenance role · 2026-11-26 · not committed
+
+- **Step 0 (plan check).** The four owner decisions were already in the plan: C22 (column UPDATE grant, split `chat_maint` policies on `messages`,
+  UPDATE policy only for `role = 'assistant' AND outcome = 'pending'`: 9.2, 9.7, C22), C21 (outbox `chat_citation_blank_queue`, `app_tenant` INSERT
+  only, `app_chat_maint` SELECT/DELETE, `CHAT_MAINT_DATABASE_URL` worker only: 9.1, 9.2, C21), the partial unique index (9.1), `chat_owner`
+  RESTRICTIVE `TO app_tenant` plus a `chat_maint` set `TO app_chat_maint` (9.2). Nothing added for them. **Contradiction found and decided by the owner
+  (C26):** 9.2's `tenant_isolation` had no `TO` clause, so with ORed permissive policies `app_chat_maint` could UPDATE a finished row (shown on the
+  test database in a rolled-back transaction: 1 row changed; with `TO app_tenant`: 0). Owner chose `tenant_isolation TO app_tenant` on the five new
+  tables. 9.2, 9.7 and the conflicts table were updated, plus the narrowed `app_tenant` grants of this brief (9.2 "Narrowed `app_tenant` grants").
+- **Built:** `alembic/versions/0013_chat.py`; `app/db/models/chat.py` (five models, the CHECK lists and the column-grant tuples the migration uses);
+  `app/db/models/__init__.py`; the role `app_chat_maint` (LOGIN, NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE, **no password**) in
+  `infra/postgres/init.sql` (both sections, which CI runs) and in `app/scripts/prepare_test_db.py` (created when missing, then required). The
+  migration grants `USAGE ON SCHEMA app` itself, so its downgrade can take it back.
+- **Not built in this step (owner brief: no service, config or LLM code), moved to the first step that needs them (6a-9a / 6a-12):**
+  `chat_session_context` in `tenant_db.py`, `app/services/chat_maintenance.py`, the `CHAT_MAINT_DATABASE_URL` setting and its `test_db_guard.py`
+  entry, and the two source scans. No old maintenance-flag scan existed, so none was removed. The production runbook line for the role is still to be written.
+- **Choices not spelled out by the plan:** a `ck_messages_shape` CHECK (a user row has no `reply_to_id` and no `outcome`; an assistant row has both,
+  so the unique reply index covers every answer, since a NULL `reply_to_id` would escape it); the reply FK is `(tenant_id, conversation_id,
+  reply_to_id)`, so an answer belongs to its question's conversation; one 3-column FK `(tenant_id, user_id, message_id)` on citations and feedback
+  (it implies the 2-column one of 9.1); `router_confidence` is `'high' | 'low'` (the 6a-7 router's type, not a number); `snippet` NOT NULL DEFAULT
+  `''` (blanking writes `''`); `guardrail` left out of the `app_tenant` UPDATE list (Phase 7 grants it); the migration refuses a maintenance role
+  that is a superuser, has BYPASSRLS or is a member of another role (inherited grants and `TO` policies would make every policy moot);
+  `llm_usage_events` keeps 0012's `tenant_isolation` without `TO` (same predicate as its new `chat_maint`, so the OR changes nothing); the prove-it
+  file is `test_prove_it_fails_chat_rls.py` (the brief's name; 11.4 says `test_prove_it_fails_chat.py`, which later steps can still use).
+- **Tests (`tier_map.py`):** `test_chat_migration_0013.py` (`fast, security`: every GRANT/REVOKE and policy in order through a fake `op`, the role
+  checks, the downgrade, `init.sql` and `prepare_test_db` without a password, model constants); `test_chat_isolation.py` (`db, security`: owner,
+  tenant, reply index, maintenance UPDATE, `app_tenant` narrowing with cascade, queue, other roles, and one test on the real `app_tenant` login
+  with committed rows); `test_phase6_schema.py` (0013 catalog: FORCE, exact policies, exact table and column grants, maintenance footprint,
+  indexes, FKs, CHECKs, cascades, and the real 0013 downgrade and upgrade in a rolled-back transaction); `security/test_prove_it_fails_chat_rls.py`
+  (`db, security`); shared helpers `tests/security/chat_assertions.py`; `test_isolation.py`: the five tables in `CUSTOM_COVERAGE` with the dedicated
+  `test_chat_tables_owner_and_tenant_isolation`, and their policies in the catalog inventory; `usage_assertions.py`: `llm_usage_events` now expects
+  `app_chat_maint` SELECT, DELETE and its `chat_maint` policy.
+- Red first: `115 failed, 151 passed in 33.17s` (`FileNotFoundError ... 0013_chat.py`, `relation "app.conversations" does not exist`, `role
+  "app_chat_maint" does not exist`).
+- Migration on the **test database only**: `prepare_test_db` created the role and ran `0012 -> 0013`; then the CLI ran down, up, down, up.
+  After the downgrade: 0 chat tables, and for `app_chat_maint` 0 table privileges, 0 column grants, 0 policies, no schema USAGE. After the upgrade:
+  12 table privileges, 5 column grants, 8 policies.
+- Prove-it run, first pass: two expectations were wrong and were corrected, not weakened. (1) The maintenance UPDATE policy without the tenant
+  condition was not caught, because the probe had a `WHERE`, which also applies the SELECT policy. Blind UPDATE and DELETE probes were added and
+  now catch it. (2) An extra `USING (true)` permissive policy cannot change behaviour, because the RESTRICTIVE owner policy still holds. That test
+  now asserts that the catalog goes red AND that the owner isolation still holds.
+- Self-review (migration file broken, 0013 rebuilt on the test DB, named tests run, file restored and SHA-256 compared, rebuilt): owner policy
+  dropped on messages, owner policy PERMISSIVE, NO FORCE, maintenance UPDATE on all columns, `app_tenant` UPDATE on all columns, maintenance UPDATE
+  policy without pending, reply index non-unique, queue SELECT left to `app_tenant`, `tenant_isolation` without `TO`. Each turned a named test red.
+  No break stayed green; the file was restored byte-identical; the named tests then gave `25 passed`.
+- `run_tests gate --touched`: `= 1 failed, 3555 passed, 12 skipped, 1010 deselected, 4 xfailed in 623.14s (0:10:23) =`. The failure is
+  `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same pre-existing failure as in the 6a-1a to
+  6a-6 records (not touched).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 125 source files`

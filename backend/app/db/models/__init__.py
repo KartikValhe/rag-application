@@ -16,6 +16,13 @@ from app.db.models.audit import AuditLog
 from app.db.models.auth import EmailToken, Invitation, RefreshToken
 from app.db.models.base import Base
 from app.db.models.branding import TenantBranding
+from app.db.models.chat import (
+    ChatCitationBlankQueue,
+    Conversation,
+    Message,
+    MessageCitation,
+    MessageFeedback,
+)
 from app.db.models.document import (
     Chunk,
     ChunkEmbedding,
@@ -67,4 +74,9 @@ __all__ = [
     "IngestJob",
     "TenantSettings",
     "LLMUsageEvent",
+    "Conversation",
+    "Message",
+    "MessageCitation",
+    "MessageFeedback",
+    "ChatCitationBlankQueue",
 ]

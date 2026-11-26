@@ -52,10 +52,22 @@ BEGIN
     END IF;
 END $$;
 
+-- Create app_chat_maint role (chat maintenance in the worker only: retention delete, stale-pending marking,
+-- citation blanking). Migration 0013 grants it USAGE on schema app and exactly its chat grants, nothing else.
+-- NO password here on purpose: set one outside the repo (ALTER ROLE app_chat_maint PASSWORD ...) when the
+-- worker needs CHAT_MAINT_DATABASE_URL. Roles are cluster-wide, so this one statement serves both databases.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_chat_maint') THEN
+        CREATE ROLE app_chat_maint LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+END $$;
+
 GRANT USAGE ON SCHEMA app TO app_tenant, app_platform, app_worker;
 ALTER ROLE app_tenant SET search_path = app;
 ALTER ROLE app_platform SET search_path = app;
 ALTER ROLE app_worker SET search_path = app;
+ALTER ROLE app_chat_maint SET search_path = app;
 
 -- 3. Setup ragplatform_test (test db)
 \connect ragplatform_test
@@ -102,8 +114,17 @@ BEGIN
     END IF;
 END $$;
 
+-- app_chat_maint (no password, see above; the IF NOT EXISTS makes this a no-op after the first section).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_chat_maint') THEN
+        CREATE ROLE app_chat_maint LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+    END IF;
+END $$;
+
 GRANT USAGE ON SCHEMA app TO app_tenant, app_platform, app_worker;
 ALTER ROLE app_tenant SET search_path = app;
 ALTER ROLE app_platform SET search_path = app;
 ALTER ROLE app_worker SET search_path = app;
+ALTER ROLE app_chat_maint SET search_path = app;
 

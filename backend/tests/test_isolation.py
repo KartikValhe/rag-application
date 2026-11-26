@@ -60,6 +60,8 @@ from app.db.models.timetable import Timetable, TimetableEntry
 from app.db.models.user import User
 from app.ml.model_keys import E5_SMALL_DIM, E5_SMALL_MODEL_KEY
 from tests.fixtures.academic_world import AcademicWorld, create_document_graph
+from tests.security import chat_assertions
+from tests.security.chat_assertions import CHAT_TABLES, EXPECTED_CHAT_POLICIES
 
 pytestmark = pytest.mark.asyncio
 
@@ -324,6 +326,16 @@ CUSTOM_COVERAGE: dict[str, tuple[str, str]] = {
         "test_timetables_and_entries_isolation",
         "needs timetable, class, subject and teacher parents",
     ),
+    # Phase 6 chat tables (migration 0013). The generic loop sets only app.tenant_id, and the chat_owner policy
+    # also needs app.user_id, so the loop would see no row at all (plan 9.7 step 2). The queue is INSERT-only for
+    # app_tenant, so the loop's SELECT would be refused.
+    **{
+        table: (
+            "test_chat_tables_owner_and_tenant_isolation",
+            "owner policy needs app.user_id (and the queue is insert-only); see tests/test_chat_isolation.py",
+        )
+        for table in CHAT_TABLES
+    },
 }
 
 
@@ -824,6 +836,29 @@ async def test_archived_timetables_isolation(
     assert sorted(rows) == ["archived", "published"]
 
 
+# ── 6c. Chat tables (migration 0013): owner, tenant and queue isolation ─────
+
+
+async def test_chat_tables_owner_and_tenant_isolation() -> None:
+    """
+    The chat tables in one place for the registry guard (CUSTOM_COVERAGE). As the real app_tenant role (SET LOCAL
+    ROLE): user A sees, updates and deletes only A's rows and nothing with app.tenant_id alone; tenant X never sees
+    tenant Y; the blank queue is insert-only for app_tenant and select/delete-only for app_chat_maint. Everything
+    runs in one rolled-back transaction of the test database. The detailed tests are in tests/test_chat_isolation.py.
+    """
+    from tests.conftest import _test_engine
+
+    async with _test_engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            assert (await conn.execute(text("SELECT current_database()"))).scalar_one().endswith("_test")
+            await chat_assertions.check_owner_isolation(conn)
+            await chat_assertions.check_tenant_isolation(conn)
+            await chat_assertions.check_queue_grants(conn)
+        finally:
+            await trans.rollback()
+
+
 # ── 7. Guard: no tenant table may escape the isolation tests ─────────────────
 
 NEW_DOCUMENT_TABLES = {
@@ -836,6 +871,7 @@ NEW_DOCUMENT_TABLES = {
     "ingest_jobs",
 }
 NEW_PHASE6_TABLES = {"tenant_settings", "llm_usage_events"}  # migration 0012
+NEW_CHAT_TABLES = set(CHAT_TABLES)  # migration 0013, covered by CUSTOM_COVERAGE
 
 
 def _orm_tenant_table_names() -> list[str]:
@@ -867,6 +903,8 @@ async def test_guard_every_tenant_table_is_registered_or_explained() -> None:
     assert registered <= known
     assert registered >= NEW_DOCUMENT_TABLES
     assert registered >= NEW_PHASE6_TABLES
+    assert set(CUSTOM_COVERAGE) >= NEW_CHAT_TABLES
+    assert known >= NEW_CHAT_TABLES, "a chat table of migration 0013 has no ORM model"
 
 
 async def test_guard_detects_an_unregistered_tenant_table() -> None:
@@ -947,6 +985,9 @@ EXPECTED_POLICIES_BY_TABLE: dict[str, frozenset[PolicyRow]] = {
             ("worker_delete", "DELETE", "PERMISSIVE", ("app_worker",), _JOB_FINISHED, None),
         }
     ),
+    # Phase 6 chat tables and llm_usage_events (migration 0013, plan 9.2, C26): tenant_isolation TO app_tenant, the
+    # RESTRICTIVE chat_owner TO app_tenant, and the chat_maint policy set TO app_chat_maint.
+    **EXPECTED_CHAT_POLICIES,
 }
 
 

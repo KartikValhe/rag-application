@@ -23,6 +23,7 @@ from app.core.tenant_db import tenant_session_context
 from app.db.models.llm_usage import USAGE_OUTCOMES, USAGE_PURPOSES
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
+from tests.security import chat_assertions as ca
 from tests.security.usage_assertions import (
     PHASE6_USAGE_TABLES,
     assert_policies,
@@ -502,3 +503,193 @@ def test_upgrade_refuses_a_role_that_cannot_see_every_tenant(monkeypatch: pytest
 def test_upgrade_refuses_when_app_tenant_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RuntimeError, match="app_tenant"):
         _run("upgrade", monkeypatch, _FakeConn(roles=("app_platform", "app_worker")))
+
+
+# ══ Step 6a-8: migration 0013, the chat tables (plan 9.1, 9.2, 9.7 step 2, C21, C22, C26) ═════════════════════════
+
+
+MIGRATION_0013 = "0013_chat.py"
+
+
+def _load_0013() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0013_under_test", VERSIONS / MIGRATION_0013)
+    assert spec is not None and spec.loader is not None, f"{MIGRATION_0013} is missing"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_the_test_database_is_at_0013_or_later(raw_db: AsyncSession) -> None:
+    version = (await raw_db.execute(text("SELECT version_num FROM app.alembic_version"))).scalar_one()
+    assert version >= "0013"
+
+
+@pytest.mark.parametrize("table", ca.CHAT_TABLES)
+async def test_chat_tables_have_rls_enabled_and_forced(table: str, raw_db: AsyncSession) -> None:
+    await ca.assert_chat_rls_forced(raw_db, table)
+
+
+@pytest.mark.parametrize("table", ca.MAINT_TABLES)
+async def test_chat_policies_are_exactly_the_plan(table: str, raw_db: AsyncSession) -> None:
+    await ca.assert_chat_policies(raw_db, table)
+
+
+@pytest.mark.parametrize("table", ca.MAINT_TABLES)
+async def test_chat_grants_are_exactly_the_plan(table: str, raw_db: AsyncSession) -> None:
+    await ca.assert_chat_table_grants(raw_db, table)
+
+
+async def test_chat_maint_reaches_only_the_plan(raw_db: AsyncSession) -> None:
+    await ca.assert_role_is_plain(raw_db)
+    await ca.assert_chat_maint_reaches_only_the_plan(raw_db)
+
+
+async def test_assistant_reply_unique_index(raw_db: AsyncSession) -> None:
+    await ca.assert_assistant_reply_index(raw_db)
+
+
+@pytest.mark.parametrize(
+    "index,table,fragment",
+    [
+        ("ix_conversations_user_last_message", "conversations", "(tenant_id, user_id, last_message_at DESC)"),
+        ("ix_conversations_last_message", "conversations", "(tenant_id, last_message_at)"),
+        ("ix_messages_conversation_created", "messages", "(tenant_id, conversation_id, created_at)"),
+        ("ix_messages_pending_created", "messages", "(tenant_id, created_at) WHERE ((outcome)::text = 'pending'::text)"),
+        ("ix_message_citations_document", "message_citations", "(tenant_id, document_id)"),
+        ("ix_chat_citation_blank_queue_created", "chat_citation_blank_queue", "(tenant_id, created_at)"),
+    ],
+)
+async def test_chat_indexes(index: str, table: str, fragment: str, raw_db: AsyncSession) -> None:
+    row = (
+        await raw_db.execute(
+            text("SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'app' AND indexname = :i"), {"i": index}
+        )
+    ).one_or_none()
+    assert row is not None, f"index {index} is missing"
+    assert row[0] == table
+    assert fragment in row[1], row[1]
+
+
+async def test_chat_foreign_key_actions(raw_db: AsyncSession) -> None:
+    assert await _foreign_keys(raw_db, "conversations") == {
+        ("app.tenants", ("tenant_id",), "c", None),
+        ("app.users", ("tenant_id", "user_id"), "c", None),
+        ("app.classes", ("tenant_id", "class_id"), "c", None),
+        ("app.subjects", ("tenant_id", "subject_id"), "n", ("subject_id",)),
+    }
+    assert await _foreign_keys(raw_db, "messages") == {
+        ("app.tenants", ("tenant_id",), "c", None),
+        ("app.conversations", ("tenant_id", "user_id", "conversation_id"), "c", None),
+        ("app.messages", ("tenant_id", "conversation_id", "reply_to_id"), "c", None),
+    }
+    for table in ("message_citations", "message_feedback"):
+        assert await _foreign_keys(raw_db, table) == {
+            ("app.tenants", ("tenant_id",), "c", None),
+            ("app.messages", ("tenant_id", "user_id", "message_id"), "c", None),
+        }, table
+    # document_id is a snapshot reference: the document row is gone when the queue row is read (C21).
+    assert await _foreign_keys(raw_db, "chat_citation_blank_queue") == {("app.tenants", ("tenant_id",), "c", None)}
+
+
+async def test_message_checks_refuse_a_wrong_shape(raw_db: AsyncSession) -> None:
+    """A user row has no reply and no outcome; an assistant row has both (so the unique reply index always bites)."""
+    conn = await raw_db.connection()
+    w = await ca.seed_chat_world(conn)
+    bad = [
+        ("user", w.a.question, None),  # a user row that replies
+        ("user", None, "answered"),  # a user row with an outcome
+        ("assistant", None, "pending"),  # an assistant row with no user message
+        ("assistant", w.b.pending_question, None),  # an assistant row with no outcome
+        ("assistant", w.b.pending_question, "great"),  # an unknown outcome
+        ("robot", None, None),  # an unknown role
+    ]
+    for role, reply, outcome in bad:
+        with pytest.raises(IntegrityError, match="check constraint"):
+            async with raw_db.begin_nested():
+                await raw_db.execute(
+                    text("INSERT INTO app.messages (tenant_id, conversation_id, user_id, role, content, reply_to_id, outcome) "
+                         "VALUES (:t, :c, :u, :role, 'x', :r, :o)"),
+                    {"t": w.x, "c": w.b.conversation, "u": w.b.user, "role": role, "r": reply, "o": outcome},
+                )
+    with pytest.raises(IntegrityError, match="check constraint"):
+        async with raw_db.begin_nested():
+            await raw_db.execute(
+                text("UPDATE app.messages SET content = repeat('x', 10001) WHERE tenant_id = :t AND id = :m"),
+                {"t": w.x, "m": w.a.answer},
+            )
+    await raw_db.rollback()
+
+
+async def test_deleting_a_user_class_or_tenant_cascades_and_a_subject_is_set_null(raw_db: AsyncSession) -> None:
+    """Plan 9.2: FK cascades are not subject to RLS (they run as the table owner)."""
+    conn = await raw_db.connection()
+    w = await ca.seed_chat_world(conn)
+    subject = uuid.uuid4()
+    await conn.execute(text("INSERT INTO app.subjects (tenant_id, id, name) VALUES (:t, :s, :n)"),
+                       {"t": w.x, "s": subject, "n": f"chat-subject-{uuid.uuid4().hex[:8]}"})
+    await conn.execute(text("UPDATE app.conversations SET subject_id = :s WHERE tenant_id = :t AND id = :c"),
+                       {"s": subject, "t": w.x, "c": w.b.conversation})
+    await conn.execute(text("DELETE FROM app.subjects WHERE tenant_id = :t AND id = :s"), {"t": w.x, "s": subject})
+    kept = (await conn.execute(text("SELECT subject_id, class_id FROM app.conversations WHERE tenant_id = :t AND id = :c"),
+                               {"t": w.x, "c": w.b.conversation})).one()
+    assert tuple(kept) == (None, w.class_x)
+
+    async def counts(tenant: uuid.UUID, user: uuid.UUID) -> list[int]:
+        return [
+            (await conn.execute(text(f"SELECT count(*) FROM app.{t} WHERE tenant_id = :t AND user_id = :u"),
+                                {"t": tenant, "u": user})).scalar_one()
+            for t in ca.OWNER_TABLES
+        ]
+
+    assert await counts(w.x, w.a.user) == [1, 4, 1, 1]
+    await conn.execute(text("DELETE FROM app.users WHERE tenant_id = :t AND id = :u"), {"t": w.x, "u": w.a.user})
+    assert await counts(w.x, w.a.user) == [0, 0, 0, 0]
+    assert await counts(w.x, w.b.user) == [1, 4, 1, 1]
+    await conn.execute(text("DELETE FROM app.classes WHERE tenant_id = :t AND id = :k"), {"t": w.x, "k": w.class_x})
+    assert await counts(w.x, w.b.user) == [0, 0, 0, 0]
+    await conn.execute(text("DELETE FROM app.tenants WHERE id = :t"), {"t": w.y})
+    for table in ca.MAINT_TABLES:
+        left = (await conn.execute(text(f"SELECT count(*) FROM app.{table} WHERE tenant_id = :t"), {"t": w.y})).scalar_one()
+        assert left == 0, table
+    await raw_db.rollback()
+
+
+def _run_migration_step(sync_conn: Any, step: Any) -> None:
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    with Operations.context(MigrationContext.configure(sync_conn)):
+        step()
+
+
+async def test_0013_downgrade_leaves_no_trace_and_upgrade_restores_the_plan() -> None:
+    """Runs the real 0013 downgrade and upgrade on the TEST database inside one transaction, then rolls it back."""
+    from tests.conftest import _test_engine
+
+    module = _load_0013()
+    async with _test_engine.connect() as conn:
+        trans = await conn.begin()
+        try:
+            database = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+            assert database.endswith("_test"), f"refusing to run a migration experiment on {database!r}"
+            await conn.run_sync(_run_migration_step, module.downgrade)
+            for table in ca.CHAT_TABLES:
+                assert (await conn.execute(text("SELECT to_regclass(:t)"), {"t": f"app.{table}"})).scalar_one() is None, table
+            await ca.assert_no_chat_maint_footprint(conn)
+            # llm_usage_events is back to exactly what 0012 left.
+            assert await ca.policies(conn, "llm_usage_events") == {
+                ("tenant_isolation", "ALL", "PERMISSIVE", ("public",), ca.TENANT_PRED, ca.TENANT_PRED)
+            }
+            assert await ca.table_grants(conn, "llm_usage_events") == {("app_tenant", "SELECT"), ("app_tenant", "INSERT")}
+            assert await ca.column_grants(conn, "llm_usage_events") == set()
+
+            await conn.run_sync(_run_migration_step, module.upgrade)
+            for table in ca.MAINT_TABLES:
+                await ca.assert_chat_policies(conn, table)
+                await ca.assert_chat_table_grants(conn, table)
+            for table in ca.CHAT_TABLES:
+                await ca.assert_chat_rls_forced(conn, table)
+            await ca.assert_assistant_reply_index(conn)
+            await ca.assert_chat_maint_reaches_only_the_plan(conn)
+        finally:
+            await trans.rollback()
