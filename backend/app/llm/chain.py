@@ -11,6 +11,9 @@ adapter (tests/test_llm_chain_imports.py scans for it).
 
 Rules (plan 7.4):
   * `req.model_key` is replaced by each model tried; everything else of the request is sent unchanged;
+  * the tenant narrows both chains (step 6a-11): a key of a provider not in `tenant_ctx.allowed_providers` is skipped
+    with `tenant_not_allowed` BEFORE every other check and its client is never called; when nothing is left the answer
+    chain raises LLMChainExhausted(not_configured=True) and the condense chain yields nothing (`configured` False);
   * before every call: the key passes the start-up policy again (`policy.key_problems`), the model is not
     cooling down, the provider's breaker admits it, and one atomic SlotManager acquire takes a slot on both
     `llm:rpm:{model_key}` (60 s) and `llm:rpd:{model_key}` (86,400 s). A full slot consumes nothing on the
@@ -62,7 +65,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, get_args
 
 import structlog
@@ -122,23 +125,49 @@ def rpd_key(model_key: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class TenantLLMContext:
-    """Who the call is for. Ids only: used in log lines, never in a Redis key or a request to a provider."""
+    """Who the call is for. The tenant id is used in log lines, never in a Redis key or a request to a provider.
+
+    `allowed_providers` is the tenant's tenant_settings.allowed_llm_providers (step 6a-11): None = the platform chain
+    unchanged; a set keeps only the chain keys of those providers (exact names, so it can only narrow); an empty set
+    leaves nothing."""
 
     tenant_id: uuid.UUID
+    allowed_providers: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, uuid.UUID):
             raise TypeError("tenant_id must be a UUID")
+        if self.allowed_providers is not None and (
+            not isinstance(self.allowed_providers, frozenset)
+            or not all(isinstance(p, str) for p in self.allowed_providers)
+        ):
+            raise TypeError("allowed_providers must be None or a frozenset of provider names")
+
+    def allows(self, provider: str | None) -> bool:
+        if self.allowed_providers is None:
+            return True
+        return provider is not None and provider in self.allowed_providers
+
+
+def _provider_of(key: str) -> str | None:
+    try:
+        return split_model_key(key)[0]
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
 class Attempt:
     """One model the chain tried or skipped, and a fixed result code (never text from a provider).
-    `retry_after_s` is set only by `tpm_limit`: the seconds until the model's token window would take this request."""
+    `retry_after_s` is set only by `tpm_limit`: the seconds until the model's token window would take this request.
+    `number` is 1, or 2 for the one retry; `latency_ms` is set only when a provider was called (step 6a-11: the usage
+    row of a failed call). Neither takes part in equality."""
 
     model_key: str
     result: str
     retry_after_s: int | None = None
+    number: int = field(default=1, compare=False)
+    latency_ms: int | None = field(default=None, compare=False)
 
 
 class LLMChainExhausted(Exception):
@@ -255,8 +284,12 @@ class LLMChain:
     def client_names(self) -> tuple[str, ...]:
         return tuple(self._clients)
 
-    def is_configured(self, purpose: Purpose) -> bool:
-        return bool(chain_keys(self._current_settings(), purpose))
+    def is_configured(self, purpose: Purpose, tenant_ctx: TenantLLMContext | None = None) -> bool:
+        """Whether any key of the purpose's chain is left, after the tenant's narrowing when a context is given."""
+        keys = chain_keys(self._current_settings(), purpose)
+        if tenant_ctx is None:
+            return bool(keys)
+        return any(tenant_ctx.allows(_provider_of(key)) for key in keys)
 
     async def aclose(self) -> None:
         """Close the clients that hold connections (each adapter's shared httpx client)."""
@@ -275,7 +308,8 @@ class LLMChain:
         if not isinstance(tenant_ctx, TenantLLMContext):
             raise TypeError("tenant_ctx must be a TenantLLMContext")
         keys = chain_keys(self._current_settings(), purpose)
-        stream = ChainStream(purpose, configured=bool(keys))
+        allowed = any(tenant_ctx.allows(_provider_of(key)) for key in keys)
+        stream = ChainStream(purpose, configured=allowed)
         stream._bind(self._run(purpose, keys, req, tenant_ctx, stream))  # noqa: SLF001
         return stream
 
@@ -291,9 +325,21 @@ class LLMChain:
                 return
             log.warning("llm_chain_not_configured")
             raise LLMChainExhausted((), not_configured=True)
+        if not report.configured:
+            # The tenant's allowed_llm_providers leaves no key of this chain: nothing is called (step 6a-11).
+            for key in keys:
+                self._record(report, log, key, "tenant_not_allowed", 0)
+            log.info("llm_chain_tenant_narrowed_empty")
+            if purpose == "condense":
+                return
+            raise LLMChainExhausted(tuple(report.attempts), not_configured=True)
         settings = self._current_settings()
         deadline = self._clock() + req.timeouts.total
         for key in keys:
+            if not ctx.allows(_provider_of(key)):
+                # Before every other check: a provider the tenant does not allow is never called (step 6a-11).
+                self._record(report, log, key, "tenant_not_allowed", 0)
+                continue
             if key_problems(settings, self._registry, key, purpose):
                 self._record(report, log, key, "not_allowed", 0)
                 log.error("llm_key_not_allowed", model_key=key)
@@ -331,8 +377,11 @@ class LLMChain:
         result: str,
         attempt: int,
         retry_after_s: int | None = None,
+        latency_ms: int | None = None,
     ) -> None:
-        report.attempts.append(Attempt(model_key=key, result=result, retry_after_s=retry_after_s))
+        report.attempts.append(
+            Attempt(model_key=key, result=result, retry_after_s=retry_after_s, number=attempt + 1, latency_ms=latency_ms)
+        )
         if retry_after_s is None:
             log.info("llm_attempt", model_key=key, attempt=attempt, result=result)
         else:
@@ -396,6 +445,11 @@ class LLMChain:
             timeouts = _cut(req.timeouts, left)
             sent = dataclasses.replace(req, model_key=key, timeouts=timeouts)
             tokens = 0
+            called_at = self._clock()
+
+            def call_ms() -> int:
+                return max(0, int((self._clock() - called_at) * 1000))
+
             try:
                 async with aclosing(self._timed(client.stream(sent), key, provider, timeouts, deadline)) as events:
                     async for event in events:
@@ -414,21 +468,21 @@ class LLMChain:
             except LLMError as error:
                 reported = await self._after_error(error, key, provider, permit, reported, log) or reported
                 if tokens > 0:
-                    self._record(report, log, key, "interrupted", attempt)
+                    self._record(report, log, key, "interrupted", attempt, latency_ms=call_ms())
                     raise LLMStreamInterrupted(error, key) from None
-                self._record(report, log, key, _result_code(error), attempt)
+                self._record(report, log, key, _result_code(error), attempt, latency_ms=call_ms())
                 if not error.falls_back:
                     raise
                 step.retry_delay = self._retry_delay(error, attempt)
                 return
             except Exception:
-                self._record(report, log, key, "error", attempt)
+                self._record(report, log, key, "error", attempt, latency_ms=call_ms())
                 raise
             if permit.state is Admission.PROBE and not reported:  # an answer with no text: still an answer
                 await self._breaker.record_success(provider, permit)
                 reported = True
             report.model_key = key
-            self._record(report, log, key, "ok", attempt)
+            self._record(report, log, key, "ok", attempt, latency_ms=call_ms())
             step.done = True
         finally:
             if window is not None:

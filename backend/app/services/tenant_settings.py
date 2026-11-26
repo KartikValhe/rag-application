@@ -15,6 +15,7 @@ A tenant without a row (the moment between the platform transaction and the sett
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +53,31 @@ async def read_chat_enabled(session: AsyncSession, tenant_id: uuid.UUID) -> bool
     )
     value = result.scalar_one_or_none()
     return True if value is None else bool(value)
+
+
+@dataclass(frozen=True, slots=True)
+class TenantLLMSettings:
+    """What the RAG turn needs of the row (step 6a-11). None/None when the tenant has no row: the defaults."""
+
+    allowed_llm_providers: frozenset[str] | None  # None: the platform chain; empty: no LLM (retrieval-only)
+    token_budget_override: int | None
+
+
+async def read_llm_settings(session: AsyncSession, tenant_id: uuid.UUID) -> TenantLLMSettings:
+    """allowed_llm_providers and chat_daily_token_budget in one read. A missing row reads as the defaults and is
+    never created here (owner decision 4 of the 6a-11 brief). The provider names are kept as written: the chain
+    compares them exactly with the provider of each chain key, so any other value can only narrow."""
+    row = (await session.execute(
+        text(f"SELECT allowed_llm_providers, chat_daily_token_budget FROM app.tenant_settings WHERE {TENANT_FILTER}"),
+        {"tenant_id": tenant_id},
+    )).one_or_none()
+    if row is None:
+        return TenantLLMSettings(None, None)
+    providers, budget = row
+    return TenantLLMSettings(
+        None if providers is None else frozenset(str(p) for p in providers),
+        None if budget is None else int(budget),
+    )
 
 
 async def read_token_budget_override(session: AsyncSession, tenant_id: uuid.UUID) -> int | None:

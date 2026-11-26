@@ -373,7 +373,11 @@ async def test_every_model_failing_gives_the_fallback_answer_and_the_budget_back
     assert tokens_of(result).startswith(rag_answer.RETRIEVAL_ONLY_TEXTS["en"])
     assert len(provider.requests) == 1
     _, answer = await rows(raw_db, conv.id)
-    assert answer.outcome == "fallback_retrieval_only" and await usage_rows(raw_db, w.id) == []
+    assert answer.outcome == "fallback_retrieval_only"
+    # 6a-11, owner decision 3: one usage row per failed attempt (outcome only, no tokens)
+    (usage,) = await usage_rows(raw_db, w.id)
+    assert (usage.purpose, usage.outcome, usage.prompt_tokens, usage.completion_tokens, usage.message_id) == (
+        "answer", "rate_limited", 0, 0, answer.id)
     assert await tenant_tokens(w.id) == 0
 
 

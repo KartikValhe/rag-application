@@ -6,11 +6,19 @@ around it (app/services/chat_messages.py); the evaluation harness of 6a-13 calls
 
 RagAnswer.run() yields what the client is sent (Token, Replace, Ping) and fills `result` (AnswerResult) as it goes:
 
-  E  the query model is loaded and the CLEANED question embedded with NO transaction open (process cap: search_busy);
+  D  (6a-11) only when LLM_CONDENSE_CHAIN is set and the question looks like a follow-up (chat_condense): a short
+     transaction reads the history and the tenant's LLM settings; with history (never the first turn) and a condense
+     model the tenant allows, the condense call rewrites the question for RETRIEVAL ONLY (the masked question and
+     history in, one cleaned line out, stored as messages.retrieval_query). Same chain, token window and budget as
+     the answer, usage rows of purpose "condense". Any failure: the original question; condense never fails a turn;
+  E  the query model is loaded and the CLEANED (or condensed) question embedded with NO transaction open (process
+     cap: search_busy);
   F  T2, a short chat transaction: search_for_chat with that vector only (the scope is the one T1 rebuilt and narrowed
      to the conversation), plus the history, the institution name and the tenant's token-budget override.
      Nothing above the threshold (or every hit excluded as flagged): the fixed 4.4 text, NO model call;
   H  the prompt (chat_prompt, rag-v1): the PII-MASKED question and history go into the prompt and nowhere else;
+     The tenant's allowed_llm_providers narrows the chain (6a-11): nothing left gives the retrieval-only answer
+     (fallback_retrieval_only) with no call and nothing reserved; a provider the tenant does not allow is never called;
   G  the daily token budget is reserved (estimated prompt + max_output_tokens). Exhausted: the retrieval-only answer
      (budget_retrieval_only), no model call;
   I  the chain call (the request type has no field for tools), through the 6a-10a stream filter: no verdict line, no
@@ -23,8 +31,10 @@ The budget is settled exactly once to the best known count: the provider-reporte
 reasoning is inside the completion count); for a NOT_IN_SOURCES stream closed by us before the provider's usage
 arrived, the prompt estimate + REFUSAL_COMPLETION_TOKENS_ESTIMATE (estimated); for a stop without usage (cancel,
 interruption, cap), the prompt estimate + the estimate of the model text received; nothing at all when no model had
-started answering (the 6a-10b rule for the token window). The usage row of the call (one per turn, only once a model
-answered or refused the request) is part of `result`; chat_messages writes it in T3 with the row and the citations.
+started answering (the 6a-10b rule for the token window). usage_rows() gives every llm_usage_events row of the turn
+(6a-11, owner decision 3): the condense call's rows, ONE ROW PER FAILED ATTEMPT (a provider called and failing before
+its first token: outcome only, 0 tokens, estimated) and the row of the call that answered or refused (result.usage);
+a skipped model made no call and has no row. chat_messages writes them in T3 with the row and the citations.
 
 Citations come from this turn's hits only (chat_citations); students get the student fields only (8.2).
 Logs: ids, codes, counts and error class names only. Never the question, the masked question, a source, a title, a
@@ -52,6 +62,7 @@ from app.db.models.branding import TenantBranding
 from app.db.models.chat import MESSAGE_ROLE_ASSISTANT, MESSAGE_ROLE_USER, OUTCOME_PENDING, Message
 from app.llm import chain as llm_chain
 from app.llm.chain import (
+    Attempt,
     ChainStream,
     LLMChain,
     LLMChainExhausted,
@@ -63,6 +74,7 @@ from app.llm.providers import split_model_key
 from app.llm.types import DoneEvent, FinishReason, LLMRequest, LLMTimeouts, TokenEvent, UsageEvent
 from app.services import (
     chat_citations,
+    chat_condense,
     chat_prompt,
     chat_sse,
     llm_budget,
@@ -179,7 +191,7 @@ PING: Final = Ping()
 
 @dataclass(frozen=True, slots=True)
 class UsageRow:
-    """The llm_usage_events row of the turn's call. Numbers and names only."""
+    """One llm_usage_events row: a provider call of the turn (answer or condense). Numbers and names only."""
 
     provider: str
     model_key: str
@@ -189,6 +201,7 @@ class UsageRow:
     latency_ms: int
     outcome: str
     attempt: int
+    purpose: str = "answer"
 
 
 @dataclass(frozen=True)
@@ -228,11 +241,14 @@ class AnswerResult:
     reason: str | None = None
     attempts: int = 0
     latency: dict[str, int] = field(default_factory=dict)
+    retrieval_query: str | None = None  # the condensed question, when one was used for retrieval (plan 9.1)
+    condense: str | None = None  # what the condense step did: a fixed code (log only), None when it was not a candidate
 
     def row_values(self) -> dict[str, Any]:
         """The message columns of the answer (T3 or the closing step), besides content, outcome and partial."""
         u = self.usage
         return {
+            "retrieval_query": self.retrieval_query,
             "retrieval": self.retrieval,
             "prompt_version": self.prompt_version,
             "provider": u.provider if u else None,
@@ -269,15 +285,38 @@ class AnswerResult:
             "completion_tokens": u.completion_tokens if u else None,
             "tokens_estimated": u.estimated if u else None,
             "verdict_form": self.verdict_form,
+            "condensed": self.retrieval_query is not None,
+            "condense": self.condense,
         }
+
+
+@dataclass(frozen=True)
+class _Context:
+    """What the turn reads besides the search: the history, the institution name, the tenant's LLM settings."""
+
+    history: tuple[chat_prompt.HistoryTurn, ...]
+    institution: str
+    llm: tenant_settings.TenantLLMSettings
 
 
 @dataclass(frozen=True)
 class _Found:
     result: retrieval.RetrievalResult
-    history: tuple[chat_prompt.HistoryTurn, ...]
-    institution: str
-    budget_override: int | None
+    context: _Context | None  # None only when nothing was found and no context had been read before
+
+
+# Usage-row outcome of a chain attempt that called a provider and failed before its first token (owner decision 3
+# of the 6a-11 brief: one row per failed attempt). Skips (cooldown, breaker, limits, tenant_not_allowed, ...) made no
+# call and have no row; "interrupted" and "ok" are the call that answered, which has its own row.
+_FAILED_ATTEMPT_OUTCOMES: Final[dict[str, str]] = {
+    "rate_limited": "rate_limited",
+    "unavailable": "unavailable",
+    "timeout": "timeout",
+    "bad_request": "bad_request",
+    "content_blocked": "blocked",
+    "auth_error": "auth_error",
+}
+CONDENSE_RAW_MAX_CHARS: Final = 2000  # stop reading a condense answer past this (the output cap is far lower)
 
 
 _END: Final = object()
@@ -325,6 +364,9 @@ class RagAnswer:
         self._raw: list[str] = []  # model text received, before the filter (for the estimate)
         self._released: list[str] = []  # what the filter released (what the client was given)
         self._llm_started: float | None = None
+        self._context: _Context | None = None  # read before the search when the condense step needs it
+        self._condense_rows: list[UsageRow] = []  # the usage rows of the condense call (6a-11)
+        self._refused: Attempt | None = None  # the answer attempt that refused the request (its row is result.usage)
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -370,8 +412,26 @@ class RagAnswer:
     async def _run(self, deadline: float, interval: float) -> AsyncIterator[RagItem]:
         inp, res = self._in, self.result
 
-        # E: the cleaned question, embedded with no transaction open
-        query = retrieval.normalize_query(inp.question, self._config.max_query_chars)
+        # D: a follow-up is condensed into a standalone question for RETRIEVAL only (6a-11). Any failure: the original.
+        retrieval_text = inp.question
+        if self._chain.is_configured("condense") and chat_condense.looks_like_follow_up(inp.question):
+            context_box: list[_Context] = []
+            async for beat in self._wait(self._read_context(), context_box, deadline, interval):
+                yield beat
+            self._context = context_box[0]
+            if not self._context.history:
+                res.condense = "first_turn"
+            else:
+                t = time.monotonic()
+                condensed: list[str | None] = []
+                async for beat in self._wait(self._condense(self._context), condensed, deadline, interval):
+                    yield beat
+                res.latency["condense"] = _ms(t)
+                if condensed[0] is not None:
+                    retrieval_text = res.retrieval_query = condensed[0]
+
+        # E: the cleaned (or condensed) question, embedded with no transaction open
+        query = retrieval.normalize_query(retrieval_text, self._config.max_query_chars)
         t = time.monotonic()
         embedded: list[retrieval.QueryEmbedder] = []
         async for beat in self._wait(self._embed(query), embedded, deadline, interval):
@@ -386,17 +446,18 @@ class RagAnswer:
         res.latency["retrieve"] = _ms(t)
         found = found_box[0]
         self._record_retrieval(found.result)
-        if not found.result.hits:
+        if not found.result.hits or found.context is None:
             yield self._fixed_answer("not_found", refusal_text(inp.template_language))
             raise _Stop
+        context = found.context
 
-        # H: the prompt, with the masked question and history
+        # H: the prompt, with the masked ORIGINAL question and history (never the condensed text)
         mask = pii.masker(own_name=inp.own_name, own_email=inp.own_email)
         try:
             prompt = chat_prompt.build_prompt(
-                hits=found.result.hits, question=inp.question, bot_name="", institution=found.institution,
+                hits=found.result.hits, question=inp.question, bot_name="", institution=context.institution,
                 language=inp.language, estimate_tokens=llm_budget.estimate_text_tokens, mask=mask,
-                history=found.history, context_max_tokens=settings.CHAT_CONTEXT_MAX_TOKENS,
+                history=context.history, context_max_tokens=settings.CHAT_CONTEXT_MAX_TOKENS,
                 flagged_mode=settings.CHAT_FLAGGED_SOURCES, history_turns=settings.CHAT_HISTORY_TURNS,
                 history_chars=settings.CHAT_HISTORY_CHARS,
             )
@@ -416,9 +477,18 @@ class RagAnswer:
         )
         self._req = req
 
+        # The tenant's allowed_llm_providers narrows the chain (6a-11). Nothing left: the retrieval-only answer of
+        # 7.5 (C32), with no call and nothing reserved; a disallowed provider is never used instead.
+        ctx = TenantLLMContext(tenant_id=inp.tenant_id, allowed_providers=context.llm.allowed_llm_providers)
+        if not self._chain.is_configured("answer", ctx):
+            logger.info("chat_llm_chain_empty", narrowed=ctx.allowed_providers is not None, **self._ids())
+            for item in self._retrieval_only("fallback_retrieval_only"):
+                yield item
+            raise _Stop
+
         # G: the daily token budget, reserved before the call
         reserved = await self._budget.reserve(inp.tenant_id, llm_budget.reservation_amount(req),
-                                              tenant_override=found.budget_override)
+                                              tenant_override=context.llm.token_budget_override)
         if isinstance(reserved, llm_budget.BudgetExhausted):
             logger.info("chat_budget_exhausted", scope=reserved.scope, **self._ids())
             for item in self._retrieval_only("budget_retrieval_only"):
@@ -427,7 +497,7 @@ class RagAnswer:
         self._reservation = reserved
 
         # I: the chain, through the stream filter
-        async for item in self._answer(req, prompt, deadline, interval):
+        async for item in self._answer(req, prompt, ctx, deadline, interval):
             yield item
 
     async def _embed(self, query: str) -> retrieval.QueryEmbedder:
@@ -441,13 +511,139 @@ class RagAnswer:
         async with chat_session_context(inp.tenant_id, inp.user_id) as db:
             result = await retrieval.search_for_chat(db, inp.scope, query, embedder, self._config)
             if not result.hits:
-                return _Found(result, (), "", None)
-            history = await self._history(db)
-            institution = (await db.execute(
-                select(TenantBranding.display_name).where(TenantBranding.tenant_id == inp.tenant_id)
-            )).scalar_one_or_none() or ""
-            override = await tenant_settings.read_token_budget_override(db, inp.tenant_id)
-        return _Found(result, history, institution, override)
+                return _Found(result, self._context)
+            context = self._context if self._context is not None else await self._context_in(db)
+        return _Found(result, context)
+
+    async def _read_context(self) -> _Context:
+        """A short chat transaction of its own, before the condense call (no transaction is open during that call)."""
+        inp = self._in
+        async with chat_session_context(inp.tenant_id, inp.user_id) as db:
+            return await self._context_in(db)
+
+    async def _context_in(self, db: AsyncSession) -> _Context:
+        inp = self._in
+        history = await self._history(db)
+        institution = (await db.execute(
+            select(TenantBranding.display_name).where(TenantBranding.tenant_id == inp.tenant_id)
+        )).scalar_one_or_none() or ""
+        llm = await tenant_settings.read_llm_settings(db, inp.tenant_id)
+        return _Context(history, institution, llm)
+
+    # ── the condense call (6a-11) ──
+
+    async def _condense(self, context: _Context) -> str | None:
+        """The standalone question for retrieval, or None: the original question is used then. NEVER raises (only a
+        cancel passes): every failure, timeout, refusal, empty or unusable output, an exhausted budget or a tenant
+        that allows no condense provider gives None. Same chain, token window and daily budget as the answer; the
+        usage rows (purpose "condense") are kept for T3. Called with no transaction open."""
+        inp, res = self._in, self.result
+        ctx = TenantLLMContext(tenant_id=inp.tenant_id, allowed_providers=context.llm.allowed_llm_providers)
+        if not self._chain.is_configured("condense", ctx):
+            res.condense = "not_allowed"
+            return None
+        mask = pii.masker(own_name=inp.own_name, own_email=inp.own_email)
+        req = chat_condense.build_request(question=inp.question, history=context.history, mask=mask,
+                                          request_id=str(inp.message_id), settings=settings)
+        try:
+            reserved = await self._budget.reserve(inp.tenant_id, llm_budget.reservation_amount(req),
+                                                  tenant_override=context.llm.token_budget_override)
+        except Exception as exc:
+            logger.warning("chat_condense_budget_error", error_class=type(exc).__name__, **self._ids())
+            res.condense = "error"
+            return None
+        if isinstance(reserved, llm_budget.BudgetExhausted):
+            res.condense = "budget"
+            return None
+        stream = self._chain.answer_stream("condense", req, ctx)
+        started = time.monotonic()
+        raw: list[str] = []
+        usage: UsageEvent | None = None
+        final: str | None = None  # the outcome of the call that answered: ok, interrupted or cancelled
+        try:
+            async for event in stream:
+                if isinstance(event, TokenEvent):
+                    raw.append(event.text)
+                    if sum(len(t) for t in raw) > CONDENSE_RAW_MAX_CHARS:
+                        break  # far past the output cap: what came so far decides
+                elif isinstance(event, UsageEvent):
+                    usage = event
+            final = "ok"
+        except LLMStreamInterrupted as exc:
+            final = "interrupted"
+            logger.info("chat_condense_failed", error_class=type(exc.error).__name__, **self._ids())
+        except (LLMChainExhausted, LLMError) as exc:
+            logger.info("chat_condense_failed", error_class=type(exc).__name__, **self._ids())
+        except Exception as exc:
+            logger.warning("chat_condense_failed", error_class=type(exc).__name__, **self._ids())
+        finally:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await stream.aclose()
+                except Exception as exc:
+                    logger.error("chat_llm_close_error", error_class=type(exc).__name__, **self._ids())
+                if final is None and stream.model_key is not None:
+                    final = "cancelled"  # the client went away after the model had started answering
+                await self._close_condense(stream, req, reserved, raw, usage, final, started)
+        if final != "ok":
+            res.condense = "failed"
+            return None
+        text = chat_condense.clean_output("".join(raw))
+        res.condense = "used" if text is not None else "unusable"
+        return text
+
+    async def _close_condense(
+        self, stream: ChainStream, req: LLMRequest, reserved: llm_budget.Reservation, raw: list[str],
+        usage: UsageEvent | None, final: str | None, started: float,
+    ) -> None:
+        """The usage rows of the condense call and the budget settled to the best known count (never raises)."""
+        rows = self._failed_rows(stream.attempts, "condense")
+        used = 0
+        if final is not None and stream.model_key is not None:
+            if usage is not None:
+                prompt, completion, estimated = usage.prompt_tokens, usage.completion_tokens, usage.estimated
+            else:
+                prompt = llm_budget.estimate_prompt_tokens(req)
+                completion, estimated = llm_budget.estimate_text_tokens("".join(raw)), True
+            used = prompt + completion
+            provider, _ = split_model_key(stream.model_key)
+            number = max((a.number for a in stream.attempts if a.model_key == stream.model_key), default=1)
+            rows.append(UsageRow(provider=provider, model_key=stream.model_key, prompt_tokens=prompt,
+                                 completion_tokens=completion, estimated=estimated, latency_ms=_ms(started),
+                                 outcome=final, attempt=min(number, 2), purpose="condense"))
+        self._condense_rows = rows
+        try:
+            if used:
+                await self._budget.settle(reserved, used)
+            else:
+                await self._budget.release(reserved)
+        except Exception as exc:
+            logger.error("chat_budget_settle_error", error_class=type(exc).__name__, **self._ids())
+
+    @staticmethod
+    def _failed_rows(attempts: Sequence[Attempt], purpose: str, skip: Attempt | None = None) -> list[UsageRow]:
+        """One row per provider call that failed before its first token (owner decision 3): outcome only, no
+        tokens (the provider reported none), estimated. A skipped model made no call and has no row."""
+        rows: list[UsageRow] = []
+        for a in attempts:
+            outcome = _FAILED_ATTEMPT_OUTCOMES.get(a.result)
+            if outcome is None or a is skip:
+                continue
+            provider, _ = split_model_key(a.model_key)
+            rows.append(UsageRow(provider=provider, model_key=a.model_key, prompt_tokens=0, completion_tokens=0,
+                                 estimated=True, latency_ms=a.latency_ms or 0, outcome=outcome,
+                                 attempt=min(a.number, 2), purpose=purpose))
+        return rows
+
+    def usage_rows(self) -> tuple[UsageRow, ...]:
+        """Every llm_usage_events row of the turn, for T3 or the closing step: the condense call's rows, one row per
+        failed answer attempt, and the row of the answer call that answered or refused (result.usage)."""
+        rows = list(self._condense_rows)
+        if self._stream is not None:
+            rows += self._failed_rows(self._stream.attempts, "answer", skip=self._refused)
+        if self.result.usage is not None:
+            rows.append(self.result.usage)
+        return tuple(rows)
 
     async def _history(self, db: AsyncSession) -> tuple[chat_prompt.HistoryTurn, ...]:
         """The last CHAT_HISTORY_TURNS finished exchanges of this conversation before this question."""
@@ -516,11 +712,12 @@ class RagAnswer:
     # ── the model ──
 
     async def _answer(
-        self, req: LLMRequest, prompt: chat_prompt.BuiltPrompt, deadline: float, interval: float
+        self, req: LLMRequest, prompt: chat_prompt.BuiltPrompt, ctx: TenantLLMContext, deadline: float,
+        interval: float,
     ) -> AsyncIterator[RagItem]:
         res = self.result
         filt = StreamFilter(self.labels, system_prompt=prompt.system, require_citation=settings.CHAT_REQUIRE_CITATION)
-        stream = self._chain.answer_stream("answer", req, TenantLLMContext(tenant_id=self._in.tenant_id))
+        stream = self._chain.answer_stream("answer", req, ctx)
         self._stream = stream
         self._llm_started = time.monotonic()
         finish: FinishReason = "stop"
@@ -568,6 +765,7 @@ class RagAnswer:
             logger.warning("chat_llm_refused", error_class=type(exc).__name__, **self._ids())
             await self._release_budget()
             if outcome is not None and stream.attempts:
+                self._refused = stream.attempts[-1]  # its row is result.usage, not a second "failed attempt" row
                 self._set_usage(stream.attempts[-1].model_key, 0, 0, True, outcome)
             self._fail("answer_unavailable")
             return

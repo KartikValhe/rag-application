@@ -145,3 +145,24 @@ async def test_read_token_budget_override(tenant_a: Tenant, tenant_b: Tenant, ra
     await raw_db.commit()
     async with tenant_session_context(str(tenant_a.id)) as session:
         assert await ts.read_token_budget_override(session, tenant_a.id) == 1500
+
+
+async def test_read_llm_settings(tenant_a: Tenant, tenant_b: Tenant, raw_db: AsyncSession) -> None:
+    """Step 6a-11: allowed_llm_providers and the budget override in one read. No row reads as the defaults (NULL:
+    the platform chain) and the read creates no row (owner decision 4); another tenant's list is never seen."""
+    async with tenant_session_context(str(tenant_a.id)) as session:
+        got = await ts.read_llm_settings(session, tenant_a.id)
+    assert (got.allowed_llm_providers, got.token_budget_override) == (None, None)
+    assert await _rows(raw_db, tenant_a.id) == []  # reading did not create the row
+    await raw_db.execute(text("INSERT INTO app.tenant_settings (tenant_id, allowed_llm_providers, chat_daily_token_budget) "
+                              "VALUES (:t, ARRAY['groq', 'openrouter', 'groq'], 1200)"), {"t": tenant_a.id})
+    await raw_db.execute(text("INSERT INTO app.tenant_settings (tenant_id, allowed_llm_providers) VALUES (:t, '{}')"),
+                         {"t": tenant_b.id})
+    await raw_db.commit()
+    async with tenant_session_context(str(tenant_a.id)) as session:
+        got = await ts.read_llm_settings(session, tenant_a.id)
+        other = await ts.read_llm_settings(session, tenant_b.id)
+    assert got.allowed_llm_providers == frozenset({"groq", "openrouter"}) and got.token_budget_override == 1200
+    assert (other.allowed_llm_providers, other.token_budget_override) == (None, None)  # RLS: B's row is invisible
+    async with tenant_session_context(str(tenant_b.id)) as session:
+        assert (await ts.read_llm_settings(session, tenant_b.id)).allowed_llm_providers == frozenset()

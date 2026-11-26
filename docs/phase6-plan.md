@@ -1411,6 +1411,8 @@ about USD 1.3 a day whatever happens.
 | C30 | **(6a-9b)** 11.1 puts the message tests in `test_chat_api.py`; 11.1 also lists `test_sse_transport.py` and `test_chat_schedule.py` as `db` only | 11.1 vs this step | The message tests are their own file `test_chat_message_api.py`, tiered `db, security` so the gate runs them; `test_sse_transport.py` and `test_chat_schedule.py` stay `db` (run by `run_tests full`); the SSE writer has a `fast` file `test_chat_sse.py` |
 | C31 | **(6a-10c)** 8.6 says the route "checks `request.is_disconnected()` between tokens". Behind a `BaseHTTPMiddleware` (`TenantResolutionMiddleware`, F11) that call can never return true: Starlette's `receive_or_disconnect` opens an anyio task group, and `is_disconnected()` pre-cancels its scope, so nothing is ever read (shown by a red test under ASGI spec 2.4, where Starlette does not listen for the disconnect itself) | 8.6 vs Starlette 1.9 `middleware/base.py` | Same intent, a working probe: `ChatStreamResponse` watches the `receive` it is called with (under spec 2.3 Starlette's listener reads it; under 2.4 one listener task of ours does) and the turn checks that flag after every token (`test_is_disconnected_is_checked_between_tokens`). Honest limit: the stored text may hold the token or two sent between the disconnect and the check. Owner to confirm |
 | C32 | **(6a-10c)** The 6a-10c brief asks for `budget_retrieval_only` (over budget) and `fallback_retrieval_only` (chain exhausted); section 12 puts the "retrieval-only fallback (all providers down, budget exhausted)" in 6a-11 | 6a-10c brief vs 12 (6a-11) | Built in 6a-10c as the brief asks (7.5 with `CHAT_FALLBACK_RETRIEVAL_ONLY`); 6a-11 keeps condensing, tenant `allowed_llm_providers` narrowing and one usage row per failed attempt |
+| C33 | **(6a-11)** 5.1 puts "the (PII-masked, condensed if a follow-up) question" in the final user message of the answer prompt; the owner's 6a-11 brief (decision 1) says the condensed text is for RETRIEVAL ONLY and is never placed in the answer prompt | 5.1 vs 6a-11 brief | Built as the owner decided: the answer prompt always holds the original masked question (and the history); the condensed line goes only to the embedding and `search_for_chat` and is stored in `messages.retrieval_query`. 5.1 left as written (owner to correct it) |
+| C34 | **(6a-11)** 2.1 [D] runs condense before the embedding, but the history and the tenant settings were read in T2 (after the search, 6a-10c) | 2.1 vs 6a-10c | A condense candidate reads history, institution name and LLM settings in one extra short transaction before the condense call (no transaction is open during the call); T2 then reuses them. A non-candidate turn is unchanged (no extra transaction) |
 
 ---
 
@@ -2480,3 +2482,65 @@ about USD 1.3 a day whatever happens.
 - The `db`-only files whose code paths changed (the gate does not select them): `run_tests full tests/test_sse_transport.py
   tests/test_chat_schedule.py tests/test_chat_api.py`: `78 passed in 116.69s (0:01:56)`.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 138 source files`
+
+### 6a-11 Condense, tenant provider narrowing, one usage row per failed attempt · 2026-11-26 · not committed
+
+- **Built:** `app/services/chat_condense.py` (pure: `looks_like_follow_up`, `build_request`, `clean_output`, `CONDENSE_SYSTEM_PROMPT`
+  `condense-v1`, `REFERRING_WORDS` en/mr/hi, `FOLLOW_UP_MAX_WORDS = 6`, `CONDENSE_MAX_CHARS = 300`, `CONDENSE_MAX_OUTPUT_TOKENS = 96`,
+  `CONDENSE_TIMEOUT_TOTAL_S = 8`); step [D] in `rag_answer.py` (`_read_context`, `_condense`, `_close_condense`, `_failed_rows`,
+  `usage_rows()`, `UsageRow.purpose`, `AnswerResult.retrieval_query` / `condense`); in `chain.py` `TenantLLMContext.allowed_providers` and
+  `allows()`, `LLMChain.is_configured(purpose, ctx)`, the result code `tenant_not_allowed`, `Attempt.number` / `latency_ms` (not part of
+  equality); `tenant_settings.read_llm_settings` (`TenantLLMSettings`); T3 and the closing step of `chat_messages.py` write every usage row
+  of the turn. No migration, no setting, no dependency, no frontend, no `.github`; `LLM_CONDENSE_CHAIN` stays empty in every committed
+  file; `LLM_ZDR_CONFIRMED` and the start-up policy untouched. The retrieval-only fallback of 6a-10c (C32) is reused, not rebuilt.
+- **Condense (owner decision 1).** Runs only when `LLM_CONDENSE_CHAIN` is set, the question is a candidate (at most 6 words, or a
+  referring word as a whole word), the turn has history (at least one finished exchange, the prompt's history rule) and the tenant allows
+  a condense provider. Input: the PII-masked question and masked history (labels stripped, capped like the prompt history), declared data,
+  one user message, no tools. Same chain, token window and daily budget (reserved before, settled to the reported usage, released on a
+  failure before the first token); usage rows of purpose `condense`. Output: the first non-blank line, `clean_text`, labels (`[S#]`,
+  `[S 1]`, `【S#】`, groups) and verdict words removed, a leading "Standalone question:"-style label and wrapping quotes removed, capped;
+  nothing alphanumeric left = unusable. Used for RETRIEVAL ONLY (embedding and `search_for_chat`), stored in `messages.retrieval_query`,
+  timed in `latency_ms.condense`; the answer prompt keeps the original masked question (C33). Any failure (each error class, a real timeout,
+  a block, a mid-stream failure, an empty or unusable output, budget exhausted, no allowed provider, an error on the reserve) = the original
+  question; a cancel closes the stream and settles or releases its reservation.
+- **Narrowing (owner decisions 2, 4).** `allowed_llm_providers` NULL, or no row, = the platform chain (the read never creates a row); a set
+  keeps the chain keys of exactly those provider names (no case folding, no trimming); a disallowed key is skipped before every other check
+  and its client is never called (canary transports stay empty). Nothing left of the answer chain: `fallback_retrieval_only` (or
+  `answer_unavailable` with the fallback off), decided before the budget reservation, no call; nothing left of the condense chain: no
+  condense. The list is read on every turn.
+- **Usage rows (owner decision 3).** One row per provider call that failed before its first token (`rate_limited`, `unavailable`,
+  `timeout`, `bad_request`, `blocked`, `auth_error`): 0/0 tokens, estimated, that call's latency and attempt number; plus the row of the call
+  that answered or refused (counted once). Skipped models (cooldown, breaker, limits, `tenant_not_allowed`) made no call: no row. The table
+  has no error-class column; the outcome code is the fixed mapping of the error class (no test showed a migration is needed).
+- **Decisions where the plan was unclear (owner to confirm):** (1) C33: the condensed text is for retrieval only (brief) against 5.1.
+  (2) C34: a condense candidate reads history and settings in one extra short transaction before the call. (3) The follow-up rule is design
+  B4; the mr/hi referring-word lists are mine (not user-facing text). (4) A failed condense call's partial text is never used, but its
+  tokens are counted. (5) `done.usage` and the message's token columns stay the answer call's; condense tokens are in `llm_usage_events`
+  and the budget only. (6) Condense limits are named constants, not settings. (7) A platform-empty answer chain now also answers
+  retrieval-only without reserving (before: reserve, then release; same outcome). (8) `chat_disabled` (listed for 6a-11 in section 12) was
+  already built in 6a-9a/6a-9b; nothing added.
+- **Deferred:** a condense model in `models.json` (none verified; the 6a-3 caveat on `llama-3.1-8b-instant` limits stands), so
+  `LLM_CONDENSE_CHAIN` cannot be set yet (the start-up policy refuses a key that is not a condense model); the admin route that writes
+  `allowed_llm_providers` (6a-12); an error-class column (a migration; not needed).
+- **Tests (`tier_map.py`):** `test_chat_condense_pure.py` (`fast`), `test_chat_condense.py` (`db, security`), `test_chat_narrowing.py`
+  (`db, security`), `test_llm_chain_narrowing.py` (`db, security`), helpers `tests/fixtures/condense_world.py`; added `test_read_llm_settings`
+  to `test_tenant_settings.py`; changed in `test_chat_rag.py`: "every model failing" now also expects its one `rate_limited` usage row.
+- **Red first:** `2 errors in 0.70s` (`ImportError: cannot import name 'chat_condense' from 'app.services'`) for the two condense files;
+  the others `22 failed, 4 passed in 35.39s` (`TypeError: Attempt.__init__() got an unexpected keyword argument 'number'`, the canary
+  `assert [<Request('PO...ompletions')>] == []`, `AttributeError: ... has no attribute 'read_llm_settings'`, the changed 6a-10c test). First
+  run of the code: `1 failed, 50 passed`, a test-design error (the seeded e-mail made the follow-up longer than 6 words), fixed in the test.
+- **Self-review:** 32 breaks, each alone in the real file, the named tests run, the original bytes written back, SHA-256 of all five files
+  compared after every break and at the end (identical). 32 of 32 red: tenant check removed from the loop; narrowed-empty still configured;
+  `is_configured` ignoring the tenant; case-folded names; no latency; no context validation; condensed text in the answer prompt; retrieval
+  keeping the original; unmasked condense input; condense on the first turn; a condense error failing the turn; condense budget unchecked;
+  never settled; condense chain not narrowed; answer chain not narrowed; silent fallback to the platform chain; no failed-attempt rows; the
+  refused call counted twice; output uncleaned; partial output used; `retrieval_query` not stored; the condensed text logged; T3 writing
+  only the last row; labels, verdict words, extra lines or no cap in the output; substring referring words; bound 7; old labels in the
+  condense history; a missing row read as "no provider"; the read creating the row.
+- `run_tests gate` (full gate, run alone, test database only): `= 1 failed, 4145 passed, 12 skipped, 1173 deselected, 4 xfailed in
+  1072.05s (0:17:52) =`. The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the
+  same pre-existing failure as in the 6a-1a to 6a-10c records (not touched).
+- The `db`-only files whose code paths changed: `run_tests full tests/test_tenant_settings.py tests/test_llm_chain.py
+  tests/test_llm_chain_tpm.py tests/test_llm_smoke_chain.py tests/test_chat_api.py tests/test_sse_transport.py tests/test_chat_schedule.py`:
+  `198 passed in 122.61s (0:02:02)`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 139 source files`

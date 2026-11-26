@@ -393,11 +393,12 @@ async def _update_pending(
     values: dict[str, Any],
     *,
     citations: Sequence[CitationSnapshot] = (),
-    usage: rag_answer.UsageRow | None = None,
+    usage: Sequence[rag_answer.UsageRow] = (),
 ) -> bool:
     """Give the caller's own pending answer row its final state (the chat_tenant_update_pending policy allows nothing
-    else), and in the SAME transaction insert its citation rows and the usage row of its LLM call: either all of it
-    is written or none of it. False when the row is no longer pending (already final): nothing is changed then."""
+    else), and in the SAME transaction insert its citation rows and the usage rows of its LLM calls (6a-11: condense,
+    every failed attempt, the call that answered): either all of it is written or none of it. False when the row is
+    no longer pending (already final): nothing is changed then."""
     async with chat_session_context(p.tenant_id, p.user_id) as db:
         res = await db.execute(
             update(Message)
@@ -411,12 +412,12 @@ async def _update_pending(
         if updated:
             if citations:
                 await _insert_citations(db, p, citations)
-            if usage is not None:
+            for row in usage:
                 await llm_usage.record_usage(
-                    db, tenant_id=p.tenant_id, user_id=p.user_id, message_id=p.message_id, purpose="answer",
-                    provider=usage.provider, model_key=usage.model_key, prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens, estimated=usage.estimated, latency_ms=usage.latency_ms,
-                    outcome=usage.outcome, attempt=usage.attempt,
+                    db, tenant_id=p.tenant_id, user_id=p.user_id, message_id=p.message_id, purpose=row.purpose,
+                    provider=row.provider, model_key=row.model_key, prompt_tokens=row.prompt_tokens,
+                    completion_tokens=row.completion_tokens, estimated=row.estimated, latency_ms=row.latency_ms,
+                    outcome=row.outcome, attempt=row.attempt,
                 )
             await db.execute(
                 update(Conversation)
@@ -586,11 +587,11 @@ class ChatTurn:
         self.latency.update(res.latency)
         self.record.update(res.row_values())
         if res.error_code is not None:
-            await self._persist(res.outcome, res.partial, citations=res.citations, usage=res.usage)
+            await self._persist(res.outcome, res.partial, citations=res.citations, usage=rag.usage_rows())
             self.ended = True
             yield self._error_event(res.error_code, res.partial)
             return
-        if not await self._persist(res.outcome, False, citations=res.citations, usage=res.usage):
+        if not await self._persist(res.outcome, False, citations=res.citations, usage=rag.usage_rows()):
             self.ended = True
             yield self._error_event("internal_error", False)
             return
@@ -612,7 +613,7 @@ class ChatTurn:
         values.update(self.rag.result.row_values())
         try:
             return await _mark_unfinished(self.p, values, citations=self.rag.citations_for(self.sent_text),
-                                          usage=self.rag.result.usage)
+                                          usage=self.rag.usage_rows())
         except Exception as exc:
             logger.error("chat_persist_error", stage="close_full", error_class=type(exc).__name__, **self._ids())
         return await _mark_unfinished(self.p, values)
