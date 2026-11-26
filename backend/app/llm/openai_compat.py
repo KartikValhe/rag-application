@@ -12,9 +12,9 @@ A chunk is one JSON object. What is read, and nothing else:
   error                         a failure inside the stream (OpenRouter: HTTP 200, then an error object)
 Anything else in the object is ignored. Text that is not a JSON object is a malformed stream.
 
-UNVERIFIED (docs/phase6-plan.md, 6a-3 build record): Groq's documentation pages say that a stream ends with
-`data: [DONE]` but show no chunk; the x_groq.usage placement comes from plan 7.3. Step 6a-6 records a real
-stream to confirm it.
+Checked against eight real Groq streams (docs/phase6-plan.md, "6a-6 real runs" record): the usage sits in the one
+finish chunk, twice (x_groq.usage and a top-level usage), and the stream ends with `data: [DONE]`. Reasoning
+arrives first as `delta.reasoning`, which is never read.
 """
 
 from __future__ import annotations

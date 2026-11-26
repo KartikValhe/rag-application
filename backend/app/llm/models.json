@@ -8,6 +8,7 @@
       "trains_on_inputs": false,
       "rpm": 30,
       "rpd": 1000,
+      "tpm": 8000,
       "pinned_on": "2026-11-24"
     },
     {

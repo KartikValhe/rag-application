@@ -70,6 +70,7 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_llm_no_network.py": ("fast", "security"),  # 6a-2: provider-host socket guard, no vendor SDK in app/
     "test_llm_sse.py": ("fast",),  # 6a-3: the SSE line parser (split bytes, CRLF, comments, limits)
     "test_llm_adapters.py": ("fast", "security"),  # 6a-3: Groq/OpenRouter/Gemini adapters on httpx.MockTransport (events, errors, timeouts, key canary, no tool fields)
+    "test_llm_adapters_recorded.py": ("fast",),  # 6a-6b: the Groq adapter on the 8 real recorded streams (text, reasoning dropped, reported usage, done)
     "test_llm_logging.py": ("fast", "security"),  # 6a-3: credential keys dropped from logs, httpx loggers at WARNING
     "test_llm_models_pinned.py": ("fast",),  # 6a-3: pinned models.json entries and their sources in the build record
     "test_llm_chain.py": ("db",),  # 6a-4: retries, fallback, breaker in the chain, cooldowns, RPM/RPD slots, timeouts (FakeLLM, test Redis)

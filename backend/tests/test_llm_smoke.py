@@ -788,7 +788,12 @@ async def test_without_record_the_hook_is_never_switched_on(tmp_path: Path) -> N
     assert chain.record_env == [None] * 6
 
 
-async def test_record_switches_the_hook_on_for_one_answerable_and_one_near_topic_question_only(tmp_path: Path) -> None:
+async def test_record_switches_the_hook_on_for_one_answerable_and_one_near_topic_question_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Since step 6a-6b the real recordings of this model are in the fixtures folder: pretend that none exists, so the
+    # test does not depend on what the repository holds.
+    monkeypatch.setattr(smoke, "recording_exists", lambda path: False)
     fake = FakeLLM(default=reply("ANSWERABLE\nok [S1]"))
     _, _, chain = await go(tmp_path / "o", fake, "--record")
     on = [(q.kind, v) for q, v in zip(data.QUESTIONS["en"], chain.record_env, strict=True) if v]

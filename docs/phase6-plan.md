@@ -1860,3 +1860,110 @@ about USD 1.3 a day whatever happens.
   `mypy.exe` from the same folder). No database, Redis or Docker was started for this step (fast tier only; the gate runs `security` tests too).
 - `run_tests gate`: `= 1 failed, 3254 passed, 11 skipped, 1006 deselected, 4 xfailed in 614.59s (0:10:14) =`. The one failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same pre-existing failure as in the 6a-1a, 6a-3, 6a-4 and 6a-5 records (not touched). The two new files alone: `547 passed in 2.09s`.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 122 source files`
+
+### 6a-6 real runs (2026-11-26, owner ran llm_smoke on the Groq free plan) · 6a-6b: real recordings in the tests · not committed
+
+- **Who did what.** The owner ran `llm_smoke --record` for both models and both languages (Groq free plan) and read the 120b answers. Step 6a-6b
+  (this entry) only reads those results: secret check of the 8 recordings, comparison with the hand-written fixture, citation-format check, a test file
+  on the real streams, one `models.json` value. No new feature, no parser or prompt change. The dev database was not touched.
+- **DATA (owner's figures, verbatim):**
+  - gpt-oss-120b en: 20 asked, first line exact 20/20, ANSWERABLE 12/12, near-topic refused 4/4, unrelated refused 4/4, invented labels 0,
+    prompt ratio 0.77, completion ratio 2.89, first token p50 868 ms.
+  - gpt-oss-120b mr: same counts, prompt ratio 0.83, completion ratio 3.28, first token p50 992 ms. Note: 1 of 12 answerable answers (mr-03) cited
+    with full-width brackets 【S1】, so labels_used was empty for it.
+  - gpt-oss-20b en and mr: first line exact 8/20 each (all refusals), "neither" 12/20 each, ANSWERABLE 0/12 each, refusals 8/8, labels used fine,
+    prompt ratios 0.78 and 0.83, completion ratios 3.47 and 4.47, first token p50 680 and 718 ms.
+  - **Check of these figures against the files (6a-6b):** the four `.md` summaries in `<temp>/llm_smoke/` carry exactly these numbers (ratios,
+    p50, labels used 12 / 11 / 12 / 12, finish reasons "stop 20" in every run, 20 answered and 0 failed in every run). Nothing in them differs from the lines above.
+- **Decision recorded:** answer model = `groq:openai/gpt-oss-120b` (pending client Q1); `groq:openai/gpt-oss-20b` is not used for answers (verdict
+  format, R17). Condense: `LLM_CONDENSE_CHAIN` stays empty until 6a-11.
+  - **Note found in 6a-6b (does not change the decision; the owner may want to know):** all 24 answerable answers of the two 20b runs start with
+    `ANSWERABLE` followed by TWO SPACES and then the newline (a markdown line break); all 24 of the two 120b runs have the bare word. The 20b "neither" 12/20
+    is therefore only that: the first line is the right word with trailing spaces. Plan 4.5 removes LEADING whitespace only, so the temporary classifier
+    in `llm_smoke.py` (a copy of 4.5) is right to call it "neither" under today's rule. Whether the stream filter (6a-8) should also ignore TRAILING
+    whitespace is a rule change for the owner. The 20b answer quality was not measured. The 20b near-topic and unrelated refusals are exact.
+- **Groq console, checked by the owner on 2026-11-26:** "Inference APIs ZDR" = Enabled; "Global ZDR" = Disabled (left off on purpose, it would disable
+  batch and fine-tuning). `LLM_ZDR_CONFIRMED` stays false in this step. Real student data still needs institution consent (Q2).
+- **Token limit source (the line that `test_llm_models_pinned.py` reads):**
+  `groq:openai/gpt-oss-120b` · TPM 8000 · seen by the owner 2026-11-26 · free plan · Groq console metrics
+  (the red "Rate limit" line at 8K total tokens per minute). `models.json` now has `tpm: 8000` for this model
+  only (data, not enforced). **No `tpd` anywhere and no token limit for `groq:openai/gpt-oss-20b`: nothing was seen for them, nothing is guessed.**
+  The 6a-3 caveat about which plan the rate-limits table describes is settled for the TPM of the 120b on the free plan; RPM 30, RPD 1000 and the
+  200K tokens a day are still the table's values, not seen by the owner.
+- **Secret check of the 8 recordings (done before anything else):** a case-insensitive search for `gsk_`, `authorization`, `bearer`, `api_key`, for
+  an e-mail pattern, for a drive letter or `/Users/` or `/home/` path, and for the machine and user names found nothing. The files hold only the
+  response body (ids such as `chatcmpl-...` and `req_...`, no headers). The test file keeps this check for all eight (a new test).
+- **What the real streams look like, against the hand-written `groq_stream_ok.sse` (6a-3)**, in plain words (all 8 recordings behave the same):
+  1. Every chunk has `id`, `object`, `created`, `model`, `system_fingerprint`, and `choices[0].logprobs: null`. The hand-written one had `id`, `object`,
+     `model` only. The parser ignores all of them.
+  2. The first chunk is the role chunk with `content: ""` and an `x_groq` object that holds only `id` and `seed` (no usage). Empty content gives no token.
+  3. **Reasoning:** `delta.reasoning` WITH a second field `delta.channel: "analysis"` (the hand-written one had `reasoning` only; `channel` is
+     unknown to the parser and ignored). All reasoning chunks come first (28 to 163 of them), then all content chunks, never mixed (checked per file).
+     Content chunks have no `channel`. Reasoning is not passed on (tests below).
+  4. **Usage is in the finish chunk, and TWICE:** once as `x_groq.usage` and once as a top-level `usage`, with the same values. There is no separate usage
+     chunk. It arrives although the adapter does not send `stream_options`. The usage object has more fields than the adapter reads: `queue_time`,
+     `prompt_time`, `completion_time`, `total_tokens`, `total_time`, `completion_tokens_details.reasoning_tokens`, and in the Marathi recordings
+     `prompt_tokens_details.cached_tokens` (256). The adapter reads `prompt_tokens` and `completion_tokens` only; it prefers `x_groq.usage` and falls back
+     to the top-level one (each copy alone is tested). Reasoning tokens are inside `completion_tokens` (for example 29 of 101; 164 of 245 for the 20b
+     Marathi answer).
+  5. **Finish chunk:** `delta: {}` and `finish_reason: "stop"` in the same chunk as the usage (the hand-written one: the same, with usage only in `x_groq`).
+     No `length`, `content_filter`, `error` or tool call in any of the 8 recordings, nor in the 80 answers of the smoke runs (finish reasons "stop 20" per run).
+  6. **`data: [DONE]`** is the last line, after a blank line, as in the hand-written one. Plain `\n` line ends, no comment lines, no `event:` lines.
+  7. **Token cuts are small:** one chunk per sub-word. The verdict word never arrives whole: `ANSWER`+`ABLE`, `NOT`+`_IN`+`_S`+`OURCES`; the line break
+     is its own chunk (`\n`, and `  \n` for the 20b); `[S1]` is four chunks (`[`, `S`, `1`, `]`). The first piece the stream filter sees is a prefix of the verdict
+     word, so 6a-8 must work on prefixes (plan 4.5 already cuts its tests at every position). A NOT_IN_SOURCES answer is exactly those four pieces and nothing else.
+  8. Fields the parser does not know: `channel`, `system_fingerprint`, `logprobs`, `created`, `x_groq.id`, `x_groq.seed`, the extra usage fields above.
+     None of them changed the result.
+- **Citation format check (finding of the owner's Marathi reading, mr-03).** Searched: all 8 recordings (the visible answer rebuilt from the content
+  chunks) and the 80 answers in the 4 smoke `.jsonl` files (read only, nothing copied into the repo), for full-width or CJK brackets, `（）`, `[ S1 ]`,
+  `(S1)`, `S1` without brackets, `[Source 1]` / `[1]`, and for special hyphens and dashes.
+  - **Full-width brackets: 1 answer.** File `groq_openai_gpt-oss-120b_mr.jsonl`, id `mr-03`, the marker `【S1】` (U+3010 / U+3011), written with no space or
+    full stop before it, at the end of the answer. It is also the only bare `S1` found (the same marker). That is 1 of 12 answerable answers in that run and
+    1 of 80 answers in all four runs; none of the other 79 uses another form. **No recorded `.sse` file holds it** (the recorded Marathi answers are mr-01 of
+    each model), so the pass-through test uses a SYNTHETIC stream built from that answer's text (its docstring says so); drop it if a recording of mr-03 is made.
+  - No `（）`, no `[ S1 ]`, no `(S1)`, no `[Source 1]`, no `[1]` in any of the 88 answers. All 47 other answerable answers of the smoke runs cite as `[S1]`-style
+    labels in ASCII (both 20b runs cite correctly 12/12).
+  - **U+2011 (non-breaking hyphen), written in "read‑only": 4 of the 8 recordings** (every answerable one; the near-topic ones hold only the verdict) and **14 of the
+    80 smoke answers** (120b en 5: en-01, 02, 03, 07, 08; 120b mr 3: mr-01, 02, 03; 20b en 4: en-01, 02, 07, 08; 20b mr 2: mr-01, 02). Three of the four recorded
+    answers are also in the smoke files, so there are 15 different answers in all. Never inside a citation.
+  - Informational, also non-ASCII in visible text: U+2019 (right single quote) in 3 smoke answers (120b en-11, en-13; 20b en-01), U+202F (narrow no-break space) in
+    120b en-07 (inside a sentence) and en-11 (right before `[S3]`), U+2014 (em dash) in 120b en-11, U+2013 (en dash) in 20b en-02 and en-11.
+- **Which items of the 6a-3 "UNVERIFIED" list the real streams settle:**
+  1. **Groq stream format: VERIFIED** (chunk shape, `delta.content`, `finish_reason`, usage present without `stream_options`, in `x_groq.usage` and at the top level,
+     `[DONE]`). Still not seen on a real Groq stream: `finish_reason: length`, `content_filter`, a tool call, an error object, a 429 with `Retry-After` (these stay on the
+     hand-written tests).
+  2. **Gemini: still UNVERIFIED** (no recording, no key used).
+  3. **OpenRouter: still UNVERIFIED** (no recording, no key used).
+  4. **Reasoning models: partly verified.** Verified: reasoning arrives as `delta.reasoning` before the answer, the adapter never passes it on, and it is paid for inside
+     `completion_tokens`. Still open: whether `finish_reason: length` happens with the 600-token cap (none in 80 answers; the largest reasoning part in the recordings is
+     164 tokens, the largest completion 245) and the sizing of `CHAT_MAX_OUTPUT_TOKENS` (6a-13, with real chunks).
+- **The hand-written fixtures stay.** `groq_stream_ok.sse` and the others are still used by `test_llm_adapters.py`; the 8 recordings are used by the new file. Nothing was replaced.
+- **One existing test changed (the owner should look at it):** `tests/test_llm_smoke.py::test_record_switches_the_hook_on_for_one_answerable_and_one_near_topic_question_only`
+  (6a-6) failed in the gate once the 120b recordings were in the fixtures folder: `--record` then correctly skips a recording that exists, so the test saw no
+  recording switch. The change keeps every assertion and only adds `monkeypatch.setattr(smoke, "recording_exists", lambda path: False)` (as the next test already
+  does), so the test no longer depends on what the repository holds. Without it the test fails on every checkout that contains the recordings.
+- **Adapter fix: none needed.** All 60 new tests were green on the first run. Only a comment changed: the "UNVERIFIED" paragraph in the docstring of `app/llm/openai_compat.py`
+  now says what the real streams showed. `groq.py` and the other adapters are untouched.
+- **Open items:**
+  - Marathi quality reading: the owner read the 120b answers: 11/12 natural, 1 citation-format problem (mr-03). A native-speaker review of the fixed texts (refusals, notices)
+    remains a pilot gate.
+  - Provider spending cap: free plan, no card, nothing to cap (recorded 2026-11-26). It becomes a launch gate again the day a card is added.
+  - Real-chunk token re-measurement in 6a-13: the ratios above come from six short sample passages (prompt ratio 0.77-0.83, completion ratio 2.89-4.47 against the
+    estimate of `llm_budget`, with the reasoning counted in the completion).
+  - Watch `finish_reason: length`: the 600-token cap includes the hidden reasoning (item 4 above).
+  - **6a-9a must normalise `【S#】` to `[S#]` before citation validation** (otherwise a correct answer is dropped by the no-valid-citation rule).
+  - **6a-9a must tighten the prompt wording** to say "use ASCII square brackets only, like [S1]".
+  - **6a-9a decides whether U+2011 and other special hyphens (and U+202F, U+2019, dashes) are normalised in stored text** (evidence above: U+2011 in 4 of 8 recordings and
+    14 of 80 answers, none in a citation).
+  - 6a-8 (stream filter) decides whether the first line may carry trailing whitespace (the 20b note above) and works on prefixes of the verdict word (finding 7).
+  - Q1 (answer model, paid or free) and Q2 (institution consent) stay open; `LLM_ZDR_CONFIRMED` stays false.
+- **Tests (`tier_map.py`: `test_llm_adapters_recorded.py` is `fast`):** 60 tests. Per recording (8): no secret; the real shape (reasoning present, one `stop`, `[DONE]` last, usage
+  as expected); the joined token text equals the visible answer, piece by piece; reasoning never in a `TokenEvent`; the provider-reported usage (one `UsageEvent`, `estimated=False`,
+  the counts of the file); usage then done with `finish_reason` `stop`; the answer starts with the verdict word (the FIRST token is a prefix of it, not the whole word: finding 7).
+  Plus: usage read from `x_groq` alone and from the top level alone (the real finish chunk with one copy removed), and the synthetic full-width citation passes through unchanged.
+  One test added to `test_llm_models_pinned.py` (only the 120b has `tpm` 8000 and no `tpd`, the 20b has neither, and this entry holds the source line).
+- **Red first:** the models test failed on `tpm` (`assert (None == 8000)`) before `models.json` changed. The 60 recorded-stream tests were all green on the first run (the adapter was
+  already right), so they were checked the other way: eleven deliberate breaks, one at a time, each restored byte-identical (SHA-256 before and after): reasoning passed on as text
+  (24 red), usage never read (18), only `x_groq.usage` read (1: the top-level-alone case), only the top-level usage read (1: the `x_groq`-alone case), usage marked estimated (10),
+  `stop` mapped to `length` (8), token text stripped (5), NFKC applied to the text (5), full-width brackets replaced by ASCII ones (1: the pass-through test), the `NOT` piece dropped
+  (8), a wrong completion count (10). **Not proven red:** the secret-word test (the recordings are untracked files with no copy, so none was edited to hold a secret).

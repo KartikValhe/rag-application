@@ -57,3 +57,23 @@ def test_a_chain_of_the_pinned_answer_models_passes_the_start_up_policy() -> Non
 
 def test_a_training_provider_is_never_marked_as_not_training() -> None:
     assert all(m.provider != "gemini" or m.trains_on_inputs for m in load_registry().models)
+
+
+# ── step 6a-6b: the one token limit that was seen in the Groq console ─────────────────────────────────
+
+REAL_RUNS = re.compile(r"^### 6a-6 real runs .*?(?=^### |\Z)", re.M | re.S)
+
+
+def test_only_the_120b_model_has_a_token_limit_and_its_source_is_in_the_6a_6_real_runs_record() -> None:
+    registry = load_registry()
+    big = registry.get("groq:openai/gpt-oss-120b")
+    small = registry.get("groq:openai/gpt-oss-20b")
+    assert big is not None and small is not None
+    assert big.tpm == 8000 and big.tpd is None  # seen by the owner in the console; no daily figure was seen
+    assert (small.tpm, small.tpd) == (None, None)  # nothing was seen for this model: nothing is guessed
+    text = PLAN.read_text(encoding="utf-8")
+    section = REAL_RUNS.search(text[text.index("## Build record") :])
+    assert section is not None, "the build record has no '6a-6 real runs' entry"
+    rows = [line for line in section.group(0).splitlines() if "TPM 8000" in line]
+    assert rows, "the 6a-6 real runs record does not say where TPM 8000 comes from"
+    assert any("2026-11-26" in row and "`groq:openai/gpt-oss-120b`" in row for row in rows)
