@@ -3,7 +3,7 @@ tests/test_chat_route_matrix.py
 ───────────────────────────────
 Route x role matrix for every chat route (plan 11.1, step 6a-9a), GENERATED from the real route table: a route under
 /api/v1/chat or /api/v1/admin/chat without a row in EXPECTED fails the guard test, so the routes of later steps
-(messages 6a-9b, feedback and settings 6a-12) join the matrix as soon as they exist.
+(messages 6a-9b, history, feedback and settings 6a-12a) join the matrix as soon as they exist.
 
 Roles: admin; teacher in scope (T1, who teaches 10-A Math); teacher out of scope (T2); student enrolled (S1, in 10-A);
 student not enrolled (S2); a user of another tenant (tenant b's S1, calling with tenant a's ids); a custom role
@@ -30,10 +30,13 @@ from app.db.models.chat import Conversation
 from app.main import app
 from tests.fixtures.academic_world import AcademicWorld
 from tests.fixtures.documents import auth
+from tests.fixtures.history_world import BASE_TIME, exchange
 from tests.test_document_store import all_app_routes
 
 ROLES = ("admin", "teacher_in", "teacher_out", "student_in", "student_out", "other_tenant", "no_chat_use", "anonymous")
 CONV = "/api/v1/chat/conversations"
+FEEDBACK = "/api/v1/chat/messages/{message_id}/feedback"
+SETTINGS = "/api/v1/admin/chat/settings"
 
 # (method, path) -> (permission, expected status per role, in the order of ROLES)
 EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, ...]]] = {
@@ -43,6 +46,13 @@ EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, ...]]] = {
     ("DELETE", f"{CONV}/{{conversation_id}}"): ("chat:use", (404, 404, 404, 204, 404, 404, 403, 401)),
     # 6a-9b: only the owner may ask in a conversation; 200 is the SSE stream
     ("POST", f"{CONV}/{{conversation_id}}/messages"): ("chat:use", (404, 404, 404, 200, 404, 404, 403, 401)),
+    # 6a-12a: the history (owner only, current read scope re-checked) and the feedback of S1's own answer
+    ("GET", f"{CONV}/{{conversation_id}}/messages"): ("chat:use", (404, 404, 404, 200, 404, 404, 403, 401)),
+    ("PUT", f"{FEEDBACK}"): ("chat:use", (404, 404, 404, 200, 404, 404, 403, 401)),
+    ("DELETE", f"{FEEDBACK}"): ("chat:use", (404, 404, 404, 204, 404, 404, 403, 401)),
+    # 6a-12a: the tenant's chat settings, settings:manage only (the tenant admin)
+    ("GET", SETTINGS): ("settings:manage", (200, 403, 403, 403, 403, 403, 403, 401)),
+    ("PATCH", SETTINGS): ("settings:manage", (200, 403, 403, 403, 403, 403, 403, 401)),
 }
 
 
@@ -92,11 +102,17 @@ async def _prepare(key: tuple[str, str], world: AcademicWorld, raw_db: AsyncSess
     method, path = key
     if key == ("POST", CONV):
         return path, {"json": {"class_id": str(w.classes["10-A"].id), "subject_id": str(w.subjects["Math"].id)}}
-    if "{conversation_id}" not in path:
+    if key == ("PATCH", SETTINGS):
+        return path, {"json": {"retention_days": 30}}
+    if "{conversation_id}" not in path and "{message_id}" not in path:
         return path, {}
     conv = Conversation(tenant_id=w.id, user_id=w.s1.id, class_id=w.classes["10-A"].id, subject_id=w.subjects["Math"].id)
     raw_db.add(conv)
     await raw_db.commit()
+    if "{message_id}" in path:
+        ex = await exchange(raw_db, w, w.s1, conv.id, "what is speed", "Speed is distance over time.", at=BASE_TIME)
+        concrete = path.replace("{message_id}", str(ex.answer.id))
+        return concrete, ({"json": {"rating": "up"}} if method == "PUT" else {})
     concrete = path.replace("{conversation_id}", str(conv.id))
     if method == "POST" and path.endswith("/messages"):
         return concrete, {"json": {"content": "what is my next lecture", "client_request_id": str(uuid.uuid4())}}
@@ -124,7 +140,7 @@ async def test_route_role_matrix(
             assert resp.json() == {"detail": GENERIC_NOT_FOUND}, (role, resp.text)
         if expected == 403:
             assert resp.json()["detail"]["code"] == "permission_denied", (role, resp.text)
-        if expected == 200 and key[1].endswith("/messages"):
+        if expected == 200 and method == "POST" and key[1].endswith("/messages"):
             assert resp.headers["content-type"] == "text/event-stream; charset=utf-8", (role, resp.text)
             assert resp.text.endswith("\n\n") and "event: meta" in resp.text, (role, resp.text)
     assert tuple(got[r] for r in ROLES) == EXPECTED[key][1]

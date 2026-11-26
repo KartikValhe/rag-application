@@ -2,7 +2,7 @@
 app/api/v1/chat.py
 ──────────────────
 The chat API (docs/phase6-plan.md section 8). Step 6a-9a: the conversation routes; 6a-9b: the message route (SSE);
-feedback and history in 6a-12.
+6a-12a: the history and the feedback routes (the admin settings route is app/api/v1/admin_chat.py).
 
   POST   /api/v1/chat/conversations                      create (201; 404 out of scope; 429; 503 chat_disabled)
   GET    /api/v1/chat/conversations                      the caller's own, newest activity first (cursor paging)
@@ -10,9 +10,14 @@ feedback and history in 6a-12.
   DELETE /api/v1/chat/conversations/{conversation_id}    hard delete, cascades, audited with ids and counts (204)
   POST   /api/v1/chat/conversations/{conversation_id}/messages
                                                          one question; 200 text/event-stream (app/services/chat_messages.py)
+  GET    /api/v1/chat/conversations/{conversation_id}/messages
+                                                         the history, oldest first, paged with before=<message id>
+  PUT    /api/v1/chat/messages/{message_id}/feedback     rate one of the caller's own answers (upsert)
+  DELETE /api/v1/chat/messages/{message_id}/feedback     remove that rating (204)
 
-The message route re-checks the caller's CURRENT read scope on every message (owner decision, 6a-9b); list, get and
-delete do not (a student can always delete their own conversation).
+The message route and the history re-check the caller's CURRENT read scope for the conversation's class and subject
+(owner decisions, 6a-9b and 6a-12); list, get, delete and feedback do not (a student can always read the list, delete
+their own conversation and rate their own answers).
 
 Every route depends on require_released("chat:use"): the permission check runs in its own short transaction and
 gives its connection back before the handler starts (B100). Each handler then opens its own short
@@ -36,13 +41,25 @@ from app.core.authz import require_released
 from app.core.tenant_db import chat_session_context
 from app.db.models.user import User
 from app.schemas.chat import (
+    CitationResponse,
     ConversationCreateRequest,
     ConversationListResponse,
     ConversationResponse,
+    FeedbackRequest,
+    FeedbackResponse,
     MessageCreateRequest,
+    MessageListResponse,
+    MessageResponse,
     NamedRef,
 )
-from app.services import chat_conversations, chat_messages, chat_sse, document_scope
+from app.services import (
+    chat_conversations,
+    chat_feedback,
+    chat_history,
+    chat_messages,
+    chat_sse,
+    document_scope,
+)
 from app.services.audit import record_audit_event
 from app.services.chat_conversations import ConversationView
 
@@ -164,6 +181,68 @@ async def list_conversations(
     except chat_conversations.CursorError:
         raise chat_conversations.chat_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_cursor") from None
     return ConversationListResponse(items=[_response(v) for v in views], next_cursor=next_cursor)
+
+
+def _message_response(view: chat_history.MessageView) -> MessageResponse:
+    return MessageResponse(
+        id=view.id, role=view.role,  # the column CHECK allows only user and assistant; the model checks it again
+        content=view.content, created_at=view.created_at, route=view.route, outcome=view.outcome,
+        language=view.language, partial=view.partial,
+        citations=[CitationResponse(
+            label=c.label, document_title=c.document_title,
+            location_kind=c.location_kind,  # the column CHECK allows page, slide, section; the model checks it again
+            page_start=c.page_start, page_end=c.page_end, heading_path=c.heading_path, snippet=c.snippet,
+        ) for c in view.citations],
+        feedback=None if view.feedback is None else _feedback_response(view.feedback),
+    )
+
+
+def _feedback_response(view: chat_feedback.FeedbackView) -> FeedbackResponse:
+    return FeedbackResponse(rating=view.rating, comment=view.comment, updated_at=view.updated_at)
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=MessageListResponse)
+async def list_messages(
+    conversation_id: uuid.UUID,
+    user: ChatUser,
+    before: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=chat_history.MAX_PAGE)] = chat_history.DEFAULT_PAGE,
+) -> MessageListResponse:
+    """The messages of one of the caller's own conversations, oldest first, `limit` per page; `before` (a message id
+    of this conversation) gives the page just before it. Generic 404 unless the conversation is the caller's AND its
+    class and subject are still in the caller's current read scope (owner decision, 6a-12). 422 invalid_cursor for a
+    `before` that is not a message of this conversation."""
+    try:
+        async with chat_session_context(user.tenant_id, user.id) as db:
+            views, has_more = await chat_history.read_page(db, user, conversation_id, before=before, limit=limit)
+    except chat_history.CursorError:
+        raise chat_conversations.chat_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_cursor") from None
+    return MessageListResponse(items=[_message_response(v) for v in views], has_more=has_more)
+
+
+@router.put("/messages/{message_id}/feedback", response_model=FeedbackResponse)
+async def put_feedback(message_id: uuid.UUID, body: FeedbackRequest, user: ChatUser) -> FeedbackResponse:
+    """Rate one of the caller's own answers (upsert). Generic 404 unless the message is an assistant message of the
+    caller; the class scope is not re-checked. 422 comment_too_long past 500 characters after cleaning. Not audited."""
+    async with chat_session_context(user.tenant_id, user.id) as db:
+        if not await chat_feedback.is_own_answer(db, user, message_id):
+            raise document_scope.not_found()
+        comment = chat_feedback.clean_comment(body.comment)
+        view = await chat_feedback.upsert(db, user, message_id, body.rating, comment)
+    logger.info("chat_feedback_saved", tenant_id=str(user.tenant_id), message_id=str(message_id), rating=view.rating)
+    return _feedback_response(view)
+
+
+@router.delete("/messages/{message_id}/feedback", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+async def delete_feedback(message_id: uuid.UUID, user: ChatUser) -> Response:
+    """Remove the caller's rating of one of their own answers (204 also when there was none). Generic 404 unless the
+    message is an assistant message of the caller."""
+    async with chat_session_context(user.tenant_id, user.id) as db:
+        if not await chat_feedback.is_own_answer(db, user, message_id):
+            raise document_scope.not_found()
+        await chat_feedback.delete_own(db, user, message_id)
+    logger.info("chat_feedback_removed", tenant_id=str(user.tenant_id), message_id=str(message_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse)

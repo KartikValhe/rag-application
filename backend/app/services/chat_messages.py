@@ -194,6 +194,17 @@ async def _own_conversation(db: AsyncSession, user: User, conversation_id: uuid.
     )).one_or_none()
 
 
+def read_time_view(message: Any) -> tuple[Any, Any]:
+    """The outcome and partial flag of a message row as every read path reports them (plan 2.1, C28): an answer still
+    'pending' after CHAT_PENDING_STALE_SECONDS reads as 'interrupted' and partial, exactly what the sweeper will write
+    (9.4). Nothing is written. `message` is the Message model or an alias of it; the clock is the database's."""
+    stale = and_(
+        message.outcome == OUTCOME_PENDING,
+        message.created_at < func.now() - timedelta(seconds=settings.CHAT_PENDING_STALE_SECONDS),
+    )
+    return case((stale, "interrupted"), else_=message.outcome), case((stale, True), else_=message.partial)
+
+
 async def _existing_answer(
     db: AsyncSession, user: User, conversation_id: uuid.UUID, client_request_id: uuid.UUID
 ) -> _Existing | None:
@@ -201,10 +212,7 @@ async def _existing_answer(
     CHAT_PENDING_STALE_SECONDS is reported as 'interrupted' (read time only, plan 2.1)."""
     question = aliased(Message)
     answer = aliased(Message)
-    stale = func.now() - timedelta(seconds=settings.CHAT_PENDING_STALE_SECONDS)
-    outcome = case(
-        (and_(answer.outcome == OUTCOME_PENDING, answer.created_at < stale), "interrupted"), else_=answer.outcome
-    )
+    outcome, _ = read_time_view(answer)
     row = (await db.execute(
         select(answer.id, outcome)
         .select_from(question)

@@ -110,6 +110,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_chat_condense.py": ("db", "security"),  # 6a-11: condense in the turn: retrieval only, budget, usage rows, every failure falls back
     "test_chat_narrowing.py": ("db", "security"),  # 6a-11: tenant allowed_llm_providers in the turn (canary never called), one usage row per failed attempt
     "test_llm_chain_narrowing.py": ("db", "security"),  # 6a-11: the chain narrowed by the tenant context, attempt numbers and latency
+    "test_chat_history.py": ("db", "security"),  # 6a-12a: history route: owner only, scope re-check, student citation shape, stale pending, paging, cursor 422
+    "test_chat_feedback.py": ("db", "security"),  # 6a-12a: feedback upsert/delete on the caller's own answers only, cleaned comment, no audit, no logs
+    "test_chat_settings_pure.py": ("fast", "security"),  # 6a-12a: settings validation (exact provider names, 6a-5 budget codes, unknown fields) and the change record
+    "test_chat_settings_api.py": ("db", "security"),  # 6a-12a: settings GET (creates nothing) and PATCH (upsert, audited changes, tenant only)
     "test_sse_transport.py": ("db",),  # 6a-9b: F11, stream not buffered and disconnect reaching the generator through the stack
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),

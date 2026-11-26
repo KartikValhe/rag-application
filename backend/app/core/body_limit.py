@@ -112,6 +112,8 @@ AREA_LIMITS: tuple[tuple[str, BodyLimit], ...] = (
     ("/api/v1/documents", SMALL_LIMIT),
     # An area, not an upload route: chat needs no pre-body Bearer check and must not get the per-IP in-flight cap.
     ("/api/v1/chat", CHAT_LIMIT),
+    # The admin chat settings (6a-12a): a small JSON body as well.
+    ("/api/v1/admin/chat", CHAT_LIMIT),
 )
 
 # Per-IP in-flight cap for upload routes. The TTL only matters if a worker dies mid-request:

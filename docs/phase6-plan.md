@@ -219,7 +219,7 @@ share one copy. No HTTP hop, no second copy of the SQL.
 - Read scope = **published versions only**, never drafts (`statuses_for("read", False)`; `search_for_chat` refuses any other
   scope with a `ValueError`).
 - Students: enrolled classes x subjects offered in that class (F3). Teachers: their own (class, subject) pairs (so a teacher
-  "preview" of class 10-A covers only the subjects they teach there, *proposed*, Q8). Admins: every offered pair of the class.
+  "preview" of class 10-A covers only the subjects they teach there, **decided, Q8**). Admins: every offered pair of the class.
 - **Owner decision (6a-9b brief, 2026-11-26): scope re-check.** The message route re-checks the caller's CURRENT read scope
   for the conversation's class and subject on EVERY message (generic 404 when out of scope; built in 6a-9b). Any route that
   returns message history or citation snippets re-checks the current scope as well (generic 404; built with the history route
@@ -250,6 +250,18 @@ wish:** a native Marathi reviewer (and a Hindi one if `hi` is enabled) signs off
 the error messages of 8.4, the schedule templates of 3.2, the fallback texts of 7.5 and the AI notice of 9.5). The sign-off (who,
 date, text version) is recorded in the build record. Until it exists, `mr` stays out of `CHAT_LANGUAGES` for real students (step 6a-13).
 
+**Marathi texts written by agents, not by the plan (owner, 6a-12 brief decision 5): all on the native review list of this gate.**
+| Step | Where | Texts |
+|---|---|---|
+| 6a-9b | `app/services/chat_schedule.py` `TEMPLATES["mr"]` and the Marathi weekday names | every schedule template: `item`, `room`, `room_not_set`, `teacher`, `next_header`, `now_header`, `nothing_now`, `no_upcoming`, `day_header`, `day_empty`, `subject_header`, `subject_day_header`, `subject_empty`, `class_header`, `class_empty`, `no_timetable`, `clarify`; the weekday names सोमवार ... रविवार |
+| 6a-9b | `app/services/chat_messages.py` `STREAM_ERROR_MESSAGES["mr"]` | `schedule_unavailable`, `answer_unavailable`, `stream_interrupted`, `internal_error` |
+| 6a-10c | `app/services/rag_answer.py` `RETRIEVAL_ONLY_TEXTS["mr"]` | the Marathi retrieval-only fallback sentence (7.5) |
+| 6a-10c | `app/services/chat_messages.py` `STREAM_ERROR_MESSAGES["mr"]` | `search_unavailable`, `search_busy`, `search_timeout` |
+| 6a-11 | `app/services/chat_condense.py` `REFERRING_WORDS` (the `mr` block) | the Marathi referring words (not shown to students, but they decide when a follow-up is condensed): ते, ती, तो, त्या, त्याचा, त्याची, त्याचे, त्यांचा, त्यांची, त्यांचे, त्यात, त्याला, हे, ही, हा, याचा, याची, याचे, यांचा, यांची, यांचे, यात, याला |
+The Marathi refusal of this section (`NOT_FOUND_TEXTS["mr"]`) is the plan's own text and is on the list as before. The Hindi referring words
+of 6a-11 and the plan's Hindi refusal need the Hindi review only if `hi` is enabled (Q5). 6a-12a added no user-facing text in any language
+other than English (the HTTP error texts are English, as in 6a-9b).
+
 ### 4.5 B108: near-topic questions that pass the gate
 The 5d-5 calibration shows two hard negatives (Angular routing 0.863, Redux Toolkit 0.856) scoring above three valid questions,
 so no threshold separates them. Phase 6 solves it in layers, each measurable:
@@ -275,7 +287,7 @@ so no threshold separates them. Phase 6 solves it in layers, each measurable:
      no citations, `outcome = refused_by_model`.
    - `ANSWERABLE`: the line is dropped and the rest is streamed.
    - Neither (format ignored): the answer is streamed, and rule 2 decides at the end.
-2. **No valid citation, no answer** (`CHAT_REQUIRE_CITATION=true`, *proposed*): an answer that ends with zero valid citations
+2. **No valid citation, no answer** (`CHAT_REQUIRE_CITATION=true`, **decided with Q11**: stream with the hold-back and `replace`): an answer that ends with zero valid citations
    is retracted (SSE `replace` event with the fixed refusal) and stored with `outcome = no_valid_citations`. Phase 7's
    "citation enforcement" becomes a refinement (configurable per tenant), not the first line of defence.
 3. **Measured, not assumed.** Step 6a-13 runs `eval_chat` (section 10) with the real model on the golden set, including both
@@ -297,7 +309,7 @@ groundedness problem for Phase 7 (judge, strict mode). Phase 6 stores what the j
 |---|---|---|
 | `system` | The rules below, the bot name (branding `display_name`, cleaned, max 60 characters), the tenant name, the language hint | ours |
 | `user` / `assistant` pairs | The last `CHAT_HISTORY_TURNS` (2) exchanges, each cut to `CHAT_HISTORY_CHARS` (600). **Citation labels are stripped from old answers** (an old `[S1]` would point at a different source now) | untrusted |
-| final `user` | The SOURCES block, then `Student question:` and the (PII-masked, condensed if a follow-up) question | untrusted |
+| final `user` | The SOURCES block, then `Student question:` and the PII-masked ORIGINAL question. **Owner decision (6a-11 brief, C33; corrected in 6a-12a):** a condensed follow-up goes to RETRIEVAL ONLY (the embedding and `search_for_chat`; stored in `messages.retrieval_query`) and is never placed in the answer prompt | untrusted |
 
 Sources go in the final user message, not in the system message: the system message keeps the highest authority and holds
 only our text; the sources sit next to the question (better grounding) at user-level authority, and are declared data.
@@ -355,7 +367,7 @@ End of SOURCES. Boundary: 7f3a9c2e
 
 ### 5.5 Flagged chunks
 Published chunks with `injection_flags` were acknowledged by a teacher (`acknowledge_flags`), so they are retrievable
-("flag, never drop"). In Phase 6 (*proposed*, Q6):
+("flag, never drop"). In Phase 6 (**decided, Q6**: include, marked):
 - `CHAT_FLAGGED_SOURCES = "mark"` (default): included, `flagged="true"` on the source tag, counted in
   `messages.flagged_sources_used`, and the message gets `needs_review = true` when an answer cites **only** flagged sources
   (Phase 7's review queue reads it).
@@ -491,7 +503,7 @@ between the chain and the HTTP response.
 | Cooldown `llm:cooldown:{model_key}` | `PX = Retry-After` | a 429 makes the chain skip that model until then |
 
 ### 7.5 All providers down (or budget exhausted)
-- `CHAT_FALLBACK_RETRIEVAL_ONLY=true` (*proposed*, Q7): the answer is the top 3 retrieved passages (snippets with citations) and
+- `CHAT_FALLBACK_RETRIEVAL_ONLY=true` (**decided, Q7**): the answer is the top 3 retrieved passages (snippets with citations) and
   the fixed text "I can't write an answer right now. These parts of your class material matched your question best; they may
   not answer it fully." `outcome = fallback_retrieval_only` (or `budget_retrieval_only`). No LLM call. The honest second sentence
   is there because of B108 (Conflicts C9).
@@ -565,13 +577,13 @@ route for "not found" and "not yours".
 | `POST /api/v1/chat/conversations` | `chat:use` | JSON `ConversationCreateRequest` | `201` `ConversationResponse` | 404 (class or subject not in the caller's read scope); 422; 429 `conversation_rate_limit_exceeded` (20 per user per hour) |
 | `GET /api/v1/chat/conversations` | `chat:use` | query `class_id?`, `cursor`, `limit` (1-50, default 20) | `200` `ConversationListResponse` (own only, newest activity first) | 422 `invalid_cursor` |
 | `GET /api/v1/chat/conversations/{conversation_id}` | `chat:use` | | `200` `ConversationResponse` | 404 |
-| `GET /api/v1/chat/conversations/{conversation_id}/messages` | `chat:use` | query `before?` (message id), `limit` (1-50, default 30) | `200` `MessageListResponse` (oldest first within the page, with citations and own feedback) | 404; 422 |
+| `GET /api/v1/chat/conversations/{conversation_id}/messages` | `chat:use` | query `before?` (message id), `limit` (1-50, default 30) | `200` `MessageListResponse` (oldest first within the page, with citations and own feedback) | 404 (not the caller's, or its class and subject no longer in the caller's current read scope); 422 `invalid_cursor`; 422 (limit) |
 | `POST /api/v1/chat/conversations/{conversation_id}/messages` | `chat:use` | JSON `MessageCreateRequest` | `200` `text/event-stream` (8.3) | before the stream: 404; 409 `duplicate_request`; 413; 422 `invalid_message`, `message_too_long`; 429 (7.7); 503 `service_unavailable`, `search_unavailable`, `search_busy`, `search_timeout`, `chat_disabled` |
 | `DELETE /api/v1/chat/conversations/{conversation_id}` | `chat:use` | | `204` (hard delete, cascades) | 404 |
-| `PUT /api/v1/chat/messages/{message_id}/feedback` | `chat:use` | JSON `FeedbackRequest` | `200` `FeedbackResponse` (upsert) | 404 (not an assistant message of the caller); 422 |
-| `DELETE /api/v1/chat/messages/{message_id}/feedback` | `chat:use` | | `204` | 404 |
-| `GET /api/v1/admin/chat/settings` | `settings:manage` | | `200` `ChatSettingsResponse` | |
-| `PATCH /api/v1/admin/chat/settings` | `settings:manage` | JSON `ChatSettingsUpdateRequest` | `200` `ChatSettingsResponse` | 422 `invalid_setting`, `provider_not_allowed` |
+| `PUT /api/v1/chat/messages/{message_id}/feedback` | `chat:use` | JSON `FeedbackRequest` | `200` `FeedbackResponse` (upsert) | 404 (not an assistant message of the caller; no class-scope re-check, 6a-12a); 422; 422 `comment_too_long` |
+| `DELETE /api/v1/chat/messages/{message_id}/feedback` | `chat:use` | | `204` (also when there was none) | 404 |
+| `GET /api/v1/admin/chat/settings` | `settings:manage` | | `200` `ChatSettingsResponse` (effective values; creates nothing) | |
+| `PATCH /api/v1/admin/chat/settings` | `settings:manage` | JSON `ChatSettingsUpdateRequest` | `200` `ChatSettingsResponse` | 422 `invalid_setting`, `provider_not_allowed`, `token_budget_invalid`, `token_budget_above_platform_ceiling` (6a-12a) |
 
 The class picker reuses `GET /api/v1/me/classes` (F15). No route returns another user's conversation, to anyone (Q4 keeps
 admin reading off in Phase 6).
@@ -633,7 +645,11 @@ name or score is in the stream.
 | `stream_interrupted` | `error` event (`partial: true`) | message | the provider failed mid-answer; the partial text is kept and marked |
 | `answer_unavailable` | `error` event | message | every provider failed and the retrieval-only fallback is off |
 | `internal_error` | 500 or `error` event | any | unexpected; fixed text |
-| `invalid_setting`, `provider_not_allowed` | 422 | admin settings | out of range, or a provider not in the platform allow-list |
+| `invalid_setting` | 422 | admin settings | **(6a-12a, owner)** anything refused that is not a provider or a budget: the body is not a JSON object or is empty, an unknown field (there is no bot-name setting), a wrong type of `chat_enabled`, `retention_days` or the provider list (no strings for numbers, no `1.0`, no `true` for a number), `retention_days` outside 1-730, `chat_enabled` not a boolean, a provider list that is not a list of strings or has a duplicate. A body that is not JSON at all gets FastAPI's own 422 |
+| `provider_not_allowed` | 422 | admin settings | **(6a-12a, owner)** a name in `allowed_llm_providers` that is not EXACTLY a provider name of `models.json` (no case folding, no trimming) |
+| `token_budget_invalid`, `token_budget_above_platform_ceiling` | 422 | admin settings | **(6a-12a, owner: the 6a-5 codes kept)** `daily_token_budget` not null and not a positive whole number; above `LLM_PLATFORM_DAILY_TOKENS` |
+| `invalid_cursor` | 422 | conversation list, history | **(6a-12a)** the history's `before` is not the canonical id of a message of THIS conversation (malformed, another conversation, another user, another tenant, none): one code for every case |
+| `comment_too_long` | 422 | feedback | **(6a-12a, new)** the comment is longer than 500 characters after cleaning (cleaning can make a text longer, so the limit is checked on the cleaned text) |
 
 Every message is fixed text: never a provider message, a model name, SQL, a path, the question or chunk text.
 
@@ -669,6 +685,15 @@ Every message is fixed text: never a provider message, a model name, SQL, a path
 - An integration test reads the stream chunk by chunk through the full middleware stack (`httpx.AsyncClient` with
   `ASGITransport` streaming) and asserts the first `token` event arrives before the generator finishes (proves no buffering
   in our own middleware).
+
+### 8.8 Deployment checklist (Phase 6; added in 6a-12a, the plan had none)
+- Reverse proxy for SSE: buffering off, no gzip on `text/event-stream`, read timeout above 60 s, `Host` preserved (8.7). The README
+  section is still to be written (outside `backend/` and `docs/`, 6a-9b record).
+- **`app_chat_maint` password (owner, 6a-12a brief):** the role has no password in the repo (`infra/postgres/init.sql`,
+  `prepare_test_db`). The deployment sets it outside the repo (`ALTER ROLE app_chat_maint PASSWORD ...` from the secret manager) and puts
+  `CHAT_MAINT_DATABASE_URL` (user `app_chat_maint`) in the **worker's** environment only, never the API's. The worker refuses to start with
+  any other user name (6a-12b).
+- The launch gates of 6a-6: `LLM_ZDR_CONFIRMED` only after the console check, the provider-side spending cap recorded (7.7).
 
 ---
 
@@ -730,7 +755,7 @@ version_no, file_kind, location_kind, page_start, page_end, heading_path, snippe
 `(tenant_id, message_id)` messages CASCADE (plus `user_id` through a composite FK on `(tenant_id, user_id, message_id)` with a
 UNIQUE on messages). **`chunk_id`, `document_id`, `version_id` are plain snapshot references, deliberately not FKs**: chunks are
 deleted at every publish, and a citation must stay readable. Index `(tenant_id, document_id)` so a document **purge** can blank
-`snippet` and `heading_path` of its citations (*proposed*: a purged document's text should not live on in snippets). Review 6-0b:
+`snippet` and `heading_path` of its citations (**decided, C21**, review 6-0c: a purged document's text should not live on in snippets). Review 6-0b:
 the blanking runs as the `app_chat_maint` role (9.2), which holds `UPDATE (snippet, heading_path)` on this table and nothing else; the tenant routes
 never update a citation row after it is inserted. Review 6-0c: the blanking is triggered through the outbox table below, never called
 from the API process.
@@ -835,6 +860,10 @@ the test (11.1) and the prove-it (11.4) pin that a finished assistant row and ev
   grant of 9.2; no owner-context session and no extra `workers/db.py` helper) and the citation blanking from the queue (9.4). Tenant ids still come from the sweeper's existing claim connection (`app_worker`, `SELECT id FROM
   app.tenants` only), because `app_chat_maint` cannot read `tenants`. For each tenant the sweeper opens a maintenance transaction
   that sets `app.tenant_id` (transaction-local, through the `set tenant` helper inside `chat_maintenance.py`) and does nothing else.
+  **Owner answer (6a-12a brief, built in 6a-12b):** every maintenance transaction first checks `current_user = 'app_chat_maint'` and refuses
+  to run otherwise; the worker refuses to start when the user name in `CHAT_MAINT_DATABASE_URL` is not `app_chat_maint`; tests build the
+  engine from the superuser URL with `SET ROLE app_chat_maint` on connect (the role has no password in the repo), production uses a plain
+  `create_async_engine(CHAT_MAINT_DATABASE_URL)`.
   The audit row of a purge is written in a separate `app_tenant` session (`app_chat_maint` has no grant on `audit_log`, 9.4).
 - **Document-purge blanking goes through the outbox (review 6-0c, C21).** The two places that delete documents, the admin purge route (an
   API process) and the sweeper's tombstone purge (which runs in a tenant session), do **not** call the maintenance role. Each inserts one
@@ -868,6 +897,10 @@ readable by `settings:manage` in aggregate later (Phase 8 usage page).
   `last_message_at` is older than `chat_retention_days` (cascades messages, citations, feedback), in batches of 500, and
   `llm_usage_events` older than `LLM_USAGE_RETENTION_DAYS` (400). Audited once per run per tenant as `chat:retention_purge` with
   counts only (system actor); the audit row is written in a separate `app_tenant` session, because `app_chat_maint` has no grant on `audit_log`.
+- **Retention safety (owner decision, 6a-12a brief; built in 6a-12b).** The retention delete does **nothing** unless an explicit retention
+  value is set: client question Q4 is still open, so **no default value may delete anything** (not the column default of 90, not a setting's
+  default). It deletes in small batches, a dry-run count (what would be deleted, nothing deleted) is testable, and the audit rows hold
+  counts only, never text. How "explicit" is told apart from the column default is open (C35).
 - **Stale pending rows (review 6-0b, changed in 6-0c, C22):** each run, per tenant, the sweeper marks assistant rows with
   `outcome = 'pending'` and `created_at` older than `CHAT_PENDING_STALE_SECONDS` (120) as `interrupted` (`partial = true`,
   `completed_at` set) with **one UPDATE through `app_chat_maint`**, in the same tenant-set maintenance transaction as the other steps.
@@ -984,7 +1017,8 @@ A small `app/scripts/chat_report.py` (development and operators) prints these pe
 | `test_chat_language.py`, `test_pii.py` | fast | detection tables, masking |
 | `test_llm_adapters.py` | fast, security | recorded SSE streams via `httpx.MockTransport`: normalised events, 429 + `Retry-After`, mid-stream error, auth error, OpenRouter `provider` body, no `tools` key, key never in errors |
 | `test_llm_policy.py` | fast, security | startup refuses training providers outside development, Groq without `LLM_ZDR_CONFIRMED` outside development, unknown chain keys |
-| `test_llm_chain.py` | db | retry before first token only, fallback order, never on bad request, breaker open/half-open, cooldown, RPM/RPD slots, budget reserve and correction |
+| `test_llm_chain.py` | db | retry before first token only, fallback order, never on bad request, breaker open/half-open, cooldown, RPM/RPD slots (**corrected in 6a-12a:** budget reserve and correction are not here; section 12 builds the budgets in 6a-5, see the next row) |
+| `test_llm_budget.py`, `test_llm_budget_pure.py` | db; fast | (6a-5) daily token counters: reserve, correct, exhausted, overlap, the override rule; the budget INSIDE the turn (reserve before the call, settle to the reported usage, release on failure) is in `test_chat_rag.py` and `test_chat_condense.py` (6a-10c, 6a-11) |
 | `test_chat_api.py` | db | conversation CRUD, message stream happy paths, SSE format, limits, cancellation at every stage, persistence equals stream. Review 6-0b, assistant row lifecycle: T1 inserts user and `pending` assistant row in one transaction (a T1 rollback leaves neither); T3 updates the same row (same id as in `meta`); the unique index rejects a second assistant row for one user message; a duplicate `client_request_id` (sequential and two at once) returns 409 with the existing assistant `message_id` and its `outcome` (`pending` while streaming, final afterwards); a row left `pending` is read as `interrupted` after `CHAT_PENDING_STALE_SECONDS` |
 | `test_chat_schedule.py` | db | plan exit criteria: student, teacher, admin (one class, all classes), zero LLM and zero retriever calls (FakeLLM and a spy embedder) |
 | `test_chat_rag.py` | db | not-found path makes no LLM call; verdict refusal; missing-citation retract; fallback when all providers fail; budget fallback; flagged marking |
@@ -1020,7 +1054,11 @@ provider host (all tiers); CI has no provider keys at all.
 - **Secrets:** key canary never in logs, responses, stream, database.
 - **Limits:** a rejected limit consumes nothing on the others; Redis down outside development gives 503.
 
-### 11.4 Prove-it runs (test database only, `tests/security/test_prove_it_fails_chat.py`)
+### 11.4 Prove-it runs (test database only, `tests/security/test_prove_it_fails_chat_rls.py`)
+**Corrected in 6a-12a:** the row-level security and grant breaks of this list (owner policy, `app_tenant` and maintenance-role grants,
+the `chat_maint_update` policy, the queue grants) are in `tests/security/test_prove_it_fails_chat_rls.py`, built in 6a-8. The other breaks
+(retention through `app_tenant`, the purge skipping the queue: 6a-12b; scope, `search_for_chat`, label filter, log, B100, verdict gate:
+6a-13) go into the step that owns the code; 6a-13 keeps the name `tests/security/test_prove_it_fails_chat.py` for its non-RLS breaks.
 Each breaks one defence on purpose and checks that a named test goes red: remove the owner `WHERE` (owner policy holds; then
 also drop the policy in a test transaction: the test fails); **(review 6-0b)** grant `app_tenant` `UPDATE` on `message_citations`
 again, or widen the maintenance role (an INSERT grant, an UPDATE on all citation columns, a `chat_maint` policy without the
@@ -1229,7 +1267,39 @@ scope of 6a-10 is the union of the three steps below; nothing was dropped.
   delete do not. The read-time view of a stale `pending` row as `interrupted` (2.1) is already built for the 409 of 6a-9b
   (`chat_messages._existing_answer`); the history route uses the same rule.
 
-**6a-13 Security suite, leaks, docs, B108 measurement** · depends on: 6a-11, 6a-12 · risk **H** · **HE**
+**Split by the owner (6a-12a brief, 2026-11-26) into two steps: 6a-12a, then 6a-12b.** No other step is renumbered: 6a-13's "depends on:
+6a-12" now means 6a-12b (which needs 6a-12a). The scope of 6a-12 above is the union of the two steps below; nothing was dropped.
+
+**6a-12a API routes and doc fixes** (`app_tenant` only, no worker change) · depends on: 6a-10c, 6a-11 · risk M
+- Builds: the history route `GET /conversations/{id}/messages` (owner only; the caller's CURRENT read scope re-checked, generic 404;
+  student citation shape for every role; stale `pending` read as `interrupted`; blanked snippet read as `''`; `before=<message id>`
+  paging, 422 `invalid_cursor` for a malformed id or a message not in this conversation), `PUT`/`DELETE /messages/{id}/feedback`
+  (404 unless an assistant message of the caller; NO class-scope re-check), `GET`/`PATCH /admin/chat/settings` (`settings:manage`; GET
+  creates nothing; PATCH upserts, strict validation, audited), the route-matrix rows (every role plus anonymous), and the doc fixes of
+  the 6a-12 brief (decisions 4 and 5).
+- Owner decisions (6a-12a brief): feedback does not re-check the class scope; the history cursor is `before=<message id>` with the same
+  422 `invalid_cursor` for a malformed id or a message that is not in this conversation; the staff citation shape (8.2) stays deferred,
+  every role keeps the student shape.
+
+**6a-12b Worker maintenance** (`app_chat_maint`, plus the purge outbox) · depends on: 6a-12a · risk **H** · **HE**
+- Builds: `app/services/chat_maintenance.py`, the setting `CHAT_MAINT_DATABASE_URL` and its `test_db_guard.py` entry (worker side only;
+  the 6a-9a source scan stays green), the stale-`pending` pass, the retention delete and the `llm_usage_events` delete, the outbox insert in
+  the purge route and in the sweeper's tombstone purge, the queue drain that blanks citations, the audit rows of 9.6 (written in a separate
+  `app_tenant` session), `test_chat_retention.py`. Injectable clock, no sleeps.
+- **Owner answers for 6a-12b (6a-12a brief, written here, built in 6a-12b):**
+  1. **Test connection.** Tests connect as `app_chat_maint` with an engine built from the superuser URL that runs `SET ROLE app_chat_maint` on
+     connect, and **every maintenance transaction refuses to run unless `current_user = 'app_chat_maint'`** (so neither the superuser nor
+     `app_tenant` can be used by mistake). Production stays a plain `create_async_engine(CHAT_MAINT_DATABASE_URL)`. **The worker refuses to
+     start if the user name in `CHAT_MAINT_DATABASE_URL` is not `app_chat_maint`.** The role has no password in the repo; the deployment sets
+     it outside the repo (8.8).
+  2. **Settings error codes** (already applied in 6a-12a, 8.4): the 6a-5 codes for the budget (`token_budget_invalid`,
+     `token_budget_above_platform_ceiling`); `provider_not_allowed` and `invalid_setting` for everything else.
+  3. **Retention safety.** The retention delete does **nothing** unless an explicit retention value is set (client question Q4 is still
+     open): **no default value may delete anything.** It runs in small batches, a dry-run count is testable, and the audit rows hold counts
+     only, never text (9.4). Open point for 6a-12b: `tenant_settings.chat_retention_days` is `NOT NULL DEFAULT 90` (migration `0012`), so a
+     stored 90 cannot be told apart from an explicit 90 (C35).
+
+**6a-13 Security suite, leaks, docs, B108 measurement** · depends on: 6a-11, 6a-12 (now 6a-12b) · risk **H** · **HE**
 - Builds: `test_chat_leaks.py`, `test_chat_logs.py`, `tests/security/test_prove_it_fails_chat.py`, `app/scripts/eval_chat.py`,
   `app/scripts/chat_report.py`, **`docs/api/phase6.md`** (routes, models, SSE events, codes in the phase5.md layout, so the frontend
   drift guard can read it).
@@ -1379,7 +1449,7 @@ about USD 1.3 a day whatever happens.
 
 | # | Disagreement | Between | What this plan does |
 |---|---|---|---|
-| C1 | A student not enrolled in the class gets **403** (plan Phase 6 exit criteria) versus the **generic 404** for "not yours" | `implementation_plan.md` Phase 6 vs `CLAUDE.md`, `phase5-design.md` C1 row 6b, every Phase 5 route | Designs 404; **Q3 decided: 404** (review 6-0b). The plan's exit-criterion wording is to be corrected in `implementation_plan.md` by the owner or in a later docs step (not touched here) |
+| C1 | A student not enrolled in the class gets **403** (plan Phase 6 exit criteria) versus the **generic 404** for "not yours" | `implementation_plan.md` Phase 6 vs `CLAUDE.md`, `phase5-design.md` C1 row 6b, every Phase 5 route | Designs 404; **Q3 decided: 404** (review 6-0b). **(6a-12a)** In this plan the Phase 6 exit criterion "a student not enrolled in the class gets 403 on both conversation creation and message send" reads as "gets the **generic 404**" (built: 6a-9a create, 6a-9b message, 6a-12a history; route matrix). The sentence itself is in `docs/implementation_plan.md:542` (the source of truth) and still says 403; it is the owner's to change |
 | C2 | Routes `/api/chat/conversations...` versus `/api/v1/...` everywhere else | plan Phase 6 vs code and design B4 | Uses `/api/v1/chat/...` |
 | C3 | Migration numbers `0009` (6a) and `0010` (6b) | `phase5-design.md` C1 vs `alembic/versions` (0009-0011 taken) | Uses `0012` and `0013` |
 | C4 | `messages.route` values: `schedule | rag | refused` (plan), `schedule | rag | clarify` (design B3), `rag_fallback` (design B1), not-found as route `rag` + outcome `not_found` (design B4) | plan vs design | Separates `route` (schedule, clarify, rag) from `outcome` (section 9.1) |
@@ -1388,7 +1458,7 @@ about USD 1.3 a day whatever happens.
 | C7 | Router misses are logged with PII-masked text (120 characters) | plan Phase 6, design B3 vs this task's rule "no message content in application logs" | No text in logs; misses recorded as rule ids on the message row (section 3.5) |
 | C8 | Refusal wording "I couldn't find this in your class material" versus `retrieval.INSUFFICIENT_MESSAGE` "Not enough information in your class material." | plan vs `retrieval.py:98` | Chat has its own localised templates; the retrieval message stays for test search |
 | C9 | Retrieval-only fallback "here are the most relevant parts" versus B108 (near-topic questions pass the gate, so the "most relevant" passages may be about another topic) | plan Phase 6, design B1 vs `phase5.md` 12.9, B108 | Honest wording, owner choice (Q7) |
-| C10 | `CHAT_MAX_INPUT_CHARS` 1000 versus `RETRIEVAL_MAX_QUERY_CHARS` 500: a valid chat message could fail retrieval with `query_too_long` | design B5 vs `config.py:162` | 500 for both *(proposed)*, Q12 |
+| C10 | `CHAT_MAX_INPUT_CHARS` 1000 versus `RETRIEVAL_MAX_QUERY_CHARS` 500: a valid chat message could fail retrieval with `query_too_long` | design B5 vs `config.py:162` | 500 for both (**decided, Q12**; built in 6a-9b) |
 | C11 | SSE order: "tokens, then a final event with citations and message id" versus `meta {message_id, route}` first | plan vs design B4 | `meta` first (the message id is needed for Stop and feedback) |
 | C12 | Phase 6 "Data" lists four tables; its "Persistence" bullet lists six (adds `llm_usage_events`, `tenant_settings`) | inside `implementation_plan.md` Phase 6 | Six tables |
 | C13 | Languages: en, hi, mr (plan section 3, design) versus golden set and calibration in en and mr only (`phase5.md` 12.9) and this task's "English and Marathi" | plan/design vs evaluation data | en + mr enabled, hi behind a setting (Q5) |
@@ -1413,6 +1483,7 @@ about USD 1.3 a day whatever happens.
 | C32 | **(6a-10c)** The 6a-10c brief asks for `budget_retrieval_only` (over budget) and `fallback_retrieval_only` (chain exhausted); section 12 puts the "retrieval-only fallback (all providers down, budget exhausted)" in 6a-11 | 6a-10c brief vs 12 (6a-11) | Built in 6a-10c as the brief asks (7.5 with `CHAT_FALLBACK_RETRIEVAL_ONLY`); 6a-11 keeps condensing, tenant `allowed_llm_providers` narrowing and one usage row per failed attempt |
 | C33 | **(6a-11)** 5.1 puts "the (PII-masked, condensed if a follow-up) question" in the final user message of the answer prompt; the owner's 6a-11 brief (decision 1) says the condensed text is for RETRIEVAL ONLY and is never placed in the answer prompt | 5.1 vs 6a-11 brief | Built as the owner decided: the answer prompt always holds the original masked question (and the history); the condensed line goes only to the embedding and `search_for_chat` and is stored in `messages.retrieval_query`. 5.1 left as written (owner to correct it) |
 | C34 | **(6a-11)** 2.1 [D] runs condense before the embedding, but the history and the tenant settings were read in T2 (after the search, 6a-10c) | 2.1 vs 6a-10c | A condense candidate reads history, institution name and LLM settings in one extra short transaction before the condense call (no transaction is open during the call); T2 then reuses them. A non-candidate turn is unchanged (no extra transaction) |
+| C35 | **(6a-12a)** Owner decision 3 (6a-12a brief) says the retention delete does nothing unless an explicit retention value is set and no default may delete anything; `tenant_settings.chat_retention_days` is `NOT NULL DEFAULT 90` (9.1, migration `0012`, backfilled for every tenant), so a stored 90 cannot be told apart from an explicit 90, and the settings route (6a-12a) reports 90 as the effective value | owner decision 3 vs 9.1 / `0012` | Not decided here (nothing deletes in 6a-12a). Options for 6a-12b, owner to choose: (a) a migration that makes the column NULL-able with NULL = no deletion (then GET shows `null` until an admin sets a value; a migration needs a test that proves it and an owner stop); (b) a platform switch (for example `CHAT_RETENTION_DELETE_ENABLED`, default false) plus the tenant value, so nothing deletes until the operator turns it on after Q4; (c) an explicit marker set only by PATCH. Recommendation: (a) if Q4 may leave some tenants without retention, else (b) |
 
 ---
 
@@ -2544,3 +2615,85 @@ about USD 1.3 a day whatever happens.
   tests/test_llm_chain_tpm.py tests/test_llm_smoke_chain.py tests/test_chat_api.py tests/test_sse_transport.py tests/test_chat_schedule.py`:
   `198 passed in 122.61s (0:02:02)`.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 139 source files`
+
+### 6a-12a History, feedback and settings routes; doc fixes · 2026-11-26 · not committed
+
+- **Split (owner, 6a-12a brief):** 6a-12 became 6a-12a (this step: API routes, `app_tenant` only) and 6a-12b (worker maintenance through
+  `app_chat_maint` and the purge outbox). Recorded in section 12 with the owner's three answers for 6a-12b (test connection and start-up
+  check, settings codes, retention safety). No other step was renumbered.
+- **Built:** `app/services/chat_history.py` (`read_page`, `parse_before`, `CursorError`, the student `CitationView`),
+  `app/services/chat_feedback.py` (`is_own_answer`, `clean_comment`, `upsert`, `delete_own`), `app/services/chat_settings.py`
+  (`parse_update`, `changes`, `read_effective`, `apply_update`, `known_providers`, `DEFAULTS`), `app/api/v1/admin_chat.py` (GET and PATCH
+  `/api/v1/admin/chat/settings`), three routes in `app/api/v1/chat.py` (`GET /conversations/{id}/messages`, `PUT` and `DELETE
+  /messages/{id}/feedback`), the response and request models of 8.2 in `app/schemas/chat.py`, `chat_messages.read_time_view` (the one
+  stale-pending rule, now shared by the 409 of 6a-9b and the history), the body-limit area `/api/v1/admin/chat` (32 KB, like `/api/v1/chat`).
+  No migration, no setting, no dependency, no frontend, no `.github`; `LLM_ZDR_CONFIRMED` and the start-up policy untouched.
+- **Rules as built.** History: permission (403) → own conversation (404) → the CURRENT read scope narrowed to the conversation's class and
+  subject (404) → `before` (422 `invalid_cursor`) → one page. `before` must be the canonical lowercase id of a message of this
+  conversation; a malformed id, another spelling (upper case, no hyphens, braces, `urn:uuid:`), a message of another conversation, user or
+  tenant, or no message at all are the same 422. Keyset on `(created_at, id)`: the newest `limit` rows before the cursor, returned oldest
+  first, with `has_more`. A pending answer older than `CHAT_PENDING_STALE_SECONDS` reads as `interrupted` and `partial: true` (C28, nothing
+  written); a blanked citation reads as `''`. Citations: label, title, location kind, pages, heading, snippet, by `ordinal`, for every role
+  (no ids, file kind, score or flag). `chat_disabled` does not block the history (6a-9a decision). Feedback: permission → own assistant
+  message (404 for a question, another user's or tenant's answer, an unknown id) → comment cleaned (`clean_text`), empty = null, more than
+  500 after cleaning = 422 `comment_too_long` → upsert `ON CONFLICT (tenant_id, message_id, user_id)`; DELETE is 204 also when there was
+  none; not audited; the log has ids and the rating only. Settings: `settings:manage`; GET reads the row or the column defaults and creates
+  nothing; PATCH: the body is checked by `parse_update` (the first problem wins, nothing is written on a refusal), then in ONE transaction
+  the default row `ON CONFLICT DO NOTHING`, the row `FOR UPDATE`, the change record, an UPDATE of only the changed columns (plus
+  `updated_at`, `updated_by`) and one `chat:settings_update` audit row `{"changes": {field: {"old", "new"}}}`; a PATCH that changes nothing
+  updates and audits nothing.
+- **Decisions where the plan was unclear (owner to confirm):** (1) Settings codes (owner answer 2): unknown fields, wrong types, an empty
+  object or a body that is not an object are `invalid_setting`, not FastAPI's schema 422, so the route checks the body itself (the
+  OpenAPI schema still documents `ChatSettingsUpdateRequest`); a body that is not JSON at all keeps FastAPI's 422. (2) A wrong type of
+  `daily_token_budget` (a string, `true`, `1.5`, `1.0`) is `token_budget_invalid` (the budget keeps its 6a-5 codes); a duplicate provider
+  is `invalid_setting`; accepted provider lists are stored sorted. (3) `known_providers()` is the provider names of `models.json` today
+  (only `groq`): `openrouter` is refused until a model of it is pinned, as the owner's rule says. (4) An empty PATCH `{}` is
+  `invalid_setting`; a no-op PATCH (same values) answers 200 and may create the defaults row (PATCH upserts), with no audit row. (5) The
+  effective budget shows the platform default when a stored override is above a lowered ceiling (the 6a-5 rule of
+  `effective_tenant_limit`). (6) `comment_too_long` is a new code (8.4); NFC cleaning can lengthen a comment, so the cleaned text is
+  measured. (7) DELETE feedback is idempotent (204 with no row). (8) A pending answer can be rated (it is the caller's own assistant row);
+  nothing in the plan forbids it. (9) The admin chat settings got the 32 KB body area (plan 8.5, "the chat routes"). (10) The plan has no
+  bot-name setting: none added, `bot_name` is `invalid_setting`, backlog B110. (11) C35: "an explicit retention value" against the NOT NULL
+  default of 90 is left to 6a-12b (nothing deletes in this step).
+- **Doc fixes (owner decision 4 of the 6a-12 brief):** 5.1 (condensed text for retrieval only, C33); 11.1 (the budget tests are in
+  `test_llm_budget*.py` and the turn tests, not in `test_llm_chain.py`); the 403 vs 404 exit criterion (C1: read as the generic 404 in this
+  plan; the sentence in `docs/implementation_plan.md:542` still says 403 and is the owner's to change, not edited); "(proposed)" labels now
+  decided: 4.2 (Q8), 4.5 rule 2 (Q11), 5.5 (Q6), 7.5 (Q7), 9.1 citation blanking (C21), C10 (Q12). Still *proposed*, because no owner
+  answer exists: `CHAT_CONTEXT_MAX_TOKENS` (4.3, built in 6a-10c), `LLM_TIMEOUT_IDLE` (7.4, built in 6a-4), `CHAT_LANGUAGES` (Q5), the 7.7
+  limits (Q9), the AI notice (Q2), the staff citation shape and flag marker (6.4, 8.2, deferred). 11.4 now names
+  `tests/security/test_prove_it_fails_chat_rls.py`; a new 8.8 deployment checklist holds the `app_chat_maint` password line; 8.1 and 8.4
+  carry the codes of this step. **`llm_usage_events.outcome` CHECK:** `USAGE_OUTCOMES` (`app/db/models/llm_usage.py`, used by `0012`) is
+  exactly the 9.1 list (`ok`, `rate_limited`, `timeout`, `unavailable`, `bad_request`, `blocked`, `auth_error`, `cancelled`,
+  `interrupted`): no difference.
+- **Marathi review list (owner decision 5):** written into the 4.4 pilot gate (6a-9b templates and error texts, 6a-10c fallback and
+  `search_*` texts, 6a-11 referring words).
+- **Tests (`tier_map.py`):** `test_chat_history.py` (`db, security`), `test_chat_feedback.py` (`db, security`), `test_chat_settings_pure.py`
+  (`fast, security`), `test_chat_settings_api.py` (`db, security`); helpers `tests/fixtures/history_world.py`; five rows added to
+  `test_chat_route_matrix.py` (8 roles including anonymous); one test added to `test_body_limit_routes.py`.
+- **Red first:** `test_chat_settings_pure.py`: `ImportError: cannot import name 'chat_settings' from 'app.services'` (`1 error in 0.55s`);
+  the other five files: `74 failed, 19 passed in 29.77s` (`{"detail":"Not Found"}` and `405 Method Not Allowed`: no route; the matrix
+  guard listed the five missing routes; no `/api/v1/admin/chat` body area). First green run of the code: `161 passed in 113.73s`.
+- **Self-review** (harness: one break in the real file, the named tests run, the original bytes written back, SHA-256 compared after every
+  break and of all eight files at the end: identical). 44 breaks. **Red:** scope re-check skipped; scope narrowed by class only; manage
+  scope instead of read; a non-canonical cursor accepted; a cursor from another conversation; an unknown cursor ignored; keyset `<=`; the
+  page taken from the oldest end; `has_more` off by one; the stale rule not applied; a stale row not partial; own feedback not loaded;
+  citations out of order; a staff field (`flagged`) in the citation shape; the stale age doubled in the shared rule; a question rated; the
+  comment not cleaned; the length checked before cleaning; an empty comment stored as `''`; the upsert keeping `updated_at`; delete
+  without the own-answer check; feedback re-checking the class scope; provider names case-folded; trimmed; the platform allow-list instead
+  of `models.json`; duplicate providers; unknown fields ignored; a boolean as retention days; the budget ceiling unchecked; the budget type
+  error under another code; the change record listing unchanged fields; the whole settings in the audit; a change not audited; a no-op
+  audited; GET creating the row; a no-op PATCH updating the row; a refused PATCH creating the row first; settings behind `chat:use`;
+  settings on `require` (request-long session); the admin chat body area removed. **Green on the first round, each followed up:**
+  `has_more` off by one (no test had an exactly full oldest page: `test_has_more_is_false_when_the_oldest_page_is_exactly_full` added,
+  now red); the no-op PATCH updating the row (a test bug: `_row` refreshes the same ORM object, so the test compared it with itself; the
+  value is now captured first, now red). Four feedback breaks did not apply on the first round because a helper script had rewritten two
+  files with CRLF line endings; every changed file was normalised back to LF (the repo's `eol=lf`) and all eight feedback breaks ran
+  again: red as listed. **Three stay green by design:** the application's own owner filter removed from the conversation lookup and from
+  the answer lookup, and its tenant filter removed from the settings UPDATE: the RESTRICTIVE `chat_owner` policy and `tenant_isolation`
+  hold alone (defence in depth, as in 6a-9a and 6a-9b).
+- `run_tests gate` (the full gate, run alone, test database only): `= 1 failed, 4287 passed, 12 skipped, 1173 deselected, 4 xfailed in
+  1174.31s (0:19:34) =`. The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`
+  (`SearchUnavailable: search_timeout`), the same pre-existing failure as in the 6a-1a to 6a-11 records (not touched).
+- The `db`-only files whose code paths changed (the gate does not select them): `run_tests full tests/test_chat_api.py
+  tests/test_sse_transport.py tests/test_chat_schedule.py tests/test_tenant_settings.py`: `86 passed in 122.24s (0:02:02)`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 143 source files`

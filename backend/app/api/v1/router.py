@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     academic,
     admin,
+    admin_chat,
     audit,
     auth,
     branding,
@@ -28,4 +29,5 @@ router.include_router(branding.admin_router)
 router.include_router(documents.router)
 router.include_router(documents.admin_router)
 router.include_router(chat.router)
+router.include_router(admin_chat.router)
 

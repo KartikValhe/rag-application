@@ -99,6 +99,21 @@ def test_chat_requests_are_limited_to_32kb_without_the_upload_checks() -> None:
     assert limit_for("POST", "/api/v1/chatter") is None
 
 
+def test_feedback_and_the_admin_chat_settings_are_limited_to_32kb_too() -> None:
+    """6a-12a (plan 8.5): the feedback routes sit under /api/v1/chat; the admin chat settings route is a small JSON
+    body as well and gets its own area (/api/v1/admin/chat), never an upload route."""
+    from app.core.body_limit import CHAT_LIMIT, limit_for, match_upload_route
+
+    message = uuid.uuid4()
+    for method, path in [("PUT", f"/api/v1/chat/messages/{message}/feedback"),
+                         ("DELETE", f"/api/v1/chat/messages/{message}/feedback"),
+                         ("PATCH", "/api/v1/admin/chat/settings"), ("GET", "/api/v1/admin/chat/settings")]:
+        assert limit_for(method, path) is CHAT_LIMIT, (method, path)
+        assert match_upload_route(method, path) is None, (method, path)
+    assert limit_for("PATCH", "/api/v1/admin/chatter") is None
+    assert limit_for("POST", "/api/v1/admin/branding/logo") is not CHAT_LIMIT
+
+
 def test_registry_matches_method_and_whole_path() -> None:
     from app.core.body_limit import DOCUMENTS_LIMIT, SMALL_LIMIT, limit_for, match_upload_route
 
