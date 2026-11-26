@@ -18,8 +18,12 @@ ChatTurn.close() always runs when the response ends, shielded and capped (8.6): 
 outcome is closed as 'cancelled' (client gone, partial, the text the client got) or 'error'; if even that fails the
 row stays 'pending' and the sweeper (6a-12) marks it 'interrupted'. The stream slots are released in every case.
 
-Step 6a-9b answers schedule and clarify questions (app/services/chat_schedule.py). A "rag" question gets the fixed
-answer_unavailable text: the RAG answer (embedding, retrieval, prompt, LLM) is step 6a-10 (CHAT_RAG_ENABLED stays off).
+Schedule and clarify questions are answered by app/services/chat_schedule.py (6a-9b). A "rag" question is answered by
+app/services/rag_answer.py (6a-10c) when CHAT_RAG_ENABLED is on: its items become `token` / `replace` events, the
+route checks request.is_disconnected() between tokens (8.6), and T3 writes the row, its citation rows and the usage
+row in ONE transaction; then `citations` and `done` (with the real usage). A cancelled RAG answer is closed with the
+text the client received and the usage of the call so far. With the flag off a rag question gets the fixed
+answer_unavailable text and nothing is embedded, searched or sent to a model.
 
 Logs carry ids, codes, numbers and error class names only: never the question, the answer or a title (plan 9.5).
 """
@@ -29,7 +33,8 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -52,19 +57,24 @@ from app.db.models.chat import (
     OUTCOME_PENDING,
     Conversation,
     Message,
+    MessageCitation,
 )
 from app.db.models.user import User
 from app.services import (
+    chat_citations,
     chat_conversations,
     chat_language,
     chat_router,
     chat_schedule,
     chat_sse,
     document_scope,
+    llm_usage,
+    rag_answer,
     retrieval,
     schedule,
     tenant_settings,
 )
+from app.services.chat_citations import CitationSnapshot
 from app.services.chat_router import NamedRef, RouteDecision, RouterContext
 from app.services.document_text import clean_text
 
@@ -102,12 +112,18 @@ STREAM_ERROR_MESSAGES: Final[dict[str, dict[str, str]]] = {
         "answer_unavailable": "The assistant is not available right now. Please try again later.",
         "stream_interrupted": "The answer was interrupted. Please ask again.",
         "internal_error": "Something went wrong. Please try again later.",
+        "search_unavailable": "Your class material cannot be searched right now. Please try again later.",
+        "search_busy": "The study assistant is busy right now. Please try again in a moment.",
+        "search_timeout": "Searching your class material took too long. Please try again.",
     },
     "mr": {
         "schedule_unavailable": "वेळापत्रक आत्ता वाचता येत नाही. कृपया थोड्या वेळाने पुन्हा प्रयत्न करा.",
         "answer_unavailable": "सहाय्यक आत्ता उपलब्ध नाही. कृपया नंतर पुन्हा प्रयत्न करा.",
         "stream_interrupted": "उत्तर मध्येच थांबले. कृपया पुन्हा विचारा.",
         "internal_error": "काहीतरी चुकले. कृपया नंतर पुन्हा प्रयत्न करा.",
+        "search_unavailable": "तुमच्या वर्गाचे साहित्य आत्ता शोधता येत नाही. कृपया नंतर पुन्हा प्रयत्न करा.",
+        "search_busy": "सहाय्यक आत्ता व्यस्त आहे. कृपया थोड्या वेळाने पुन्हा प्रयत्न करा.",
+        "search_timeout": "तुमच्या वर्गाचे साहित्य शोधायला खूप वेळ लागला. कृपया पुन्हा प्रयत्न करा.",
     },
 }
 
@@ -152,6 +168,9 @@ class PreparedTurn:
     now: datetime
     lease: slots.SlotLease
     started: float  # time.monotonic() when the request reached the route
+    # The caller's read scope rebuilt in this request and NARROWED to the conversation's class and subject: the only
+    # scope the RAG answer searches (accepted gap: a revocation after T1 applies from the next message, plan 4.2).
+    scope: retrieval.RetrievalScope
 
     @property
     def tenant_id(self) -> uuid.UUID:
@@ -310,7 +329,7 @@ async def prepare_turn(user: User, conversation_id: uuid.UUID, content: str, cli
             raise document_scope.not_found()
         # The caller's CURRENT read scope, narrowed to this conversation (generic 404 when nothing is left).
         scope = await retrieval.build_retrieval_scope(db, user, purpose="read")
-        scope.narrow(conv.class_id, conv.subject_id)
+        narrowed = scope.narrow(conv.class_id, conv.subject_id)
         question = clean_message(content)
         existing = await _existing_answer(db, user, conversation_id, client_request_id)
         if existing is not None:
@@ -351,16 +370,34 @@ async def prepare_turn(user: User, conversation_id: uuid.UUID, content: str, cli
     return PreparedTurn(
         user=user, conversation_id=conversation_id, user_message_id=user_message_id, message_id=message_id,
         question=question, language=language, template_language=chat_schedule.template_language(language),
-        router_ctx=ctx, now=now, lease=lease, started=started,
+        router_ctx=ctx, now=now, lease=lease, started=started, scope=narrowed,
     )
 
 
 # ── Writing the answer row ────────────────────────────────────────────────────
 
 
-async def _update_pending(p: PreparedTurn, values: dict[str, Any]) -> bool:
+async def _insert_citations(db: AsyncSession, p: PreparedTurn, citations: Sequence[CitationSnapshot]) -> None:
+    await db.execute(insert(MessageCitation).values([
+        {"tenant_id": p.tenant_id, "message_id": p.message_id, "user_id": p.user_id, "label": c.label,
+         "ordinal": c.ordinal, "chunk_id": c.chunk_id, "document_id": c.document_id, "version_id": c.version_id,
+         "document_title": c.document_title, "version_no": c.version_no, "file_kind": c.file_kind,
+         "location_kind": c.location_kind, "page_start": c.page_start, "page_end": c.page_end,
+         "heading_path": c.heading_path, "snippet": c.snippet, "flagged": c.flagged, "similarity": c.similarity}
+        for c in citations
+    ]))
+
+
+async def _update_pending(
+    p: PreparedTurn,
+    values: dict[str, Any],
+    *,
+    citations: Sequence[CitationSnapshot] = (),
+    usage: rag_answer.UsageRow | None = None,
+) -> bool:
     """Give the caller's own pending answer row its final state (the chat_tenant_update_pending policy allows nothing
-    else). False when the row is no longer pending (already final): nothing is changed then."""
+    else), and in the SAME transaction insert its citation rows and the usage row of its LLM call: either all of it
+    is written or none of it. False when the row is no longer pending (already final): nothing is changed then."""
     async with chat_session_context(p.tenant_id, p.user_id) as db:
         res = await db.execute(
             update(Message)
@@ -372,6 +409,15 @@ async def _update_pending(p: PreparedTurn, values: dict[str, Any]) -> bool:
         )
         updated = res.scalar_one_or_none() is not None
         if updated:
+            if citations:
+                await _insert_citations(db, p, citations)
+            if usage is not None:
+                await llm_usage.record_usage(
+                    db, tenant_id=p.tenant_id, user_id=p.user_id, message_id=p.message_id, purpose="answer",
+                    provider=usage.provider, model_key=usage.model_key, prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens, estimated=usage.estimated, latency_ms=usage.latency_ms,
+                    outcome=usage.outcome, attempt=usage.attempt,
+                )
             await db.execute(
                 update(Conversation)
                 .where(Conversation.tenant_id == p.tenant_id, Conversation.user_id == p.user_id,
@@ -382,14 +428,14 @@ async def _update_pending(p: PreparedTurn, values: dict[str, Any]) -> bool:
         return updated
 
 
-async def _finish_row(p: PreparedTurn, values: dict[str, Any]) -> bool:
-    """T3: the turn's final outcome."""
-    return await _update_pending(p, values)
+async def _finish_row(p: PreparedTurn, values: dict[str, Any], **written: Any) -> bool:
+    """T3: the turn's final outcome (with its citation rows and usage row, one transaction)."""
+    return await _update_pending(p, values, **written)
 
 
-async def _mark_unfinished(p: PreparedTurn, values: dict[str, Any]) -> bool:
+async def _mark_unfinished(p: PreparedTurn, values: dict[str, Any], **written: Any) -> bool:
     """The shielded closing step: a turn that ended without its final outcome (cancelled or failed)."""
-    return await _update_pending(p, values)
+    return await _update_pending(p, values, **written)
 
 
 # ── The stream ────────────────────────────────────────────────────────────────
@@ -409,6 +455,10 @@ class ChatTurn:
     partial: bool = False
     record: dict[str, Any] = field(default_factory=dict)  # router record for the row (no text)
     latency: dict[str, int] = field(default_factory=dict)
+    # Request.is_disconnected of the route: checked between the tokens of a RAG answer (plan 8.6, belt and braces:
+    # under ASGI spec 2.4 Starlette does not listen for the disconnect itself)
+    is_disconnected: Callable[[], Awaitable[bool]] | None = None
+    rag: rag_answer.RagAnswer | None = None
     _closed: bool = False
 
     def _ids(self) -> dict[str, str]:
@@ -420,9 +470,9 @@ class ChatTurn:
         return {"content": self.sent_text, "outcome": outcome, "partial": partial, "latency_ms": dict(self.latency),
                 **self.record}
 
-    async def _persist(self, outcome: str, partial: bool) -> bool:
+    async def _persist(self, outcome: str, partial: bool, **written: Any) -> bool:
         try:
-            done = await _finish_row(self.p, self._row_values(outcome, partial))
+            done = await _finish_row(self.p, self._row_values(outcome, partial), **written)
         except Exception as exc:
             logger.error("chat_persist_error", stage="t3", error_class=type(exc).__name__, **self._ids())
             return False
@@ -457,10 +507,14 @@ class ChatTurn:
                                       "route": decision.route, "language": p.language})
 
         if decision.route == "rag":
-            # Step 6a-10 builds the RAG answer behind CHAT_RAG_ENABLED. Until then: the fixed text, no model call.
-            await self._persist("error", False)
-            self.ended = True
-            yield self._error_event("answer_unavailable", False)
+            if not settings.CHAT_RAG_ENABLED:
+                # The RAG answer is switched off for this deployment: the fixed text, no model call.
+                await self._persist("error", False)
+                self.ended = True
+                yield self._error_event("answer_unavailable", False)
+                return
+            async for chunk in self._rag(deadline):
+                yield chunk
             return
 
         if decision.route == "clarify":
@@ -502,6 +556,67 @@ class ChatTurn:
             "latency_ms": {"first_token": self.latency["first_token"], "total": self.latency["total"]},
         })
 
+    def _rag_input(self) -> rag_answer.RagInput:
+        p = self.p
+        return rag_answer.RagInput(
+            tenant_id=p.tenant_id, user_id=p.user_id, conversation_id=p.conversation_id,
+            user_message_id=p.user_message_id, message_id=p.message_id, question=p.question, language=p.language,
+            template_language=p.template_language, scope=p.scope, own_name=p.user.full_name, own_email=p.user.email,
+        )
+
+    async def _rag(self, deadline: float) -> AsyncIterator[bytes]:
+        """The RAG answer as SSE events (plan 8.3): tokens (or one replace), then T3, then citations and done; or an
+        error event. Between tokens the route asks whether the client is still there."""
+        rag = rag_answer.RagAnswer(self._rag_input())
+        self.rag = rag
+        res = rag.result
+        async with aclosing(rag.run(deadline=deadline, heartbeat=settings.CHAT_STREAM_HEARTBEAT_SECONDS)) as items:
+            async for item in items:
+                if isinstance(item, rag_answer.Ping):
+                    yield chat_sse.PING
+                elif isinstance(item, rag_answer.Token):
+                    self.latency.setdefault("first_token", _ms(self.p.started))
+                    yield chat_sse.event("token", {"text": item.text})
+                    self.sent_text += item.text
+                    if self.is_disconnected is not None and await self.is_disconnected():
+                        return  # the client is gone: the closing step stores what it received, as cancelled
+                else:
+                    yield chat_sse.event("replace", {"text": item.text, "outcome": res.outcome})
+                    self.sent_text = item.text
+        self.latency.update(res.latency)
+        self.record.update(res.row_values())
+        if res.error_code is not None:
+            await self._persist(res.outcome, res.partial, citations=res.citations, usage=res.usage)
+            self.ended = True
+            yield self._error_event(res.error_code, res.partial)
+            return
+        if not await self._persist(res.outcome, False, citations=res.citations, usage=res.usage):
+            self.ended = True
+            yield self._error_event("internal_error", False)
+            return
+        if res.citations:
+            yield chat_sse.event("citations", {"items": chat_citations.citation_items(res.citations)})
+        self.ended = True
+        yield chat_sse.event("done", {
+            "outcome": res.outcome, "partial": False, "usage": res.usage_event(),
+            "latency_ms": {"first_token": self.latency.get("first_token", self.latency["total"]),
+                           "total": self.latency["total"]},
+        })
+
+    async def _close_row(self, outcome: str, partial: bool) -> bool:
+        """The closing step's write. A RAG answer keeps its citations (the labels in the text the client got) and the
+        usage row of its call; if that write fails, the row alone is written so it does not stay pending."""
+        values = self._row_values(outcome, partial)
+        if self.rag is None:
+            return await _mark_unfinished(self.p, values)
+        values.update(self.rag.result.row_values())
+        try:
+            return await _mark_unfinished(self.p, values, citations=self.rag.citations_for(self.sent_text),
+                                          usage=self.rag.result.usage)
+        except Exception as exc:
+            logger.error("chat_persist_error", stage="close_full", error_class=type(exc).__name__, **self._ids())
+        return await _mark_unfinished(self.p, values)
+
     async def close(self, stream: Any) -> None:
         """Runs when the response ends, whatever happened (shielded, at most CLOSE_SECONDS for the database part):
         finish the generator, close an unfinished row, release the stream slots, log the turn."""
@@ -517,7 +632,7 @@ class ChatTurn:
                 if not self.finished:
                     outcome = "error" if self.ended else "cancelled"
                     try:
-                        if await _mark_unfinished(self.p, self._row_values(outcome, outcome == "cancelled")):
+                        if await self._close_row(outcome, outcome == "cancelled"):
                             self.finished, self.outcome, self.partial = True, outcome, outcome == "cancelled"
                     except Exception as exc:
                         # The row stays 'pending'; the sweeper marks it 'interrupted' (6a-12).
@@ -527,4 +642,5 @@ class ChatTurn:
             logger.info("chat_turn", route=self.record.get("route"), intent=self.record.get("intent"),
                         rule_ids=self.record.get("rule_ids", []), outcome=self.outcome,
                         language=self.p.language, partial=self.partial, latency_ms=dict(self.latency),
-                        router_version=chat_router.ROUTER_VERSION, **self._ids())
+                        router_version=chat_router.ROUTER_VERSION, **self._ids(),
+                        **(self.rag.result.log_fields() if self.rag is not None else {}))

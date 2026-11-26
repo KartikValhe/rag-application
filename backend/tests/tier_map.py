@@ -104,6 +104,8 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_guardrails.py": ("fast",),  # 6a-10a: Phase 7 checkpoint stubs with the two real checks (input length, no context)
     "test_chat_message_api.py": ("db", "security"),  # 6a-9b: message route check order, T1/T3, idempotency, limits, cancel, roles, logs
     "test_chat_schedule.py": ("db",),  # 6a-9b: schedule path end to end per role, templates en/mr, zero model and retrieval calls
+    "test_chat_rag.py": ("db", "security"),  # 6a-10c: the wired RAG turn end to end (not found, filter, citations, budget, fallback, T3, recordings, cancel, pool, logs)
+    "test_rag_answer_settings.py": ("fast",),  # 6a-10c: tuning settings and their .env.example lines, the RAG flag, named constants
     "test_sse_transport.py": ("db",),  # 6a-9b: F11, stream not buffered and disconnect reaching the generator through the stack
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),

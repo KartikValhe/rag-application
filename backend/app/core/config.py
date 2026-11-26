@@ -6,6 +6,7 @@ Nothing in this codebase ever reads os.environ directly — always use `settings
 """
 
 from functools import lru_cache
+from typing import Literal
 
 import email_validator
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -249,9 +250,22 @@ class Settings(BaseSettings):
     CHAT_LANGUAGES: str = "en,mr"
     # Language used when the Devanagari word lists tie (plan 5.7). There is no per-tenant default yet.
     CHAT_DEFAULT_LANGUAGE: str = Field(default="en", pattern=r"^(en|mr|hi)$")
-    # The RAG answer (prompt, LLM, citations) is built in step 6a-10. Until then a non-schedule question gets the fixed
-    # answer_unavailable text, and this flag cannot be switched on (the validator below refuses it).
+    # ── RAG answer (step 6a-10c, plan 4.3, 4.5, 5.1, 5.5, 7.5) ──
+    # The RAG answer (embedding, retrieval, prompt, LLM, citations). Off by default (owner, 6a-10 brief answer 2): a
+    # non-schedule question then gets the fixed answer_unavailable text and nothing is embedded or sent to a model.
     CHAT_RAG_ENABLED: bool = False
+    # Estimated tokens of the SOURCES kept in one prompt (rank order; the best source is always kept).
+    CHAT_CONTEXT_MAX_TOKENS: int = Field(default=2400, ge=100, le=100_000)
+    # Earlier exchanges of the conversation put into the prompt, and the characters kept of each text.
+    CHAT_HISTORY_TURNS: int = Field(default=2, ge=0, le=10)
+    CHAT_HISTORY_CHARS: int = Field(default=600, ge=1, le=5000)
+    # Acknowledged flagged chunks (Q6 decided): "mark" = sent marked flagged="true"; "exclude" = left out of the prompt.
+    CHAT_FLAGGED_SOURCES: Literal["mark", "exclude"] = "mark"
+    # "No valid citation, no answer": an answer that ends with no valid label is replaced by the fixed refusal.
+    CHAT_REQUIRE_CITATION: bool = True
+    # Every provider down or the token budget used up (Q7 decided): true = the best passages with the honest fixed
+    # sentence (fallback_retrieval_only / budget_retrieval_only); false = the answer_unavailable text only.
+    CHAT_FALLBACK_RETRIEVAL_ONLY: bool = True
     # ── Daily token budgets (step 6a-5, plan 7.7), counted in Redis per UTC day ──
     # PLACEHOLDERS, set after Q1: both numbers come from the first draft and are not decisions. They are fixed
     # only after the owner answers Q1 (paid tier and answer model) and the 6a-6 token measurement. Do not
@@ -386,8 +400,6 @@ class Settings(BaseSettings):
             raise ValueError("CHAT_MAX_INPUT_CHARS must not be above RETRIEVAL_MAX_QUERY_CHARS (plan C10)")
         if self.CHAT_STREAM_SLOT_TTL_SECONDS <= self.CHAT_STREAM_MAX_SECONDS:
             raise ValueError("CHAT_STREAM_SLOT_TTL_SECONDS must be above CHAT_STREAM_MAX_SECONDS")
-        if self.CHAT_RAG_ENABLED:
-            raise ValueError("CHAT_RAG_ENABLED cannot be true before step 6a-10 builds the RAG answer")
         return self
 
     @property

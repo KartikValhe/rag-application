@@ -1409,6 +1409,8 @@ about USD 1.3 a day whatever happens.
 | C28 | **(6a-9b)** 8.4 says the `duplicate_request` body carries the stored outcome, "`pending` while the first request is still streaming (or stale-pending until the sweeper runs)"; 2.1 and 9.4 say a stale `pending` row is read as `interrupted` at read time, and 11.1 asks that test of `test_chat_api.py` (the 409 is the only read path in 6a-9b) | 8.4 vs 2.1, 9.4, 11.1 | The 409 applies the read-time rule: a row `pending` for more than `CHAT_PENDING_STALE_SECONDS` is reported as `interrupted` (nothing is written; boundary tested at 119 s and 121 s). Owner to confirm |
 | C29 | **(6a-9b)** Step 6a-9b says the RAG path "returns a fixed 'not available yet' answer behind a flag", but the plan has no such text and no outcome for it (9.1's list is fixed by the 0013 CHECK constraint) | 12 (6a-9b) vs 7.5, 8.4, 9.1 | No new outcome (that would need a migration). The rag route answers `meta` then the `error` event `answer_unavailable` with the fixed text of 7.5 ("The assistant is not available right now. Please try again later."); the row is stored as `route = rag`, `outcome = error`, `content = ''`. The flag is `CHAT_RAG_ENABLED` (default false; true is refused by the settings validator until 6a-10). Owner to confirm |
 | C30 | **(6a-9b)** 11.1 puts the message tests in `test_chat_api.py`; 11.1 also lists `test_sse_transport.py` and `test_chat_schedule.py` as `db` only | 11.1 vs this step | The message tests are their own file `test_chat_message_api.py`, tiered `db, security` so the gate runs them; `test_sse_transport.py` and `test_chat_schedule.py` stay `db` (run by `run_tests full`); the SSE writer has a `fast` file `test_chat_sse.py` |
+| C31 | **(6a-10c)** 8.6 says the route "checks `request.is_disconnected()` between tokens". Behind a `BaseHTTPMiddleware` (`TenantResolutionMiddleware`, F11) that call can never return true: Starlette's `receive_or_disconnect` opens an anyio task group, and `is_disconnected()` pre-cancels its scope, so nothing is ever read (shown by a red test under ASGI spec 2.4, where Starlette does not listen for the disconnect itself) | 8.6 vs Starlette 1.9 `middleware/base.py` | Same intent, a working probe: `ChatStreamResponse` watches the `receive` it is called with (under spec 2.3 Starlette's listener reads it; under 2.4 one listener task of ours does) and the turn checks that flag after every token (`test_is_disconnected_is_checked_between_tokens`). Honest limit: the stored text may hold the token or two sent between the disconnect and the check. Owner to confirm |
+| C32 | **(6a-10c)** The 6a-10c brief asks for `budget_retrieval_only` (over budget) and `fallback_retrieval_only` (chain exhausted); section 12 puts the "retrieval-only fallback (all providers down, budget exhausted)" in 6a-11 | 6a-10c brief vs 12 (6a-11) | Built in 6a-10c as the brief asks (7.5 with `CHAT_FALLBACK_RETRIEVAL_ONLY`); 6a-11 keeps condensing, tenant `allowed_llm_providers` narrowing and one usage row per failed attempt |
 
 ---
 
@@ -2381,3 +2383,100 @@ about USD 1.3 a day whatever happens.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 137 source files`
 - **Environment note:** Docker Desktop was not running; it was started and `docker compose up -d` run (this also started the `rag-api`
   container of the compose file); `prepare_test_db` migrated `ragplatform_test` only. The dev database was not touched by any test.
+
+### 6a-10c The wired RAG turn · 2026-11-26 · not committed
+
+- **Built:** `app/services/rag_answer.py` (`RagAnswer.run`, `AnswerResult`, `UsageRow`, `RagInput`, the items `Token` / `Replace` /
+  `Ping`, `NOT_FOUND_TEXTS`, `RETRIEVAL_ONLY_TEXTS`, `REFUSAL_COMPLETION_TOKENS_ESTIMATE = 128`, `labels_cited_in`); the rag branch of
+  `chat_messages.ChatTurn` (`_rag`, `_close_row`; T3 `_update_pending` now also inserts the `message_citations` rows and the
+  `llm_usage_events` row in the same transaction); `PreparedTurn.scope` (the NARROWED read scope); `ChatStreamResponse` watches its
+  `receive` for the disconnect (C31); settings `CHAT_CONTEXT_MAX_TOKENS` (2400), `CHAT_HISTORY_TURNS` (2), `CHAT_HISTORY_CHARS` (600),
+  `CHAT_FLAGGED_SOURCES` (`mark`), `CHAT_REQUIRE_CITATION` (true), `CHAT_FALLBACK_RETRIEVAL_ONLY` (true), all in `.env.example`; the
+  `CHAT_RAG_ENABLED` start-up refusal removed (default still false); three `error`-event texts (`search_unavailable`, `search_busy`,
+  `search_timeout`, en/mr). No migration, no dependency, no frontend, no `.github`; `LLM_ZDR_CONFIRMED` and the start-up policy untouched.
+- **The turn as built (rag route, flag on):** `meta` → embedding of the CLEANED question with no transaction (`guarded_query_embedder`,
+  `embed_query`, heartbeats, stream deadline) → T2 (`search_for_chat` with that vector, the history, the branding name, the budget
+  override) → no hit: the 4.4 text as one `token`, `not_found`, no model call → prompt (`rag-v1`, the PII-masked question and history) →
+  budget reserve (estimate + `max_output_tokens`); exhausted: `budget_retrieval_only` → the chain (no tools: the request type has no
+  field for them; the outgoing JSON is checked) through the 6a-10a filter; between tokens the disconnect flag is checked → `finish()`:
+  retracted outcomes (`refused_by_model`, `no_valid_citations`, `blocked_leak`) send ONE `replace` with the 4.4 text; otherwise the held
+  tail → T3 (row + citation rows + usage row, one transaction) → `citations` (student fields only) → `done` with the real usage. Every
+  model failing before its first token: `fallback_retrieval_only` (or `answer_unavailable` when the setting is off); a refused call
+  (bad request / tool call, blocked, auth): `answer_unavailable`, outcome `error`; after the first token: `interrupted` + `error
+  stream_interrupted` (partial text and its citations kept); `finish_reason: length` or the cap: `truncated`; a search error after
+  `meta`: the Phase 5 code as an `error` event.
+- **Budget:** reserved before the call, settled ONCE to the best known count: the provider-reported prompt + completion (the real
+  recordings: 1161 + 101 etc., reasoning inside the completion count); a `NOT_IN_SOURCES` stream closed by us before the usage arrived:
+  prompt estimate + 128, `tokens_estimated = true`; a stop without usage (cancel, interruption, cap): prompt estimate + estimate of the
+  model text received; nothing (released) when no model had started answering (cancel or cap before the first token, chain exhausted,
+  refused call). The usage row carries the same numbers.
+- **Decisions where the plan was unclear (owner to confirm):** (1) Flag off = the deployment switch: a rag question gets the C29 text
+  (`answer_unavailable`, outcome `error`), nothing embedded or sent; flag on = the RAG answer. (2) C31: `Request.is_disconnected()`
+  cannot work behind the `BaseHTTPMiddleware`; replaced by the response's own receive watcher. (3) C32: the retrieval-only fallback is
+  built here as the brief asks. Its text is our fixed sentence plus the labels (`…fully.\n\n[S1] [S2] [S3]`); the passages are the
+  citations (title, location, heading, snippet), so no chunk text is copied into the stored answer. (4) `NOT_IN_SOURCES` usage: the
+  estimate with 128 only when WE closed the stream before the usage came; the real recordings end the verdict line with the stream (no
+  newline), so their reported usage is used. (5) One usage row per turn: the call that answered (ok / cancelled / interrupted) or the
+  terminal refusal (`bad_request`, `blocked`, `auth_error`, 0 / 0, estimated); none when the chain was exhausted (the chain logs each
+  attempt) or when cancelled before the first token (the 6a-10b refund rule). Per-attempt rows: 6a-11. (6) Every retraction uses the 4.4
+  text (no new text for `blocked_leak`, as 6a-10a left it); a `replace` is sent even when nothing was shown yet (the verdict refusal).
+  (7) A cancelled or interrupted answer keeps citation rows for the labels in the text the client got (`labels_cited_in`); the
+  `citations` event is sent only before `done`. (8) Bot name: no per-tenant setting exists and `app_tenant` cannot read `tenants.name`
+  (column grant of 0010), so the bot is the default "Study Assistant" and the institution is `tenant_branding.display_name` (empty: the
+  default). (9) History: the last `CHAT_HISTORY_TURNS` exchanges whose answer is final (not `pending` or `error`) and not empty, masked,
+  labels stripped; no condense call (`LLM_CONDENSE_CHAIN` empty: one model request per turn, tested). (10) `CHAT_FLAGGED_SOURCES =
+  exclude` with every hit flagged: `not_found`, `reason = flagged_excluded`. (11) The closing step of a RAG turn writes row + citations +
+  usage, and if that fails the row alone (so it does not stay `pending`). (12) The Marathi retrieval-only text and the three search
+  error texts are mine, not plan texts: native review (4.4 pilot gate). (13) `prepare_turn` computed the narrowed scope only for its 404
+  and dropped it; the turn now carries the narrowed scope (break B13 below shows a leak without it).
+- **Deferred, with the reason:** the staff citation shape (`flagged`, `document_id`, 8.2 *proposed*; section 12 does not place it in
+  6a-10c, the 6a-10a record says "6a-10c/6a-12"): nobody gets ids, file names, scores or flag marks now (role test for student, teacher,
+  admin); condense (6a-11); tenant `allowed_llm_providers` narrowing and per-attempt usage rows (6a-11); the history route (6a-12);
+  `CHAT_SOURCE_MIN_SIMILARITY_GAP` (off by default, only after the 6a-13 numbers, 4.5 item 4); `GuardrailPipeline` wiring (both Phase 6
+  checks already hold by construction: the 422 length check and no model call without sources; Phase 7 extends it); `eval_chat` (6a-13);
+  the TEMPORARY prompt/classifier copies in `llm_smoke.py` (dev-only script, not run here).
+- **Tests (`tier_map.py`):** `test_chat_rag.py` (`db, security`: not found en/mr with no model call; answer with server-built citations,
+  stored = streamed, the row, citation and usage fields, budget settled to the report; outgoing JSON without tool fields and without ids;
+  invented labels; no valid citation → `replace`; `NOT_IN_SOURCES` closed at once with the 128 estimate; `length`; mid-stream failure;
+  tool call; over budget; chain exhausted; fallback off; embedding failure; T3 as one transaction; out-of-scope canaries (other subject,
+  other enrolled class, other class, other tenant, draft, archived) never in a prompt, the stream or the record; history; PII masking;
+  flagged `mark` and `exclude`; the citation shape for three roles; all 8 real recordings through the Groq adapter and the whole stack,
+  and each in one-character chunks; `【S1】` whole and split; a retry with the same `client_request_id` while streaming and after; a
+  disconnect at six phases (embedding, retrieval, LLM wait, verdict hold-back, mid-stream, T3); the between-token disconnect check under
+  spec 2.4; the stream cap while the model is silent; zero checked-out connections while embedding, at every provider token and at every
+  SSE event; no question, source, title, heading, answer or key text in any log), `test_rag_answer_settings.py` (`fast`: the defaults, their
+  `.env.example` lines, the flag accepted, range checks, the constants). Changed: `test_chat_message_api.py` (the refusal test now says
+  "accepted, default false"; the stub test is the flag-off test), `tests/fixtures/sse_client.py` (`spec_version`, and a `receive()` after the
+  disconnect answers at once, as uvicorn does). New helpers `tests/fixtures/rag_world.py`.
+- **Red first:** `2 errors in 0.84s` (`ImportError: cannot import name 'rag_answer' from 'app.services'`) for both new files, and
+  `1 failed, 1 passed` for the flipped flag test (`Value error, CHAT_RAG_ENABLED cannot be true before step 6a-10 builds the RAG answer`).
+  First green run of the code: `1 failed, 72 passed` — `test_is_disconnected_is_checked_between_tokens` (`assert (46 < 46)`: the turn
+  read the whole provider stream after the client left), which found C31.
+- **Self-review** (harness: one break in the real file, the named tests run, the original bytes written back, SHA-256 compared after
+  every break and of all five files at the end: identical). 27 of 30 red on the first round: search instead of `search_for_chat` (not
+  found), masked text to retrieval, unmasked text to the model, embedding inside a transaction (pool), budget exhaustion ignored, no
+  correction to the report, the 128 constant skipped, no early close on `NOT_IN_SOURCES`, `tools` in the Groq body, raw model text past
+  the filter, no `replace`, citations for every source, the whole scope instead of the narrowed one (canaries), citations outside T3,
+  `length` ignored, interruption stored as error, no between-token check, no usage row on cancel, the received text not kept, the
+  reservation kept on a cancel before the first token, the question in a log line, chunk text in the retrieval record, `document_id`
+  in the student citation, the RAG flag ignored, history dropped, a connection held during the model call, zeros in `done`.
+  **Green on the first round, each followed up:** (B18) passing the plain `receive` to Starlette missed its target (under 2.4 the
+  listener reads through the watcher anyway); redone as "no listener under 2.4": red. (B21) the release of the budget when every model
+  fails is held in two places (the branch and the shielded clean-up); with both removed: red. (B30) "no stream deadline while waiting
+  for the model" stayed green because the test's 1 s cap could fire during embedding or T2; the test now uses a 3 s cap (under the
+  10 s first-token timeout) and asserts the model was reached and held: red under the break. Not covered by a red test: under spec 2.3
+  the watcher passed to Starlette only duplicates the cancel that Starlette does anyway (belt and braces).
+- **A pre-existing isolation bug the gate found:** `test_llm_logging.py`'s `restore_logging` ended with `structlog.reset_defaults()`,
+  which installs a new processor list; loggers cached before it (`cache_logger_on_first_use`) kept the old list and escaped every later
+  `capture_logs`. The new chat tests were the first gate tests to use the `query_embedding` logger before that file, so four
+  `test_query_embedding.py` tests went red (`assert [] == [('load', 'RuntimeError')]`; first gate run: `= 5 failed, 4035 passed, 12
+  skipped, 1172 deselected, 4 xfailed in 936.55s (0:15:36) =`). Fixed in the fixture (restore structlog's own earlier configuration
+  and the SAME list instance); regression test `test_a_logger_cached_before_a_reconfiguration_is_still_captured_after_it`, red with
+  the old `reset_defaults()` (`1 failed`), green with the fix. No app code changed for it.
+- `run_tests gate` (the full gate, run alone, test database only):
+  `= 1 failed, 4040 passed, 12 skipped, 1172 deselected, 4 xfailed in 921.94s (0:15:21) =`. The failure is
+  `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same pre-existing failure as in
+  the 6a-1a to 6a-10b records (not touched). `test_chat_rag.py` is `db, security`, so the gate runs it.
+- The `db`-only files whose code paths changed (the gate does not select them): `run_tests full tests/test_sse_transport.py
+  tests/test_chat_schedule.py tests/test_chat_api.py`: `78 passed in 116.69s (0:01:56)`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 138 source files`

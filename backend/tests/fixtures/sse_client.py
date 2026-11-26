@@ -10,7 +10,12 @@ that an event arrives before the stream is finished nor disconnect in the middle
   - the ASGI scope says spec_version "2.3", the value uvicorn 0.54 sends (so Starlette listens for http.disconnect);
   - every body message the app sends is recorded with the time it arrived;
   - the client "disconnects" when the test sets `disconnect` or after `disconnect_after` body chunks: receive() then
-    returns http.disconnect, exactly what a server does when the browser aborts the fetch.
+    returns http.disconnect, exactly what a server does when the browser aborts the fetch. Like uvicorn, a receive()
+    after the disconnect returns http.disconnect at once (so Request.is_disconnected(), which gives receive no time
+    to wait, sees it);
+  - `spec_version="2.4"` (step 6a-10c) is the newer ASGI spec, under which Starlette does NOT listen for the
+    disconnect and relies on send() failing; this client drops sends after a disconnect instead (as uvicorn does),
+    so only the route's own is_disconnected() check can notice that the browser is gone.
 """
 
 from __future__ import annotations
@@ -102,6 +107,7 @@ async def stream_request(
     disconnect_after: int | None = None,
     on_chunk: Callable[[int, bytes], Awaitable[None] | None] | None = None,
     timeout: float = 20.0,
+    spec_version: str = SPEC_VERSION,
 ) -> SseResult:
     """Run one request through `app` and return what the client saw. See the module docstring."""
     result = SseResult()
@@ -113,7 +119,7 @@ async def stream_request(
     raw += [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers.items()]
     scope: dict[str, Any] = {
         "type": "http",
-        "asgi": {"version": "3.0", "spec_version": SPEC_VERSION},
+        "asgi": {"version": "3.0", "spec_version": spec_version},
         "http_version": "1.1",
         "method": method,
         "scheme": "http",
@@ -131,7 +137,10 @@ async def stream_request(
         if not body_sent:
             body_sent = True
             return {"type": "http.request", "body": body, "more_body": False}
-        waiters = [asyncio.ensure_future(gone.wait()), asyncio.ensure_future(done.wait())]
+        if gone.is_set():  # already gone: answered at once, like uvicorn
+            result.disconnected = True
+            return {"type": "http.disconnect"}
+        waiters =[asyncio.ensure_future(gone.wait()), asyncio.ensure_future(done.wait())]
         try:
             await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         finally:

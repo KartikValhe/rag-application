@@ -4,11 +4,13 @@ credential, and the httpx and httpcore loggers stay at WARNING so request lines 
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 
 import pytest
 import structlog
 from pydantic import SecretStr
+from structlog.testing import capture_logs
 
 from app.core import logging as app_logging
 from app.core.logging import (
@@ -66,11 +68,19 @@ def test_the_list_of_names_is_the_plan_list() -> None:
     assert {"authorization", "api_key", "x-goog-api-key", "cookie"} <= set(CREDENTIAL_KEY_NAMES)
 
 
-@pytest.fixture
-def restore_logging() -> Iterator[None]:
+@contextmanager
+def restored_logging() -> Generator[None]:
+    """Put logging back as it was. structlog is restored to its OWN earlier configuration with the SAME processor
+    list instance (6a-10c fix): a logger cached before (cache_logger_on_first_use) holds that instance, and
+    capture_logs edits it in place, so the old structlog.reset_defaults() (a new list) left every logger cached
+    before this file out of all later captures (tests/test_query_embedding.py went red once the chat tests used
+    that module's logger first)."""
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
     named = {n: logging.getLogger(n).level for n in ("httpx", "httpcore")}
+    config = structlog.get_config()
+    processors = config["processors"]
+    saved = list(processors)
     try:
         yield
     finally:
@@ -78,7 +88,29 @@ def restore_logging() -> Iterator[None]:
         root.setLevel(level)
         for n, lvl in named.items():
             logging.getLogger(n).setLevel(lvl)
-        structlog.reset_defaults()
+        processors[:] = saved
+        structlog.configure(
+            processors=processors, wrapper_class=config["wrapper_class"], context_class=config["context_class"],
+            logger_factory=config["logger_factory"], cache_logger_on_first_use=config["cache_logger_on_first_use"],
+        )
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    with restored_logging():
+        yield
+
+
+def test_a_logger_cached_before_a_reconfiguration_is_still_captured_after_it() -> None:
+    with restored_logging():  # the outer block puts the caching flag back too
+        structlog.configure(cache_logger_on_first_use=True)
+        cached =structlog.get_logger("tests.cached_before_reconfigure")
+        cached.debug("first_use")  # cached now
+        with restored_logging():
+            configure_logging()
+        with capture_logs() as logs:
+            cached.warning("after_restore")
+    assert [e["event"] for e in logs] == ["after_restore"]
 
 
 def test_quiet_http_loggers_sets_warning(restore_logging: None) -> None:

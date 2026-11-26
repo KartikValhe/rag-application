@@ -232,10 +232,13 @@ async def test_the_title_is_the_first_question_only_and_counters_follow_the_rows
     assert len(await rows(raw_db, conv.id)) == 4
 
 
-async def test_a_rag_question_gets_the_fixed_answer_unavailable_and_no_model_call(
+async def test_with_the_rag_flag_off_a_rag_question_gets_answer_unavailable_and_no_model_call(
     client: AsyncClient, world: AcademicWorld, raw_db: AsyncSession, no_model_calls: NoModelSpy
 ) -> None:
+    """CHAT_RAG_ENABLED is false by default (6a-10c keeps it so): the RAG answer is switched off for the deployment,
+    so a rag question gets the fixed 7.5 text and nothing is embedded, searched or sent to a model."""
     w = world.a
+    assert settings.CHAT_RAG_ENABLED is False
     conv = await conversation(raw_db, w, w.s1)
     resp = await post_message(client, w, w.s1, conv.id, RAG_QUESTION)
     assert resp.status_code == 200
@@ -253,10 +256,12 @@ async def test_a_rag_question_gets_the_fixed_answer_unavailable_and_no_model_cal
     assert answer.rule_ids == [] and answer.router_confidence == "low"
 
 
-def test_the_rag_flag_cannot_be_switched_on_before_6a_10() -> None:
-    with pytest.raises(ValidationError):
-        Settings(CHAT_RAG_ENABLED=True)
+def test_the_rag_flag_can_be_switched_on_and_stays_off_by_default() -> None:
+    """Owner, 6a-10 brief answer 2: 6a-10c removes the start-up refusal; the default stays false."""
+    assert Settings(CHAT_RAG_ENABLED=True).CHAT_RAG_ENABLED is True
     assert Settings().CHAT_RAG_ENABLED is False
+    with pytest.raises(ValidationError):  # the other chat checks still hold
+        Settings(CHAT_MAX_INPUT_CHARS=600, RETRIEVAL_MAX_QUERY_CHARS=500)
 
 
 # ── Check order ───────────────────────────────────────────────────────────────

@@ -22,13 +22,15 @@ not a teacher of the class (Q4): "not found" and "not yours" are the same generi
 Logs carry ids only, never a title or any message text.
 """
 
+import asyncio
 import uuid
 from typing import Annotated
 
+import anyio
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from app.core.authz import require_released
 from app.core.tenant_db import chat_session_context
@@ -85,16 +87,44 @@ async def create_conversation(body: ConversationCreateRequest, user: ChatUser) -
 class ChatStreamResponse(StreamingResponse):
     """The SSE response of one turn. Whatever ends the stream (done, error, a client disconnect that cancels it, a
     crash), the turn's shielded closing step runs once the response is over (plan 8.6): it finishes the generator,
-    closes a row that has no final outcome yet and releases the stream slots."""
+    closes a row that has no final outcome yet and releases the stream slots.
+
+    It also gives the turn the disconnect check that plan 8.6 asks for between tokens (6a-10c). Starlette's own
+    Request.is_disconnected() cannot see a disconnect behind a BaseHTTPMiddleware (TenantResolutionMiddleware): its
+    receive wrapper opens a task group, which the check's pre-cancelled scope stops before anything is read. So this
+    response watches the `receive` it is called with: under ASGI spec 2.3 Starlette's disconnect listener reads it
+    (and also cancels the stream); under 2.4 Starlette does not listen (it waits for send() to fail, and a server may
+    just drop the sends), so one listener of our own reads it. The turn checks the flag after every token."""
 
     def __init__(self, turn: chat_messages.ChatTurn) -> None:
         self._turn = turn
+        self._gone = anyio.Event()
+        turn.is_disconnected = self._client_gone
         super().__init__(turn.events(), media_type=chat_sse.MEDIA_TYPE, headers=chat_sse.HEADERS)
 
+    async def _client_gone(self) -> bool:
+        return self._gone.is_set()
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def watched_receive() -> Message:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                self._gone.set()
+            return message
+
+        async def listen() -> None:
+            while not self._gone.is_set():
+                await watched_receive()
+
+        spec = tuple(int(part) for part in scope.get("asgi", {}).get("spec_version", "2.0").split("."))
+        listener = asyncio.ensure_future(listen()) if spec >= (2, 4) else None
         try:
-            await super().__call__(scope, receive, send)
+            await super().__call__(scope, watched_receive, send)
         finally:
+            if listener is not None:
+                listener.cancel()
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(listener, return_exceptions=True)
             await self._turn.close(self.body_iterator)
 
 
@@ -110,7 +140,8 @@ async def post_message(conversation_id: uuid.UUID, body: MessageCreateRequest, u
     current read scope for its class and subject (404), the text after cleaning (422 invalid_message /
     message_too_long), a repeated client_request_id (409 duplicate_request with the existing answer's id and
     outcome), the limits (429 with Retry-After; 503 service_unavailable). No pooled connection is held while the
-    stream is sent or a limit is taken.
+    stream is sent, a limit is taken, the question is embedded or the model is answering. Between the tokens of a
+    RAG answer the route checks whether the client is still connected (plan 8.6).
     """
     prepared = await chat_messages.prepare_turn(user, conversation_id, body.content, body.client_request_id)
     return ChatStreamResponse(chat_messages.ChatTurn(prepared))
