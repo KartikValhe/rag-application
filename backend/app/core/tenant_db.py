@@ -22,6 +22,7 @@ Usage in a route:
 For superadmin routes use `get_platform_session` (no tenant_id set).
 """
 
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -52,6 +53,31 @@ async def tenant_session_context(tenant_id: str) -> AsyncGenerator[AsyncSession,
             yield session
         except Exception:
             logger.warning("tenant_session_rolled_back", tenant_id=str(tenant_id))
+            raise
+
+
+@asynccontextmanager
+async def chat_session_context(
+    tenant_id: uuid.UUID | str, user_id: uuid.UUID | str
+) -> AsyncGenerator[AsyncSession, None]:
+    """
+    The session of every chat route (docs/phase6-plan.md 9.2): like tenant_session_context, but it also sets
+    app.user_id, which the RESTRICTIVE chat_owner policy compares with each row's user_id. Both settings are set in
+    ONE statement with set_config(..., true), so they live only for this transaction. Without app.user_id (a plain
+    tenant session) the chat tables show zero rows: chat fails closed.
+
+    Both ids must be UUIDs; anything else is refused before a connection is taken.
+    """
+    tid, uid = str(uuid.UUID(str(tenant_id))), str(uuid.UUID(str(user_id)))
+    async with SessionLocal() as session, session.begin():
+        await session.execute(
+            text("SELECT set_config('app.tenant_id', :tid, true), set_config('app.user_id', :uid, true)"),
+            {"tid": tid, "uid": uid},
+        )
+        try:
+            yield session
+        except Exception:
+            logger.warning("chat_session_rolled_back", tenant_id=tid)
             raise
 
 

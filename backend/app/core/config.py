@@ -221,6 +221,9 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_TOTAL: float = Field(default=45.0, gt=0, le=600)
     # Output tokens asked of the provider for one chat answer (plan 5.6).
     CHAT_MAX_OUTPUT_TOKENS: int = Field(default=600, ge=1, le=4096)
+    # New conversations one user may start per rolling hour (plan 8.1, step 6a-9a); over it: 429
+    # conversation_rate_limit_exceeded. Counted only after the scope check, so a 404 probe uses nothing.
+    CHAT_CONVERSATIONS_PER_USER_PER_HOUR: int = Field(default=20, ge=1, le=1000)
     # ── Daily token budgets (step 6a-5, plan 7.7), counted in Redis per UTC day ──
     # PLACEHOLDERS, set after Q1: both numbers come from the first draft and are not decisions. They are fixed
     # only after the owner answers Q1 (paid tier and answer model) and the 6a-6 token measurement. Do not

@@ -44,6 +44,16 @@ async def create_for_new_tenant(tenant_id: uuid.UUID) -> None:
         await create_default_settings(session, tenant_id)
 
 
+async def read_chat_enabled(session: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """tenant_settings.chat_enabled of the tenant. No row reads as the default (true), like every other value."""
+    result = await session.execute(
+        text(f"SELECT chat_enabled FROM app.tenant_settings WHERE {TENANT_FILTER}"),
+        {"tenant_id": tenant_id},
+    )
+    value = result.scalar_one_or_none()
+    return True if value is None else bool(value)
+
+
 async def read_token_budget_override(session: AsyncSession, tenant_id: uuid.UUID) -> int | None:
     """The tenant's chat_daily_token_budget, or None (no row, or NULL): the platform default applies then. The budget
     layer (app/services/llm_budget.py) refuses a value above the platform ceiling."""
