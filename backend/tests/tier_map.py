@@ -95,6 +95,11 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_chat_api.py": ("db",),  # 6a-9a: conversation routes (create/list/get/delete), limits, chat_disabled, no held connection
     "test_chat_route_matrix.py": ("db", "security"),  # 6a-9a: every chat route x role, generated from the route table
     "test_chat_sse.py": ("fast",),  # 6a-9b: SSE event bytes, one-line JSON, heartbeat helper and stream deadline
+    "test_chat_stream_filter.py": ("fast", "security"),  # 6a-10a: verdict gate on prefixes, label filter, 【S#】/U+2011 normalisation, caps, leak cut, real recordings
+    "test_chat_prompt.py": ("fast", "security"),  # 6a-10a: rag-v1 prompt, random SOURCES boundary, neutralising, no ids, flagged marking, budget, history
+    "test_chat_citations.py": ("fast", "security"),  # 6a-10a: server-built citation snapshots, location kinds, snippets, student fields only
+    "test_pii.py": ("fast", "security"),  # 6a-10a: PII masking of what goes to the model (e-mail, phones, ID numbers, own name)
+    "test_guardrails.py": ("fast",),  # 6a-10a: Phase 7 checkpoint stubs with the two real checks (input length, no context)
     "test_chat_message_api.py": ("db", "security"),  # 6a-9b: message route check order, T1/T3, idempotency, limits, cancel, roles, logs
     "test_chat_schedule.py": ("db",),  # 6a-9b: schedule path end to end per role, templates en/mr, zero model and retrieval calls
     "test_sse_transport.py": ("db",),  # 6a-9b: F11, stream not buffered and disconnect reaching the generator through the stack

@@ -1154,22 +1154,57 @@ high-effort model.
   returns rag with `miss.router_error` (3.5, 10.1).
 
 **6a-10 RAG answer: prompt, stream filter, citations** · depends on: 6a-1b, 6a-4, 6a-9b · risk **H** · **HE**
-- Builds: `rag_answer.py`, `chat_prompt.py`, `chat_stream_filter.py`, `chat_citations.py`, `pii.py`, not-found path, verdict gate
-  (tolerant first-line parsing of 4.5, review 6-0b), citation requirement and `replace`, flagged marking, persistence of citations and usage,
-  `GuardrailPipeline` stubs.
-- Tests first: `test_chat_prompt.py`, `test_chat_stream_filter.py` (every split of every accepted verdict form), `test_chat_rag.py`.
+**Split by the owner (6a-10 brief, 2026-11-26) into three steps: 6a-10a, 6a-10b, 6a-10c.** No other step is renumbered: 6a-11,
+6a-12 and 6a-13 keep their numbers and their "depends on: 6a-10" now means 6a-10c (which needs 6a-10a and 6a-10b). The original
+scope of 6a-10 is the union of the three steps below; nothing was dropped.
+
+**6a-10a Pure building blocks: prompt, stream filter, citations, PII** · depends on: 6a-1b · risk **H** · **HE**
+- Builds (pure, no database, no network, no LLM call, nothing wired into a route): `chat_prompt.py` (5.1-5.3, `rag-v1`, the random
+  SOURCES boundary, neutralising, title scan, context budget, flagged `mark`/`exclude`, history with old labels stripped),
+  `chat_stream_filter.py` (verdict gate of 4.5 on prefixes, the label filter of 6.3, the 6.1 normalisation, the 8,000-character cap,
+  the system-prompt leak cut, the end-of-answer decision of rule 2), `chat_citations.py` (label table, snapshots, the citation event data),
+  `pii.py` (9.5 item 1), `guardrails.py` stubs (10.3). The `CHAT_RAG_ENABLED` refusal stays (nothing is wired).
+- Tests first: `test_chat_prompt.py`, `test_chat_stream_filter.py` (every split of every accepted verdict form, the real recordings and
+  every stream in one-character chunks), `test_chat_citations.py`, `test_pii.py`, `test_guardrails.py`.
+- **Carried from the owner's 6a-9a brief:** the verdict filter on prefixes with trailing spaces and tabs tolerated (4.5, owner decision),
+  tested with the real recordings and one-character chunks; `【S#】` normalised to `[S#]` before validation and U+2010/U+2011 mapped to
+  `-` on every chunk, nothing else changed (6.1, owner decision); the prompt rule "Use ASCII square brackets only, like [S1]" (5.2).
+- **Owner addition (6a-10 split brief):** the label hold-back starts at either `[` or the full-width `【` (a streamed `【S1】` can arrive
+  split across chunks), and the `【】` normalisation happens before validation. Every split position of that form is tested, plus
+  one-character chunks.
+
+**6a-10b Token-weighted TPM window in the chain** · depends on: 6a-4 · risk **H** · **HE** (Redis atomics, timing)
+- Owner decision (6a-10 brief, answer 1, option (a)): the `tpm` of `models.json` is enforced (6a-4 left it as data only). Requirements:
+  - one atomic Lua script, per model key (`llm:tpm:{model_key}`, a 60 s sliding window of token-weighted reservations); `tpm` taken from
+    `models.json` (only `groq:openai/gpt-oss-120b` has one, 8000); a model without `tpm` is not limited by it;
+  - reserve the prompt estimate plus `max_output_tokens` before the call (checked in `chain.py` next to the RPM/RPD acquire), then correct
+    to the provider-reported counts (hidden reasoning included in the completion count);
+  - release or correct on failure, cancel and interrupted, so nothing wedges the window;
+  - a fallback model is checked against its OWN limit;
+  - Redis failure follows the same policy as the existing RPM/RPD acquire (503 `service_unavailable` outside development);
+  - RPM/RPD behaviour unchanged;
+  - an injectable clock and NO sleeps in the tests; deterministic concurrency tests; adversarial breaks (own self-review).
+
+**6a-10c RAG answer: the wired turn** · depends on: 6a-10a, 6a-10b, 6a-9b · risk **H** · **HE**
+- Builds: `rag_answer.py`: query embedding with no transaction open, `search_for_chat` in a short T2 with the cached vector, the
+  not-found path (no LLM call), the budget reserve before the call and the correction to the reported usage after it, the chain call (no
+  tools), the 6a-10a filter between the chain and the SSE writer, `replace`, T3 (message fields, `message_citations` rows and the
+  `llm_usage_events` row in one transaction), `finish_reason: length` stored as `truncated`, a mid-stream failure stored as `interrupted`.
+- Tests first: `test_chat_rag.py`, the pool test, the message-route changes.
 - Acceptance: not-found makes no LLM call; invalid labels never reach the client; stored text equals streamed text; refusal paths
   give the fixed text in the question's language.
-- **Carried from the owner's 6a-9a brief (not built in 6a-9a: no prompt, stream filter or citation code there):** the verdict filter on
-  prefixes with trailing spaces and tabs tolerated (4.5, owner decision), tested with the real recordings and one-character chunks;
-  `【S#】` normalised to `[S#]` before validation and U+2010/U+2011 mapped to `-` on every chunk, nothing else changed (6.1, owner
-  decision); the prompt rule "Use ASCII square brackets only, like [S1]" (5.2); a pool test with the FakeLLM that shows zero
-  checked-out connections while the fake stream is half-way.
+- **Carried from the owner's 6a-9a brief:** a pool test with the FakeLLM that shows zero checked-out connections while the fake stream
+  is half-way.
 - **Carried from 6a-9b (not built there: no RAG answer, no LLM call in 6a-9b):** replace the fixed `answer_unavailable` of the
   rag route (`chat_messages.ChatTurn.events`) by `rag_answer.answer` and remove the settings validator that refuses
-  `CHAT_RAG_ENABLED=true`; the `request.is_disconnected()` check between tokens (8.6; 6a-9b sends one token per answer and
+  `CHAT_RAG_ENABLED=true` (owner, 6a-10 brief answer 2: the test `test_chat_message_api.py` that asserts the refusal flips to "accepted";
+  the default stays `false`); the `request.is_disconnected()` check between tokens (8.6; 6a-9b sends one token per answer and
   `test_sse_transport.py` shows the disconnect reaches the generator without it); the real usage numbers in `done` and the
   usage event of a cancelled answer (8.6); condensing stays 6a-11.
+- **Owner decision (6a-10 brief, answer 3): usage of a `NOT_IN_SOURCES` refusal.** The provider stream is closed at once (4.5), so the
+  provider's usage chunk never arrives. The usage is settled with estimated counts (`tokens_estimated = true`): the prompt estimate of
+  `llm_budget`, and for the completion a named constant `REFUSAL_COMPLETION_TOKENS_ESTIMATE = 128` (source: the 6a-6 real runs, where
+  refusals reported 66-95 completion tokens because of the hidden reasoning; maximum observed 95).
 
 **6a-11 Condense, fallback, budgets in the turn** · depends on: 6a-10, 6a-5 · risk M
 - Builds: follow-up detection and condense call (small model, failure = raw question), retrieval-only fallback (all providers down,
@@ -2222,3 +2257,57 @@ about USD 1.3 a day whatever happens.
   the same pre-existing failure as in the 6a-1a to 6a-9a records (not touched). The `db`-only files the gate does not select:
   `run_tests full tests/test_chat_schedule.py tests/test_sse_transport.py tests/test_chat_api.py`: `78 passed in 118.72s (0:01:58)`.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 131 source files`
+
+### 6a-10a Pure building blocks: prompt, stream filter, citations, PII · 2026-11-26 · not committed
+
+- **Split (owner, 6a-10 brief):** 6a-10 became 6a-10a (this step), 6a-10b (token-weighted TPM window in `chain.py`) and 6a-10c (the wired
+  turn); requirements of 6a-10b and the `NOT_IN_SOURCES` usage rule (`REFUSAL_COMPLETION_TOKENS_ESTIMATE = 128`) are written into section 12.
+  No other step was renumbered.
+- **Built (pure, nothing wired into a route, no setting, no migration, no dependency):** `app/services/chat_stream_filter.py`
+  (`StreamFilter.feed/finish`, `parse_first_line`, `normalise_chunk`), `app/services/chat_prompt.py` (`build_prompt`, `build_system_prompt`,
+  `neutralise`, `strip_labels`, `new_boundary`, `NoSources`, `PROMPT_TEMPLATE_VERSION = "rag-v1"`), `app/services/chat_citations.py`
+  (`PromptSource`, `build_snapshots`, `citation_items`, `needs_review`, `location_kind/text`, `make_snippet`), `app/services/pii.py` (`mask`,
+  `masker`), `app/services/guardrails.py` (`GuardrailPipeline`: `input_length` at the input checkpoint, `no_context` at the output checkpoint).
+  The `CHAT_RAG_ENABLED` refusal stays (nothing is wired).
+- **Owner decisions applied.** Verdict on prefixes: nothing is released until the first newline (or the end of the stream: the real
+  `NOT_IN_SOURCES` answers have no newline at all), 40-character bound, leading whitespace dropped, trailing spaces and tabs tolerated,
+  emphasis/colon as 4.5, otherwise exact and case-sensitive; `NOT_IN_SOURCES` never releases model text and asks the caller to close the
+  provider stream on the chunk that ends the line. `【S#】` is rewritten to `[S#]` before validation; the label hold-back starts at `[` or `【`.
+  U+2010/U+2011 become `-` on every chunk, nothing else changes. Prompt rule 4 says "Use ASCII square brackets only, like [S1]." "No valid
+  citation, no answer" kept.
+- **Decisions where the plan was unclear (owner to confirm):** (1) Label hold-back: the plan says "until `]` or 12 characters"; built as
+  "held while the text can still become a label group", at most 64 characters. A 12-character bound would release `[S1, S2, S3, S99]`
+  unchecked. A label-shaped group longer than 64 is dropped together with its rest up to the closer (labels counted invalid). (2) `[S0]` and
+  `[S007]` are label-shaped, so validated and removed; `[S-1]`, `[S1e3]`, `[S 1]`, `[ S1 ]`, `[S१]` (non-ASCII digit), `【S1]` (mixed
+  brackets) are not label patterns and are released unchanged, never cited (6.3). An unfinished group at the end is plain text.
+  (3) A first line ending in `\r` is "neither" (only spaces and tabs are tolerated). (4) Blank lines after the `ANSWERABLE` line are not
+  streamed; on the "neither" path the first line streams as written. (5) Outcome order: refused_by_model > blocked_leak > no_valid_citations
+  > truncated > answered, so a cut answer with no valid label is retracted. `retract` (the SSE `replace`) for refused_by_model, blocked_leak
+  and no_valid_citations; the fixed text for blocked_leak is chosen in 6a-10c (no new text written here). (6) Leak watch compares 60-character
+  windows with whitespace runs collapsed and case folded (stronger than "verbatim"). (7) Neutralising: `SOURCES`, `ANSWERABLE`,
+  `NOT_IN_SOURCES` in source text become `Sources`, `Answerable`, `Not_in_sources`; attributes are HTML-escaped; the boundary is removed
+  repeatedly (one removal can join two halves into a new one). (8) Bot name and institution are tenant text at system authority: cleaned,
+  cut (60 / 120) and replaced by a neutral default when empty or flagged by `injection_scan`. (9) No source left gives `NoSources` (the
+  caller's 4.4 refusal). (10) History questions and answers are masked too (they also go to the model). PII placeholders: `[email]`,
+  `[phone]`, `[id number]`, `[name]`; name parts of at least 3 characters, whole words. (11) A hit without `file_kind` is cited as
+  `section` with `file_kind = "unknown"` (the column is NOT NULL). (12) The tuning values (context budget, history turns and characters,
+  flagged mode, citation requirement) are parameters with the plan defaults as constants; the settings come with their caller in 6a-10c.
+- **Deferred, with the reason:** everything of 6a-10b and 6a-10c (owner split); the staff citation shape (`flagged`, `document_id`, 8.2,
+  proposed): it depends on the caller's role, so 6a-10c/6a-12; replacing the TEMPORARY prompt and classifier copies in `llm_smoke.py`
+  (a dev-only script whose tests pin them; the brief says not to run it): a later step, with the owner.
+- **Tests (`tier_map.py`):** `test_chat_stream_filter.py` (`fast, security`, 163: every accepted form at every two-way split and in
+  one-character chunks, near-misses, the 8 real recordings as recorded and in one-character chunks, the 20b trailing spaces, the mr-03
+  full-width answer, labels and full-width labels at every split, caps, leak, purity), `test_chat_prompt.py` (`fast, security`, 49),
+  `test_chat_citations.py` (`fast, security`, 32), `test_pii.py` (`fast, security`, 26), `test_guardrails.py` (`fast`, 6); shared
+  `tests/fixtures/chat_hits.py`. Invisible characters in source are written as `\u` escapes.
+- **Red first:** `5 errors in 0.78s` (`ImportError: cannot import name 'chat_stream_filter' / 'chat_prompt' / 'chat_citations' / 'pii' /
+  'guardrails' from 'app.services'`).
+- **Self-review** (harness: one break in the real file, its test file run, original bytes written back, SHA-256 compared; 68 breaks, all
+  hashes equal): 66 red on the first round. **F13** (a label group emitted half under the cap) stayed green: only a cap with zero room was
+  tested; `test_a_label_that_only_partly_fits_under_the_cap_is_not_released_at_all` added, red under the break. **C1** first missed its
+  target (harness quoting), then red. During the build a test exposed a real gap: the rest of an over-long label group streamed as plain
+  text (`S2, S3, S99]`); fixed (the drop continues to the closer) and covered by two tests.
+- `run_tests gate` (the full gate, run alone, test database only): `= 1 failed, 3962 passed, 12 skipped, 1088 deselected, 4 xfailed in 812.89s (0:13:32) =`.
+  The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable:
+  search_timeout`), the same pre-existing failure as in the 6a-1a to 6a-9b records (not touched).
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 136 source files`
