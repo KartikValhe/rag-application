@@ -14,8 +14,9 @@ context are what the caller is ALREADY authorised for, and they are the only nam
 A name outside that scope cannot be matched, so it behaves exactly like a name that does not exist (no probing).
 
 TOTAL. route() returns a RouteDecision for any input and never raises. A bug inside the router is caught and
-recorded as a rag decision with the rule id "miss.router_error" (the plan asked the caller to log it; a
-decision that carries the id gets stored on the message row, where an operator can count it).
+recorded as a rag decision with the rule id "miss.router_error" (a decision that carries the id gets stored on the
+message row, where an operator can count it). route_with_error() also gives the error's class name, which the
+message route (6a-9b) logs as chat_router_error; this module itself never logs.
 
 How a question is decided (plan 3.3):
   1. Truncate to MAX_INPUT_CHARS, then normalise: ingest clean_text rules (invisible and control characters out,
@@ -66,6 +67,8 @@ from app.services.document_text import clean_text
 
 MAX_INPUT_CHARS: Final = 500
 NAME_MATCH_RATIO: Final = 0.85
+# Logged with chat_router_error and chat_turn (6a-9b), so an operator can tell which rules made a decision.
+ROUTER_VERSION: Final = "router-v1"
 
 RoleKind = Literal["student", "teacher", "admin"]
 Route = Literal["schedule", "clarify", "rag"]
@@ -466,9 +469,18 @@ def _route(text: str, ctx: RouterContext, index: PhraseIndex) -> RouteDecision:
     return _decide(scan, ctx)
 
 
+def route_with_error(
+    text: str, ctx: RouterContext, *, index: PhraseIndex = DEFAULT_INDEX
+) -> tuple[RouteDecision, str | None]:
+    """route() plus the CLASS NAME of an internal error (None when there was none), so the caller can log
+    chat_router_error (plan 3.5, 10.1). Only the class name leaves this function: never the exception's message,
+    which could hold the question. Never raises."""
+    try:
+        return _route(text, ctx, index), None
+    except Exception as exc:
+        return _ERROR_RAG, type(exc).__name__
+
+
 def route(text: str, ctx: RouterContext, *, index: PhraseIndex = DEFAULT_INDEX) -> RouteDecision:
     """Route one question. Never raises (see the module docstring)."""
-    try:
-        return _route(text, ctx, index)
-    except Exception:
-        return _ERROR_RAG
+    return route_with_error(text, ctx, index=index)[0]

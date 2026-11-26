@@ -94,6 +94,10 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_chat_source_scans.py": ("fast", "security"),  # 6a-9a: maintenance URL/module worker-only, retired chat_maintenance setting gone
     "test_chat_api.py": ("db",),  # 6a-9a: conversation routes (create/list/get/delete), limits, chat_disabled, no held connection
     "test_chat_route_matrix.py": ("db", "security"),  # 6a-9a: every chat route x role, generated from the route table
+    "test_chat_sse.py": ("fast",),  # 6a-9b: SSE event bytes, one-line JSON, heartbeat helper and stream deadline
+    "test_chat_message_api.py": ("db", "security"),  # 6a-9b: message route check order, T1/T3, idempotency, limits, cancel, roles, logs
+    "test_chat_schedule.py": ("db",),  # 6a-9b: schedule path end to end per role, templates en/mr, zero model and retrieval calls
+    "test_sse_transport.py": ("db",),  # 6a-9b: F11, stream not buffered and disconnect reaching the generator through the stack
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),
     "test_query_embedding.py": ("fast",),  # 6a-1b: the shared guarded query embedder and the start-up warm-up flag

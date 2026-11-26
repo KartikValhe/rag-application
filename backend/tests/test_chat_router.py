@@ -1197,6 +1197,25 @@ def test_a_broken_context_does_not_escape_either() -> None:
     assert d.route == "rag" and d.rule_ids == ("miss.router_error",)
 
 
+def test_route_with_error_names_the_error_class_only_for_the_callers_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """6a-9b: the message route logs chat_router_error with the error CLASS (owner decision 2); the router itself still
+    never logs and never raises, and route() is route_with_error() without the class."""
+    ok, none = chat_router.route_with_error("what is my next lecture", make_ctx())
+    assert none is None and ok == route("what is my next lecture", make_ctx())
+
+    def boom(*args: object, **kwargs: object) -> RouteDecision:
+        raise LookupError("the question text must not travel with the error")
+
+    monkeypatch.setattr(chat_router, "_route", boom)
+    d, error_class = chat_router.route_with_error("next lecture", make_ctx())
+    assert d.rule_ids == ("miss.router_error",) and error_class == "LookupError"
+    assert route("next lecture", make_ctx()) == d
+
+
+def test_the_router_has_a_version_for_its_logs() -> None:
+    assert isinstance(chat_router.ROUTER_VERSION, str) and chat_router.ROUTER_VERSION == "router-v1"
+
+
 # ── time: the router never reads a clock ──────────────────────────────────────
 
 

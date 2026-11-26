@@ -23,7 +23,7 @@ Upload routes (UPLOAD_ROUTES, keyed by method + full-path regex), in this order,
    users). Template downloads (GET) only need step 1.
 
 Body limits: an upload route's own limit; else an area limit (every other request under
-/api/v1/documents: 64 KB); else, for any other multipart request, the default 2 MB + 64 KB and
+/api/v1/documents: 64 KB; every request under /api/v1/chat: 32 KB); else, for any other multipart request, the default 2 MB + 64 KB and
 5 parts. A tenant's own (lower) file limit is enforced by the route while it streams the file.
 The bytes actually received are counted, so a body longer than its Content-Length is cut off as
 soon as the limit is crossed, and multipart parts are counted by boundary delimiters.
@@ -64,6 +64,9 @@ class BodyLimit:
 DEFAULT_LIMIT = BodyLimit(MAX_REQUEST_BODY_BYTES, MAX_MULTIPART_PARTS)
 DOCUMENTS_LIMIT = BodyLimit(DOC_UPLOAD_CEILING_BYTES + FRAMING_OVERHEAD_BYTES, 6)
 SMALL_LIMIT = BodyLimit(64 * 1024, MAX_MULTIPART_PARTS)
+# Chat (step 6a-9b, plan 8.5): JSON bodies only. A question is at most 4,000 characters by schema, up to 24 KB as
+# \uXXXX escapes, plus the envelope.
+CHAT_LIMIT = BodyLimit(32 * 1024, MAX_MULTIPART_PARTS)
 
 # multipart: a form upload; json: a JSON body that still needs the pre-body checks;
 # download: a GET that only needs the Bearer check.
@@ -105,7 +108,11 @@ UPLOAD_ROUTES: tuple[UploadRoute, ...] = (
 )
 
 # Path prefix -> limit for every OTHER request below it (any method, any content type).
-AREA_LIMITS: tuple[tuple[str, BodyLimit], ...] = (("/api/v1/documents", SMALL_LIMIT),)
+AREA_LIMITS: tuple[tuple[str, BodyLimit], ...] = (
+    ("/api/v1/documents", SMALL_LIMIT),
+    # An area, not an upload route: chat needs no pre-body Bearer check and must not get the per-IP in-flight cap.
+    ("/api/v1/chat", CHAT_LIMIT),
+)
 
 # Per-IP in-flight cap for upload routes. The TTL only matters if a worker dies mid-request:
 # the lease is released as soon as the response is finished.

@@ -220,6 +220,11 @@ share one copy. No HTTP hop, no second copy of the SQL.
   scope with a `ValueError`).
 - Students: enrolled classes x subjects offered in that class (F3). Teachers: their own (class, subject) pairs (so a teacher
   "preview" of class 10-A covers only the subjects they teach there, *proposed*, Q8). Admins: every offered pair of the class.
+- **Owner decision (6a-9b brief, 2026-11-26): scope re-check.** The message route re-checks the caller's CURRENT read scope
+  for the conversation's class and subject on EVERY message (generic 404 when out of scope; built in 6a-9b). Any route that
+  returns message history or citation snippets re-checks the current scope as well (generic 404; built with the history route
+  in 6a-12). The conversation list (titles), the conversation metadata (`GET /conversations/{id}`) and `DELETE` do **not**
+  re-check scope: a student can always read the list and delete their own conversation.
 - The client never sends a tenant, a pair list or document ids. `class_id` / `subject_id` are fixed at conversation creation
   and can only narrow.
 - Accepted gap (as test search): scope is read in T1 and used in T2 of the same turn; a revocation in between affects the next
@@ -573,7 +578,9 @@ admin reading off in Phase 6).
 
 **Check order for the message route** (like test search, so probes never use up a window): permission (403) → conversation
 (own, 404) → scope rebuilt (404) → body and text checks (422) → idempotency (409) → rate limits and concurrency (429/503) →
-insert the user message → stream.
+insert the user message → stream. (6a-9b) `chat_disabled` (503) is checked right after the permission, as on create (a
+tenant-wide switch reveals nothing); FastAPI's own schema 422 (missing field, more than 4,000 characters) depends on the body
+only and comes after the permission check.
 
 ### 8.2 Models (`extra="forbid"`, every key always present, `null` when empty)
 - `ConversationCreateRequest`: `{class_id: uuid, subject_id?: uuid | null}`.
@@ -1158,6 +1165,11 @@ high-effort model.
   `【S#】` normalised to `[S#]` before validation and U+2010/U+2011 mapped to `-` on every chunk, nothing else changed (6.1, owner
   decision); the prompt rule "Use ASCII square brackets only, like [S1]" (5.2); a pool test with the FakeLLM that shows zero
   checked-out connections while the fake stream is half-way.
+- **Carried from 6a-9b (not built there: no RAG answer, no LLM call in 6a-9b):** replace the fixed `answer_unavailable` of the
+  rag route (`chat_messages.ChatTurn.events`) by `rag_answer.answer` and remove the settings validator that refuses
+  `CHAT_RAG_ENABLED=true`; the `request.is_disconnected()` check between tokens (8.6; 6a-9b sends one token per answer and
+  `test_sse_transport.py` shows the disconnect reaches the generator without it); the real usage numbers in `done` and the
+  usage event of a cancelled answer (8.6); condensing stays 6a-11.
 
 **6a-11 Condense, fallback, budgets in the turn** · depends on: 6a-10, 6a-5 · risk M
 - Builds: follow-up detection and condense call (small model, failure = raw question), retrieval-only fallback (all providers down,
@@ -1177,6 +1189,10 @@ high-effort model.
   maintenance role; purge blanking works on other users' citation rows via the queue, repeats after a failed run, and works with
   the API's maintenance URL unset; stale `pending` rows become `interrupted` through the maintenance role, fresh and finished ones do not;
   settings changes audited without content.
+- **Carried from the owner's 6a-9b brief (owner decision 1, 4.2):** the history route, and any route that returns citation
+  snippets, re-checks the caller's CURRENT read scope for the conversation's class and subject (generic 404); list, metadata and
+  delete do not. The read-time view of a stale `pending` row as `interrupted` (2.1) is already built for the 409 of 6a-9b
+  (`chat_messages._existing_answer`); the history route uses the same rule.
 
 **6a-13 Security suite, leaks, docs, B108 measurement** · depends on: 6a-11, 6a-12 · risk **H** · **HE**
 - Builds: `test_chat_leaks.py`, `test_chat_logs.py`, `tests/security/test_prove_it_fails_chat.py`, `app/scripts/eval_chat.py`,
@@ -1355,6 +1371,9 @@ about USD 1.3 a day whatever happens.
 | C25 | **(review 6-0b)** Fact F11 named step 6a-8 (the migration step) for the transport test, and 5.2 said the system prompt is reviewed in 6a-9 (the API step) | this file, first draft | Corrected to 6a-9b and 6a-10 |
 | C26 | **Decided (6a-8, owner): `tenant_isolation TO app_tenant` on the five `0013` tables.** 9.2 kept `tenant_isolation` without a `TO` clause, so it also applied to `app_chat_maint`; permissive policies are ORed, so the role could UPDATE `outcome`, `partial`, `completed_at` of a finished assistant row or a user row (proved on the test database in a rolled-back transaction: 1 row changed; with `TO app_tenant`: 0) | 9.2 SQL and text vs C22 ("only an assistant row that is still pending") | `tenant_isolation` of the five tables is `TO app_tenant` (the `ingest_jobs` pattern of `0009`); the `chat_maint*` policies alone decide what `app_chat_maint` reaches. 9.2, 9.7 updated |
 | C27 | **(6a-9a)** The 6a-6 record's open items say "6a-9a must normalise `【S#】`", "6a-9a must tighten the prompt wording" and "6a-9a decides" the special hyphens, and "6a-8 (stream filter)" decides trailing whitespace; section 12 builds the prompt, the stream filter and the citations in **6a-10** (6a-9a has no model text at all, 6a-8 is the migration) | 6a-6 record vs section 12 | Not built in 6a-9a. The owner's decisions (6a-9a brief) are written into 4.5, 5.2 and 6.1 and into the 6a-10 step, where the code lives |
+| C28 | **(6a-9b)** 8.4 says the `duplicate_request` body carries the stored outcome, "`pending` while the first request is still streaming (or stale-pending until the sweeper runs)"; 2.1 and 9.4 say a stale `pending` row is read as `interrupted` at read time, and 11.1 asks that test of `test_chat_api.py` (the 409 is the only read path in 6a-9b) | 8.4 vs 2.1, 9.4, 11.1 | The 409 applies the read-time rule: a row `pending` for more than `CHAT_PENDING_STALE_SECONDS` is reported as `interrupted` (nothing is written; boundary tested at 119 s and 121 s). Owner to confirm |
+| C29 | **(6a-9b)** Step 6a-9b says the RAG path "returns a fixed 'not available yet' answer behind a flag", but the plan has no such text and no outcome for it (9.1's list is fixed by the 0013 CHECK constraint) | 12 (6a-9b) vs 7.5, 8.4, 9.1 | No new outcome (that would need a migration). The rag route answers `meta` then the `error` event `answer_unavailable` with the fixed text of 7.5 ("The assistant is not available right now. Please try again later."); the row is stored as `route = rag`, `outcome = error`, `content = ''`. The flag is `CHAT_RAG_ENABLED` (default false; true is refused by the settings validator until 6a-10). Owner to confirm |
+| C30 | **(6a-9b)** 11.1 puts the message tests in `test_chat_api.py`; 11.1 also lists `test_sse_transport.py` and `test_chat_schedule.py` as `db` only | 11.1 vs this step | The message tests are their own file `test_chat_message_api.py`, tiered `db, security` so the gate runs them; `test_sse_transport.py` and `test_chat_schedule.py` stay `db` (run by `run_tests full`); the SSE writer has a `fast` file `test_chat_sse.py` |
 
 ---
 
@@ -2125,3 +2144,81 @@ about USD 1.3 a day whatever happens.
   (`SearchUnavailable: search_timeout`), the same pre-existing failure as in the 6a-1a to 6a-8 records (not touched). The runner noted
   that `tier_map.py` changed, so CI should run the full tier.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 128 source files`
+
+### 6a-9b Chat API: message SSE route, cancellation, schedule path · 2026-11-26 · not committed
+
+- **Built:** `POST /api/v1/chat/conversations/{id}/messages` (`app/api/v1/chat.py`: route and `ChatStreamResponse`, whose `finally`
+  runs the turn's shielded closing step); `app/services/chat_messages.py` (check order, T1, idempotency, limits, the stream, T3, the
+  closing step, fixed texts); `app/services/chat_sse.py` (event bytes, `: ping`, `heartbeat_while` with the stream deadline);
+  `app/services/chat_schedule.py` (templates en/mr, the schedule path over `services/schedule.py`, clarify); `MessageCreateRequest`;
+  `chat_router.ROUTER_VERSION` and `route_with_error` (the error class for the caller's log; `route()` is unchanged in behaviour);
+  the body-limit area `/api/v1/chat` = 32 KB (`CHAT_LIMIT`); settings `CHAT_MAX_INPUT_CHARS` (500, never above
+  `RETRIEVAL_MAX_QUERY_CHARS`), `CHAT_MESSAGES_PER_USER_PER_MINUTE` (6), `_PER_DAY` (40), `CHAT_STREAMS_PER_USER` (1), `_PER_TENANT` (10),
+  `CHAT_STREAM_SLOT_TTL_SECONDS` (90, must be above the cap), `CHAT_STREAM_HEARTBEAT_SECONDS` (15), `CHAT_STREAM_MAX_SECONDS` (60),
+  `CHAT_PENDING_STALE_SECONDS` (120), `CHAT_LANGUAGES` (`en,mr`), `CHAT_DEFAULT_LANGUAGE` (`en`), `CHAT_RAG_ENABLED` (false; true refused
+  until 6a-10), all in `.env.example`. No migration, no dependency, no frontend change. The message route joined the route matrix.
+- **Owner decisions applied.** (1) Scope re-check: built for the message route (every message rebuilds `build_retrieval_scope(read)` and
+  narrows it to the conversation's class and subject: 404); recorded in 4.2; the history/citation routes do not exist yet: carried to 6a-12.
+  (2) The message route is the router's first caller: `chat_router_error` with `tenant_id`, `conversation_id`, `message_id`, `error_class`,
+  `router_version` only; a test fails if the question appears in any log record. (3) Full T1 to T3 flow with the real roles (below).
+  (4) No connection is held while an event is sent or a slot is taken (pool test); there is no external call in this step (no embedding,
+  retrieval or LLM: carried to 6a-10). (5) Idempotency, check order, the four limits and the 500-character limit as the plan says; every
+  error and refusal uses a fixed text.
+- **The turn as built.** Checks in order: permission (403) → `chat_disabled` (503) → own conversation (404) → current read scope (404) →
+  text after `clean_text` (422 `invalid_message`: empty or no letter/digit; `message_too_long`: over 500) → idempotency (409
+  `duplicate_request` + `message_id` + `outcome`) → the four limits in ONE atomic acquire (429 `chat_rate_limit_exceeded`,
+  `chat_daily_limit_reached`, `chat_stream_in_progress`, `chat_busy`, each with `Retry-After` and `retry_after_seconds`; 503
+  `service_unavailable` when Redis is down outside development). The checks run in a first short chat transaction, the slots are taken
+  with no connection, then T1 (one transaction) bumps the conversation (+2 rows, activity, the title = first 60 characters of the first
+  question), inserts the question and the `pending` answer row (`clock_timestamp()`, so the answer is strictly after its question). Two
+  identical requests at once: the unique `client_request_id` lets one through; the other rolls back, gives back ALL its slots and answers
+  409 with the winner's id. A T1 failure leaves neither row and frees every slot (500 `internal_error`, fixed text). Stream: `meta` →
+  (schedule: heartbeats while T2 runs, then one `token`) → T3 → `done`; or `meta` → `error`. Each event is sent outside any transaction.
+  Rag route: `error` `answer_unavailable` (C29). Schedule service failure: `error` `schedule_unavailable`, row `error`, never an LLM.
+  Stream cap: `error` `stream_interrupted` (`partial: true`), row `interrupted`. T3 failure: `error` `internal_error`, the closing step
+  stores the row as `error` with the text sent. The closing step (shielded, 5 s cap) closes a row without a final outcome as `cancelled`
+  (`partial`, the text the client got) and releases the two stream slots in every case; if it fails the row stays `pending` for the sweeper.
+  One `chat_turn` log line per turn (ids, route, intent, rule ids, outcome, language, partial, timings, router version; no user id, no text).
+- **F11 result:** the transport test passes through the real stack (CORS, security headers, body guard, the `BaseHTTPMiddleware`
+  `TenantResolutionMiddleware`) driven like uvicorn 0.54 (ASGI spec 2.3): `meta` reaches the client while the answer is blocked, every event
+  is its own body message, and a disconnect cancels the waiting work and closes the row. **No conversion to pure ASGI was needed.** httpx's
+  `ASGITransport` buffers the whole body, so the streaming tests use `tests/fixtures/sse_client.py` instead (plan 8.7 assumed httpx streams).
+- **Decisions where the plan was unclear (owner to confirm):** C28 (a stale pending row reads as `interrupted` in the 409), C29 (rag stub =
+  `answer_unavailable` event + outcome `error`), C30 (test file names and tiers); `chat_disabled` right after the permission (8.1 note); the
+  body limit is an AREA limit, not an upload route (an upload route would add the per-IP cap of 4 in flight, which a school behind one address
+  would hit); the router context holds the classes `schedule.resolve_authorized_class_ids` gives and the subjects of the caller's read
+  pairs; a schedule question with no named class answers for all of the caller's classes (3.5, labelled), not only the conversation's class;
+  HTTP error texts are English, `error`-event texts follow the template language (en/mr); a Devanagari question without a function word
+  ties and gets the default language (`en`), the 6a-7 rule; a detected language not in `CHAT_LANGUAGES` keeps its stored value but gets
+  the English templates.
+- **Deferred, with the reason:** to 6a-10: the RAG answer itself (no embedding, retrieval, prompt or LLM call exists in this step, the
+  `CHAT_RAG_ENABLED` validator goes), `request.is_disconnected()` between tokens (one token per answer here; F11 shows the disconnect reaches
+  the generator), real usage in `done` and the usage event of a cancelled answer, the FakeLLM half-way pool test (already carried). To
+  6a-12: the sweeper marking stale `pending` rows `interrupted` (this step proves the maintenance role CAN do it and nothing else), the
+  history route and its scope re-check (owner decision 1). Not in backend/ or docs/: the README "SSE behind a proxy" checklist of 8.7
+  (root `README.md`, outside what this brief may edit). The Marathi templates and error texts need the native review of 4.4 (pilot gate).
+- **Tests (`tier_map.py`):** `test_chat_sse.py` (`fast`: 19), `test_chat_message_api.py` (`db, security`: check order, T1/T3, idempotency
+  sequential/while streaming/race/stale, unique index as `app_tenant`, the four limits, Redis down, 32 KB boundary, heartbeat, stream cap,
+  disconnect before `meta`, during T2, during T3, after `done`, an outer cancel during the closing step, the real-role flow with
+  `app_chat_maint` (marks a left-pending row `interrupted` and nothing else, cannot touch a cancelled row or another tenant), router error
+  log, no text in logs, `chat_turn` keys, pool), `test_chat_schedule.py` (`db`: student/teacher/admin one class and all classes with zero
+  embedding, retrieval and LLM calls, en/mr templates, no timetable, clarify, other tenant, service failure, unauthorised subject name),
+  `test_sse_transport.py` (`db`: F11); rows added to `test_chat_route_matrix.py`, `test_chat_router.py`, `test_body_limit_routes.py`; shared
+  `tests/fixtures/chat_world.py` and `tests/fixtures/sse_client.py`.
+- **Red first:** four files failed at import (`cannot import name 'chat_sse'` / `'chat_messages' from 'app.services'`); the other three:
+  `5 failed, 448 passed in 19.09s` (no message route in the matrix, no `route_with_error` / `ROUTER_VERSION`, no `CHAT_LIMIT`). First
+  green attempt: `27 failed, 525 passed` (a fixture expired the world's users; one Marathi test used a phrase that ties to English).
+- **Self-review** (harness: one break in the real file, named tests run, file restored, SHA-256 compared; 38 breaks, every SHA equal):
+  34 red at once. **Green on the first round:** (12) my break did not really split T1 (an unrelated update); redone as a real split, red.
+  (35) the first deadline check in `heartbeat_while` was redundant (the check after the wait raised anyway); the check was removed and the
+  break moved to the remaining one, red. Two more were green and each got a test that is now red: subjects of every class in the router
+  context (`test_a_student_naming_a_subject_outside_their_classes_is_not_matched`) and the closing step without its shield
+  (`test_a_server_cancel_during_the_closing_step_still_closes_the_row`). **Two stay green by design:** the app's own user filter on the
+  conversation lookup and its `outcome = 'pending'` filter on T3 removed: the RESTRICTIVE owner policy and `chat_tenant_update_pending`
+  hold alone (defence in depth, as in 6a-9a).
+- `run_tests gate` (the full gate, not `--touched`; run alone, test database only):
+  `= 1 failed, 3686 passed, 12 skipped, 1088 deselected, 4 xfailed in 792.10s (0:13:12) =`. The failure is
+  `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught` (`SearchUnavailable: search_timeout`),
+  the same pre-existing failure as in the 6a-1a to 6a-9a records (not touched). The `db`-only files the gate does not select:
+  `run_tests full tests/test_chat_schedule.py tests/test_sse_transport.py tests/test_chat_api.py`: `78 passed in 118.72s (0:01:58)`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 131 source files`

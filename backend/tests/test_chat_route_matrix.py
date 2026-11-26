@@ -41,6 +41,8 @@ EXPECTED: dict[tuple[str, str], tuple[str, tuple[int, ...]]] = {
     ("GET", CONV): ("chat:use", (200, 200, 200, 200, 200, 200, 403, 401)),
     ("GET", f"{CONV}/{{conversation_id}}"): ("chat:use", (404, 404, 404, 200, 404, 404, 403, 401)),
     ("DELETE", f"{CONV}/{{conversation_id}}"): ("chat:use", (404, 404, 404, 204, 404, 404, 403, 401)),
+    # 6a-9b: only the owner may ask in a conversation; 200 is the SSE stream
+    ("POST", f"{CONV}/{{conversation_id}}/messages"): ("chat:use", (404, 404, 404, 200, 404, 404, 403, 401)),
 }
 
 
@@ -95,7 +97,10 @@ async def _prepare(key: tuple[str, str], world: AcademicWorld, raw_db: AsyncSess
     conv = Conversation(tenant_id=w.id, user_id=w.s1.id, class_id=w.classes["10-A"].id, subject_id=w.subjects["Math"].id)
     raw_db.add(conv)
     await raw_db.commit()
-    return path.replace("{conversation_id}", str(conv.id)), {}
+    concrete = path.replace("{conversation_id}", str(conv.id))
+    if method == "POST" and path.endswith("/messages"):
+        return concrete, {"json": {"content": "what is my next lecture", "client_request_id": str(uuid.uuid4())}}
+    return concrete, {}
 
 
 @pytest.mark.parametrize("key", list(EXPECTED), ids=[f"{m} {p}" for m, p in EXPECTED])
@@ -119,6 +124,9 @@ async def test_route_role_matrix(
             assert resp.json() == {"detail": GENERIC_NOT_FOUND}, (role, resp.text)
         if expected == 403:
             assert resp.json()["detail"]["code"] == "permission_denied", (role, resp.text)
+        if expected == 200 and key[1].endswith("/messages"):
+            assert resp.headers["content-type"] == "text/event-stream; charset=utf-8", (role, resp.text)
+            assert resp.text.endswith("\n\n") and "event: meta" in resp.text, (role, resp.text)
     assert tuple(got[r] for r in ROLES) == EXPECTED[key][1]
 
 

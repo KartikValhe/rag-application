@@ -85,6 +85,20 @@ def test_registry_values() -> None:
     assert all(r.kind == "multipart" for r in doc_rules)
 
 
+def test_chat_requests_are_limited_to_32kb_without_the_upload_checks() -> None:
+    """6a-9b (plan 8.5): every request under /api/v1/chat is a small JSON body: an area limit of 32 KB, never an upload
+    route (no Bearer pre-check, no per-IP in-flight cap of 4, which a school behind one address would hit)."""
+    from app.core.body_limit import CHAT_LIMIT, limit_for, match_upload_route
+
+    assert CHAT_LIMIT.max_body_bytes == 32 * 1024
+    conv = uuid.uuid4()
+    for method, path in [("POST", f"/api/v1/chat/conversations/{conv}/messages"), ("POST", "/api/v1/chat/conversations"),
+                         ("DELETE", f"/api/v1/chat/conversations/{conv}"), ("GET", "/api/v1/chat")]:
+        assert limit_for(method, path) is CHAT_LIMIT, (method, path)
+        assert match_upload_route(method, path) is None, (method, path)
+    assert limit_for("POST", "/api/v1/chatter") is None
+
+
 def test_registry_matches_method_and_whole_path() -> None:
     from app.core.body_limit import DOCUMENTS_LIMIT, SMALL_LIMIT, limit_for, match_upload_route
 

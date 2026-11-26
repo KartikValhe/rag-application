@@ -224,6 +224,34 @@ class Settings(BaseSettings):
     # New conversations one user may start per rolling hour (plan 8.1, step 6a-9a); over it: 429
     # conversation_rate_limit_exceeded. Counted only after the scope check, so a 404 probe uses nothing.
     CHAT_CONVERSATIONS_PER_USER_PER_HOUR: int = Field(default=20, ge=1, le=1000)
+    # ── Message route (step 6a-9b, plan 7.7, 8.2, 8.3, 8.6) ──
+    # Characters of one question after cleaning (Q12: 500). Never above RETRIEVAL_MAX_QUERY_CHARS (C10): a longer
+    # question would later fail retrieval with query_too_long.
+    CHAT_MAX_INPUT_CHARS: int = Field(default=500, ge=1, le=4000)
+    # Per-user limits (Q9: proposed, pending owner/client), counted only after the scope and text checks. The per-user
+    # limits apply to schedule answers too (plan 7.7).
+    CHAT_MESSAGES_PER_USER_PER_MINUTE: int = Field(default=6, ge=1, le=1000)
+    CHAT_MESSAGES_PER_USER_PER_DAY: int = Field(default=40, ge=1, le=100_000)
+    # Answers streaming at once: per user (another tab gets 429 chat_stream_in_progress) and per tenant (chat_busy).
+    CHAT_STREAMS_PER_USER: int = Field(default=1, ge=1, le=100)
+    CHAT_STREAMS_PER_TENANT: int = Field(default=10, ge=1, le=10_000)
+    # Life of a stream slot in Redis if the process dies before it releases it (must outlast CHAT_STREAM_MAX_SECONDS).
+    CHAT_STREAM_SLOT_TTL_SECONDS: float = Field(default=90, gt=0, le=3600)
+    # A ": ping" comment line after this many quiet seconds keeps proxies from closing the stream.
+    CHAT_STREAM_HEARTBEAT_SECONDS: float = Field(default=15, gt=0, le=300)
+    # Server-side cap of one answer stream; past it the stream ends with stream_interrupted.
+    CHAT_STREAM_MAX_SECONDS: float = Field(default=60, gt=0, le=600)
+    # An assistant row still 'pending' after this many seconds is reported as 'interrupted' (the sweeper of 6a-12
+    # writes it; reads show it at once).
+    CHAT_PENDING_STALE_SECONDS: int = Field(default=120, ge=1, le=86_400)
+    # Languages with fixed templates (Q5 pending: en and mr proposed). A detected language that is not listed gets
+    # the English templates; the stored language is still the detected one.
+    CHAT_LANGUAGES: str = "en,mr"
+    # Language used when the Devanagari word lists tie (plan 5.7). There is no per-tenant default yet.
+    CHAT_DEFAULT_LANGUAGE: str = Field(default="en", pattern=r"^(en|mr|hi)$")
+    # The RAG answer (prompt, LLM, citations) is built in step 6a-10. Until then a non-schedule question gets the fixed
+    # answer_unavailable text, and this flag cannot be switched on (the validator below refuses it).
+    CHAT_RAG_ENABLED: bool = False
     # ── Daily token budgets (step 6a-5, plan 7.7), counted in Redis per UTC day ──
     # PLACEHOLDERS, set after Q1: both numbers come from the first draft and are not decisions. They are fixed
     # only after the owner answers Q1 (paid tier and answer model) and the 6a-6 token measurement. Do not
@@ -351,6 +379,21 @@ class Settings(BaseSettings):
         if self.LLM_TIMEOUT_IDLE > self.LLM_TIMEOUT_TOTAL:
             raise ValueError("LLM_TIMEOUT_IDLE must not be above LLM_TIMEOUT_TOTAL")
         return self
+
+    @model_validator(mode="after")
+    def _chat_settings_must_fit_together(self) -> "Settings":
+        if self.CHAT_MAX_INPUT_CHARS > self.RETRIEVAL_MAX_QUERY_CHARS:
+            raise ValueError("CHAT_MAX_INPUT_CHARS must not be above RETRIEVAL_MAX_QUERY_CHARS (plan C10)")
+        if self.CHAT_STREAM_SLOT_TTL_SECONDS <= self.CHAT_STREAM_MAX_SECONDS:
+            raise ValueError("CHAT_STREAM_SLOT_TTL_SECONDS must be above CHAT_STREAM_MAX_SECONDS")
+        if self.CHAT_RAG_ENABLED:
+            raise ValueError("CHAT_RAG_ENABLED cannot be true before step 6a-10 builds the RAG answer")
+        return self
+
+    @property
+    def chat_languages(self) -> frozenset[str]:
+        """CHAT_LANGUAGES as a set (blank entries dropped). English templates always exist."""
+        return frozenset(part.strip() for part in self.CHAT_LANGUAGES.split(",") if part.strip())
 
     @model_validator(mode="after")
     def _token_budgets_must_fit_together(self) -> "Settings":

@@ -1,13 +1,18 @@
 """
 app/api/v1/chat.py
 ──────────────────
-The chat API (docs/phase6-plan.md section 8). Step 6a-9a: the conversation routes. The message route (SSE) joins in
-6a-9b, feedback in 6a-12.
+The chat API (docs/phase6-plan.md section 8). Step 6a-9a: the conversation routes; 6a-9b: the message route (SSE);
+feedback and history in 6a-12.
 
   POST   /api/v1/chat/conversations                      create (201; 404 out of scope; 429; 503 chat_disabled)
   GET    /api/v1/chat/conversations                      the caller's own, newest activity first (cursor paging)
   GET    /api/v1/chat/conversations/{conversation_id}    one of the caller's own (404 otherwise)
   DELETE /api/v1/chat/conversations/{conversation_id}    hard delete, cascades, audited with ids and counts (204)
+  POST   /api/v1/chat/conversations/{conversation_id}/messages
+                                                         one question; 200 text/event-stream (app/services/chat_messages.py)
+
+The message route re-checks the caller's CURRENT read scope on every message (owner decision, 6a-9b); list, get and
+delete do not (a student can always delete their own conversation).
 
 Every route depends on require_released("chat:use"): the permission check runs in its own short transaction and
 gives its connection back before the handler starts (B100). Each handler then opens its own short
@@ -22,6 +27,8 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.core.authz import require_released
 from app.core.tenant_db import chat_session_context
@@ -30,9 +37,10 @@ from app.schemas.chat import (
     ConversationCreateRequest,
     ConversationListResponse,
     ConversationResponse,
+    MessageCreateRequest,
     NamedRef,
 )
-from app.services import chat_conversations, document_scope
+from app.services import chat_conversations, chat_messages, chat_sse, document_scope
 from app.services.audit import record_audit_event
 from app.services.chat_conversations import ConversationView
 
@@ -72,6 +80,40 @@ async def create_conversation(body: ConversationCreateRequest, user: ChatUser) -
         view = await chat_conversations.insert_conversation(db, user, target)
     logger.info("chat_conversation_created", tenant_id=str(user.tenant_id), conversation_id=str(view.id))
     return _response(view)
+
+
+class ChatStreamResponse(StreamingResponse):
+    """The SSE response of one turn. Whatever ends the stream (done, error, a client disconnect that cancels it, a
+    crash), the turn's shielded closing step runs once the response is over (plan 8.6): it finishes the generator,
+    closes a row that has no final outcome yet and releases the stream slots."""
+
+    def __init__(self, turn: chat_messages.ChatTurn) -> None:
+        self._turn = turn
+        super().__init__(turn.events(), media_type=chat_sse.MEDIA_TYPE, headers=chat_sse.HEADERS)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._turn.close(self.body_iterator)
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}}, "description": "The answer as server-sent events"}},
+)
+async def post_message(conversation_id: uuid.UUID, body: MessageCreateRequest, user: ChatUser) -> Response:
+    """
+    Ask one question in one of the caller's own conversations; the answer is an SSE stream (plan 8.3). Before the
+    stream, in order: permission (403), chat switched off (503 chat_disabled), the conversation (404), the caller's
+    current read scope for its class and subject (404), the text after cleaning (422 invalid_message /
+    message_too_long), a repeated client_request_id (409 duplicate_request with the existing answer's id and
+    outcome), the limits (429 with Retry-After; 503 service_unavailable). No pooled connection is held while the
+    stream is sent or a limit is taken.
+    """
+    prepared = await chat_messages.prepare_turn(user, conversation_id, body.content, body.client_request_id)
+    return ChatStreamResponse(chat_messages.ChatTurn(prepared))
 
 
 @router.get("/conversations", response_model=ConversationListResponse)
