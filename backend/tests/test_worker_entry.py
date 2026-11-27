@@ -48,6 +48,32 @@ def test_each_missing_requirement_is_named_and_nothing_is_loaded(name: str) -> N
         ingest.prepare_embedder(cfg, load=never_loads)  # type: ignore[arg-type]
 
 
+def test_a_chat_maintenance_url_with_the_wrong_user_stops_the_start_and_names_the_role() -> None:
+    """6a-12a brief, owner answer 1: the worker refuses to start unless the user name is app_chat_maint. The message
+    never holds the URL or the password."""
+    from pydantic import SecretStr
+
+    url = "postgresql+asyncpg://app_tenant:s3cret-pw@db.internal/ragplatform"
+    cfg = Overrides(**{**GOOD, "CHAT_MAINT_DATABASE_URL": SecretStr(url)})
+    with pytest.raises(ingest.WorkerNotConfigured, match="app_chat_maint") as exc:
+        ingest.prepare_embedder(cfg, load=never_loads)  # type: ignore[arg-type]
+    assert "s3cret-pw" not in str(exc.value) and "db.internal" not in str(exc.value)
+
+
+def test_an_unset_chat_maintenance_url_does_not_stop_the_start() -> None:
+    from pydantic import SecretStr
+
+    cfg = Overrides(**{**GOOD, "CHAT_MAINT_DATABASE_URL": SecretStr("")})
+    loaded: list[object] = []
+
+    def load(*_a: object, **_k: object) -> FakeEmbedder:
+        loaded.append(1)
+        return FakeEmbedder()
+
+    ingest.prepare_embedder(cfg, load=load)  # type: ignore[arg-type]
+    assert loaded == [1]
+
+
 def test_every_problem_is_listed_at_once() -> None:
     cfg = Overrides(WORKER_DATABASE_URL="", REDIS_URL="", DOCUMENT_STORE_DIR="", EMBEDDING_MODEL_DIR="")
     assert len(pipeline.configuration_problems(cfg)) == 4  # type: ignore[arg-type]

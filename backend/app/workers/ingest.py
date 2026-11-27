@@ -580,8 +580,10 @@ def prepare_embedder(settings: "Settings", *, load: Callable[..., "Embedder"] | 
     from pathlib import Path
 
     from app.ml.lock import ModelLoadError
+    from app.workers import sweeper
 
-    problems = pipeline.configuration_problems(settings)
+    # The chat maintenance URL is optional, but with a user other than app_chat_maint the worker does not start
+    problems = pipeline.configuration_problems(settings) + sweeper.maintenance_problems(settings)
     if problems:
         raise WorkerNotConfigured("The ingestion worker is not started:\n  - " + "\n  - ".join(problems))
     if load is None:
@@ -606,7 +608,12 @@ async def _amain(embedder: "Embedder") -> None:
     from app.core.config import settings
     from app.core.slots import default_manager
     from app.services.document_store import get_document_store
-    from app.workers.sweeper import Sweeper, SweeperSettings, run_sweeper_loop
+    from app.workers.sweeper import (
+        Sweeper,
+        SweeperSettings,
+        maintenance_from_settings,
+        run_sweeper_loop,
+    )
 
     config = IngestSettings.from_settings(settings)
     dbs = WorkerDatabases.from_settings()
@@ -631,11 +638,22 @@ async def _amain(embedder: "Embedder") -> None:
         rng=random.Random(),
         worker_id=worker_id,
     )
+    maintenance = maintenance_from_settings(settings)
+    if maintenance is None:
+        logger.warning("chat_maint_off reason=url_not_set")  # no stale-answer marking, retention or blanking here
+    else:
+        try:
+            await maintenance.verify_role()  # the connection really is app_chat_maint, or the worker does not start
+        except BaseException:
+            await maintenance.dispose()
+            await dbs.dispose()
+            raise
     sweeper = Sweeper(
         queue=queue,
         tenant_sessions=dbs.tenant_sessions,
         store=store,
         config=SweeperSettings.from_settings(settings),
+        maintenance=maintenance,
     )
     stop = asyncio.Event()
     install_signal_handlers(stop)
@@ -645,6 +663,8 @@ async def _amain(embedder: "Embedder") -> None:
     finally:
         stop.set()
         await asyncio.gather(sweeping, return_exceptions=True)
+        if maintenance is not None:
+            await maintenance.dispose()
         await dbs.dispose()
 
 

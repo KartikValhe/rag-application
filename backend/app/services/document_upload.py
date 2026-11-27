@@ -391,6 +391,21 @@ def integrity_error_to_http(exc: IntegrityError) -> HTTPException | None:
 # ── Storage outbox ───────────────────────────────────────────────────────────
 
 
+async def schedule_citation_blanking(db: AsyncSession, tenant_id: uuid.UUID, document_ids: list[uuid.UUID]) -> None:
+    """
+    The citation-blank outbox (plan 9.1, 9.4, C21): one queue row per purged document, written in the SAME transaction
+    as the purge (so a purge that rolls back leaves no row and a committed purge always leaves one). The worker's
+    maintenance role drains the queue and blanks the snippets; the API never calls it. app_tenant has INSERT only on
+    the queue table, so this statement has no RETURNING and the rows are never read back here.
+    """
+    if not document_ids:
+        return
+    await db.execute(
+        text("INSERT INTO app.chat_citation_blank_queue (tenant_id, document_id) VALUES (:t, :d)"),
+        [{"t": tenant_id, "d": document_id} for document_id in document_ids],
+    )
+
+
 async def schedule_storage_deletions(
     db: AsyncSession, tenant_id: uuid.UUID, keys: list[str], reason: str
 ) -> None:

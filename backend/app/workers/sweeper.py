@@ -15,7 +15,13 @@ Per run:
   4. per tenant: drain the storage outbox (`storage_deletions`): delete the object through the private
      store, then the row. A missing file is success. A failure keeps the row, counts the attempt and
      moves `not_before` out with an exponential backoff;
-  5. purge finished jobs older than INGEST_FINISHED_JOB_RETENTION_DAYS (queue.purge_finished).
+  5. purge finished jobs older than INGEST_FINISHED_JOB_RETENTION_DAYS (queue.purge_finished);
+  6. per tenant, only when a ChatMaintenance object is given (step 6a-12b, plan 9.4; CHAT_MAINT_DATABASE_URL is set in
+     this worker): mark stale `pending` answers `interrupted`, delete conversations older than the tenant's retention
+     and old usage events, blank the citations of purged documents from the outbox queue, and write the audit rows.
+     Everything that touches chat rows goes through the app_chat_maint connection of chat_maintenance.py; the retention
+     value and the audit rows go through a tenant session (that role has no grant on tenant_settings or audit_log).
+     A tenant whose retention is NULL (the default) loses nothing: no conversation and no usage event is deleted.
 
 Roles: app_worker (the claim connection) is used for jobs and for `SELECT id FROM app.tenants` only. Every
 tenant table (document_versions, documents, chunks, storage_deletions, and the job insert) is touched
@@ -41,7 +47,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
-from app.services import document_store, document_upload
+from app.services import chat_maintenance, chat_settings, document_store, document_upload
+from app.services.audit import record_audit_event
 from app.workers.db import TenantRef, TenantSessions
 from app.workers.queue import NOW, Job, JobQueue
 
@@ -83,6 +90,31 @@ class SweepReport:
     deletions_retried: int = 0
     tombstones_purged: int = 0
     jobs_purged: int = 0
+    stale_marked: int = 0
+    conversations_deleted: int = 0
+    messages_deleted: int = 0
+    usage_events_deleted: int = 0
+    blanked_documents: int = 0
+    blanked_citations: int = 0
+
+
+def maintenance_from_settings(s: "Settings") -> chat_maintenance.ChatMaintenance | None:
+    """The chat maintenance object of this worker, or None when CHAT_MAINT_DATABASE_URL is unset (no chat maintenance
+    here). Raises MaintenanceNotConfigured for a user other than app_chat_maint (the worker's start refuses it first)."""
+    return chat_maintenance.ChatMaintenance.from_settings(s)
+
+
+def maintenance_problems(s: "Settings") -> list[str]:
+    """What stops the worker from starting because of the chat maintenance URL (empty list when it may start). An unset
+    URL is not a problem: that worker simply does no chat maintenance. Never echoes the URL or a password."""
+    url = s.CHAT_MAINT_DATABASE_URL.get_secret_value().strip()
+    if not url:
+        return []
+    try:
+        chat_maintenance.check_url_user(url)
+    except chat_maintenance.MaintenanceNotConfigured as exc:
+        return [str(exc)]
+    return []
 
 
 _MISSING_JOBS_SQL = f"""
@@ -134,7 +166,9 @@ class Sweeper:
         config: SweeperSettings,
         clock: Callable[[], datetime] | None = None,
         only_tenants: Collection[uuid.UUID] | None = None,
+        maintenance: chat_maintenance.ChatMaintenance | None = None,
     ) -> None:
+        self.maintenance = maintenance
         self.queue = queue
         self.tenant_sessions = tenant_sessions
         self.store = store
@@ -188,6 +222,11 @@ class Sweeper:
             except Exception as exc:
                 # One tenant's trouble must not stop the others
                 logger.error("sweeper_tenant_failed error=%s", type(exc).__name__)
+            if self.maintenance is not None:
+                try:  # after the document tasks, so the queue rows of a purge made in this run are drained in it
+                    await self._chat_maintenance(ref, self.maintenance, report)
+                except Exception as exc:
+                    logger.error("sweeper_chat_maintenance_failed error=%s", type(exc).__name__)
 
         report.jobs_purged = await self.queue.purge_finished(
             days=self.config.finished_job_retention_days, only_tenants=self.only_tenants
@@ -241,6 +280,8 @@ class Sweeper:
             ).scalars().all()
             if not ids:
                 return 0
+            # One blank-queue row per purged document, in this transaction (plan 9.4, C21)
+            await document_upload.schedule_citation_blanking(db, ref.tenant_id, list(ids))
             keys = (
                 await db.execute(
                     text("SELECT storage_key FROM app.document_versions WHERE tenant_id = :t AND document_id = ANY(:ids)").bindparams(
@@ -258,6 +299,63 @@ class Sweeper:
                 {"t": ref.tenant_id, "ids": list(ids)},
             )
         return len(ids)
+
+    # ── Chat maintenance (step 6a-12b) ───────────────────────────────────────
+
+    async def _read_retention(self, ref: TenantRef) -> int | None:
+        """The tenant's chat retention through a tenant session: None (no row, or NULL) means keep everything."""
+        async with self.tenant_sessions.for_job(ref) as db:
+            return (await chat_settings.read_effective(db, ref.tenant_id)).retention_days
+
+    async def _chat_maintenance(
+        self, ref: TenantRef, maint: chat_maintenance.ChatMaintenance, report: SweepReport
+    ) -> None:
+        retention_days = await self._read_retention(ref)
+        stale = 0
+        deleted = chat_maintenance.RetentionCounts()
+        blanked: list[chat_maintenance.BlankedDocument] = []
+        try:
+            stale = await maint.mark_stale_pending(ref)
+            try:
+                deleted = await maint.delete_expired(ref, retention_days)
+            except chat_maintenance.RetentionInterrupted as exc:
+                deleted = exc.counts  # the batches that did commit are still counted and audited
+                raise
+            blanked = await maint.drain_blank_queue(ref)
+        finally:
+            report.stale_marked += stale
+            report.conversations_deleted += deleted.conversations
+            report.messages_deleted += deleted.messages
+            report.usage_events_deleted += deleted.usage_events
+            report.blanked_documents += len(blanked)
+            report.blanked_citations += sum(b.citations for b in blanked)
+            await self._audit_chat_maintenance(ref, retention_days, stale, deleted, blanked)
+
+    async def _audit_chat_maintenance(
+        self, ref: TenantRef, retention_days: int | None, stale: int, deleted: chat_maintenance.RetentionCounts,
+        blanked: list[chat_maintenance.BlankedDocument],
+    ) -> None:
+        """Counts only, never text (plan 9.4, 9.6). Written in a separate tenant session: app_chat_maint has no grant on
+        audit_log. Nothing is written for a run that did nothing."""
+        if not (stale or deleted.any or blanked):
+            return
+        async with self.tenant_sessions.for_job(ref) as db:
+            if stale or deleted.any:
+                await record_audit_event(
+                    tenant_id=ref.tenant_id, action="chat:retention_purge", target_type="tenant",
+                    target_id=str(ref.tenant_id),
+                    details={
+                        "retention_days": retention_days, "conversations": deleted.conversations,
+                        "messages": deleted.messages, "usage_events": deleted.usage_events,
+                        "stale_pending_marked": stale,
+                    },
+                    actor_id=None, db=db,
+                )
+            for item in blanked:
+                await record_audit_event(
+                    tenant_id=ref.tenant_id, action="chat:citation_blank", target_type="document",
+                    target_id=str(item.document_id), details={"citations": item.citations}, actor_id=None, db=db,
+                )
 
     async def _drain_outbox(self, ref: TenantRef) -> tuple[int, int]:
         deleted = retried = 0
@@ -306,9 +404,11 @@ async def run_sweeper_loop(sweeper: Sweeper, stop: asyncio.Event) -> None:
             report = await sweeper.run_once()
             if report.ran:
                 logger.info(
-                    "sweeper_run failed_jobs=%d recreated_jobs=%d files_deleted=%d tombstones=%d jobs_purged=%d",
+                    "sweeper_run failed_jobs=%d recreated_jobs=%d files_deleted=%d tombstones=%d jobs_purged=%d "
+                    "stale_marked=%d conversations_deleted=%d messages_deleted=%d usage_deleted=%d blanked_documents=%d",
                     report.failed_jobs, report.recreated_jobs, report.files_deleted,
-                    report.tombstones_purged, report.jobs_purged,
+                    report.tombstones_purged, report.jobs_purged, report.stale_marked, report.conversations_deleted,
+                    report.messages_deleted, report.usage_events_deleted, report.blanked_documents,
                 )
         except Exception as exc:
             logger.error("sweeper_run_failed error=%s", type(exc).__name__)

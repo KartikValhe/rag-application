@@ -1223,7 +1223,8 @@ async def purge_document(
 ) -> Response:
     """
     Hard-delete a soft-deleted document now: the tombstone, its versions (chunks, jobs and links
-    cascade) and its files. The outbox rows are written in the same transaction as the delete, so a
+    cascade) and its files, and queues the blanking of its chat citations (worker, plan 9.4). The outbox
+    rows are written in the same transaction as the delete, so a
     file that cannot be deleted right now is still deleted later by the sweeper.
     """
     tid = user.tenant_id
@@ -1247,6 +1248,9 @@ async def purge_document(
             ).scalars()
         )
         await document_upload.schedule_storage_deletions(db, tid, keys, "document_purged")
+        # The worker blanks the chat citations of this document through this outbox row, written in the SAME
+        # transaction (a purge that rolls back leaves no row). The API never touches the maintenance connection.
+        await document_upload.schedule_citation_blanking(db, tid, [document_id])
         await db.execute(delete(Document).where(Document.tenant_id == tid, Document.id == document_id))
         await record_audit_event(
             tenant_id=tid,

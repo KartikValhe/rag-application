@@ -34,7 +34,7 @@ KEYS = {"chat_enabled", "retention_days", "allowed_llm_providers", "daily_token_
 
 
 def _defaults() -> dict[str, Any]:
-    return {"chat_enabled": True, "retention_days": 90, "allowed_llm_providers": None, "daily_token_budget": None,
+    return {"chat_enabled": True, "retention_days": None, "allowed_llm_providers": None, "daily_token_budget": None,
             "effective_daily_token_budget": settings.LLM_TENANT_DAILY_TOKENS}
 
 
@@ -95,7 +95,67 @@ async def test_a_stored_budget_above_a_lowered_ceiling_shows_the_platform_defaul
     assert (body["daily_token_budget"], body["effective_daily_token_budget"]) == (5000, settings.LLM_TENANT_DAILY_TOKENS)
 
 
+async def test_get_shows_a_null_retention_as_null(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    """Q4 (owner): a null retention is a value (keep everything), shown as null, not as a default number."""
+    w = academic_world.a
+    raw_db.add(TenantSettings(tenant_id=w.id, chat_retention_days=None))
+    await raw_db.commit()
+    resp = await client.get(URL, headers=auth(w, w.admin))
+    assert resp.status_code == 200 and resp.json()["retention_days"] is None
+
+
+async def test_a_tenant_row_made_by_the_defaults_path_keeps_everything(
+    academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    """New tenants and tenants with no row default to null (C35, option a): the default row holds NULL, not 90."""
+    w = academic_world.a
+    async with tenant_session_context(str(w.id)) as db:
+        assert await tenant_settings.create_default_settings(db, w.id) is True
+    row = await _row(raw_db, w)
+    assert row is not None and row.chat_retention_days is None
+
+
 # ── PATCH ─────────────────────────────────────────────────────────────────────
+
+
+async def test_patch_can_set_a_period_and_then_set_it_back_to_null_with_an_audit_row_each_time(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    w = academic_world.a
+    first = await _patch(client, w, {"retention_days": 90})
+    assert first.status_code == 200 and first.json()["retention_days"] == 90
+    back = await _patch(client, w, {"retention_days": None})
+    assert back.status_code == 200, back.text
+    assert back.json() == _defaults()
+    row = await _row(raw_db, w)
+    assert row is not None and row.chat_retention_days is None and row.updated_by == w.admin.id
+    audits = await _audits(raw_db, w)
+    assert [a.details for a in audits] == [
+        {"changes": {"retention_days": {"old": None, "new": 90}}},
+        {"changes": {"retention_days": {"old": 90, "new": None}}},
+    ]
+    assert audits[1].actor_id == w.admin.id
+
+
+async def test_patching_null_when_it_is_already_null_changes_and_audits_nothing(
+    client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    w = academic_world.a
+    resp = await _patch(client, w, {"retention_days": None})
+    assert resp.status_code == 200 and resp.json()["retention_days"] is None
+    assert await _audits(raw_db, w) == []
+
+
+@pytest.mark.parametrize("value", [30, 3650])
+async def test_the_edges_of_the_valid_range_are_stored(
+    value: int, client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession
+) -> None:
+    w = academic_world.a
+    assert (await _patch(client, w, {"retention_days": value})).json()["retention_days"] == value
+    row = await _row(raw_db, w)
+    assert row is not None and row.chat_retention_days == value
 
 
 async def test_patch_without_a_row_inserts_it_and_audits_the_changes(
@@ -114,7 +174,7 @@ async def test_patch_without_a_row_inserts_it_and_audits_the_changes(
     assert len(audits) == 1
     audit = audits[0]
     assert (audit.actor_id, audit.target_type, audit.target_id) == (w.admin.id, "tenant_settings", str(w.id))
-    assert audit.details == {"changes": {"retention_days": {"old": 90, "new": 30},
+    assert audit.details == {"changes": {"retention_days": {"old": None, "new": 30},
                                          "allowed_llm_providers": {"old": None, "new": ["groq"]}}}
 
 
@@ -154,7 +214,8 @@ async def test_patch_changes_only_the_named_fields_and_audits_only_real_changes(
 @pytest.mark.parametrize(("body", "code"), [
     ({}, "invalid_setting"), ([], "invalid_setting"), ("x", "invalid_setting"), ({"bot_name": "Ada"}, "invalid_setting"),
     ({"chat_enabled": "no"}, "invalid_setting"), ({"retention_days": 0}, "invalid_setting"),
-    ({"retention_days": 731}, "invalid_setting"), ({"allowed_llm_providers": ["Groq"]}, "provider_not_allowed"),
+    ({"retention_days": 29}, "invalid_setting"), ({"retention_days": 3651}, "invalid_setting"),
+    ({"retention_days": "90"}, "invalid_setting"), ({"retention_days": 90.0}, "invalid_setting"), ({"allowed_llm_providers": ["Groq"]}, "provider_not_allowed"),
     ({"allowed_llm_providers": [" groq"]}, "provider_not_allowed"),
     ({"allowed_llm_providers": ["groq", "groq"]}, "invalid_setting"),
     ({"daily_token_budget": 0}, "token_budget_invalid"),
@@ -186,12 +247,12 @@ async def test_the_row_is_the_callers_tenant_only(client: AsyncClient, academic_
     assert (await _patch(client, a, {"chat_enabled": False})).status_code == 200
     assert await _row(raw_db, b) is None
     assert (await client.get(URL, headers=auth(b, b.admin))).json() == _defaults()
-    assert (await _patch(client, b, {"retention_days": 10})).status_code == 200
+    assert (await _patch(client, b, {"retention_days": 40})).status_code == 200
     row_a, row_b = await _row(raw_db, a), await _row(raw_db, b)
     assert row_a is not None and row_b is not None
-    assert (row_a.chat_enabled, row_a.chat_retention_days) == (False, 90)
-    assert (row_b.chat_enabled, row_b.chat_retention_days) == (True, 10)
-    assert [x.details for x in await _audits(raw_db, b)] == [{"changes": {"retention_days": {"old": 90, "new": 10}}}]
+    assert (row_a.chat_enabled, row_a.chat_retention_days) == (False, None)
+    assert (row_b.chat_enabled, row_b.chat_retention_days) == (True, 40)
+    assert [x.details for x in await _audits(raw_db, b)] == [{"changes": {"retention_days": {"old": None, "new": 40}}}]
 
 
 async def test_the_chat_reads_what_patch_wrote(client: AsyncClient, academic_world: AcademicWorld, raw_db: AsyncSession) -> None:
@@ -249,6 +310,6 @@ async def test_the_settings_routes_never_hold_two_connections(
 ) -> None:
     w = academic_world.a
     assert (await client.get(URL, headers=auth(w, w.admin))).status_code == 200
-    assert (await _patch(client, w, {"retention_days": 12})).status_code == 200
+    assert (await _patch(client, w, {"retention_days": 60})).status_code == 200
     assert pool_watch.peak == 1, f"{pool_watch.peak} connections were checked out at the same time"
     assert int(app_engine.pool.checkedout()) == 0  # type: ignore[attr-defined]

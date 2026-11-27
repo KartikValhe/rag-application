@@ -645,7 +645,7 @@ name or score is in the stream.
 | `stream_interrupted` | `error` event (`partial: true`) | message | the provider failed mid-answer; the partial text is kept and marked |
 | `answer_unavailable` | `error` event | message | every provider failed and the retrieval-only fallback is off |
 | `internal_error` | 500 or `error` event | any | unexpected; fixed text |
-| `invalid_setting` | 422 | admin settings | **(6a-12a, owner)** anything refused that is not a provider or a budget: the body is not a JSON object or is empty, an unknown field (there is no bot-name setting), a wrong type of `chat_enabled`, `retention_days` or the provider list (no strings for numbers, no `1.0`, no `true` for a number), `retention_days` outside 1-730, `chat_enabled` not a boolean, a provider list that is not a list of strings or has a duplicate. A body that is not JSON at all gets FastAPI's own 422 |
+| `invalid_setting` | 422 | admin settings | **(6a-12a, owner)** anything refused that is not a provider or a budget: the body is not a JSON object or is empty, an unknown field (there is no bot-name setting), a wrong type of `chat_enabled`, `retention_days` or the provider list (no strings for numbers, no `1.0`, no `true` for a number), `retention_days` that is not null and not a whole number from 30 to 3650 (**6a-12b, owner Q4**: null is valid and means keep everything; it was 1-730), `chat_enabled` not a boolean, a provider list that is not a list of strings or has a duplicate. A body that is not JSON at all gets FastAPI's own 422 |
 | `provider_not_allowed` | 422 | admin settings | **(6a-12a, owner)** a name in `allowed_llm_providers` that is not EXACTLY a provider name of `models.json` (no case folding, no trimming) |
 | `token_budget_invalid`, `token_budget_above_platform_ceiling` | 422 | admin settings | **(6a-12a, owner: the 6a-5 codes kept)** `daily_token_budget` not null and not a positive whole number; above `LLM_PLATFORM_DAILY_TOKENS` |
 | `invalid_cursor` | 422 | conversation list, history | **(6a-12a)** the history's `before` is not the canonical id of a message of THIS conversation (malformed, another conversation, another user, another tenant, none): one code for every case |
@@ -706,7 +706,7 @@ Every message is fixed text: never a provider message, a model name, SQL, a path
 |---|---|---|
 | `tenant_id` | uuid PK, FK tenants CASCADE | |
 | `chat_enabled` | bool NOT NULL DEFAULT true | |
-| `chat_retention_days` | int NOT NULL DEFAULT 90 CHECK 1..730 | Q4 |
+| `chat_retention_days` | int **NULL, no default**, CHECK NULL or 30..3650 | Q4. **Changed in 6a-12b (owner, C35 option a; migration `0014`):** it was `NOT NULL DEFAULT 90 CHECK 1..730` (`0012`). NULL means **never delete** (new tenants and tenants with no row); a tenant admin must set a period on purpose |
 | `allowed_llm_providers` | text[] NULL | NULL = platform chain; `{}` = no LLM (retrieval-only); otherwise can only narrow |
 | `chat_daily_token_budget` | int NULL CHECK > 0 | NULL = platform default; above the platform ceiling refused (422) |
 | `updated_at`, `updated_by` | | |
@@ -900,7 +900,14 @@ readable by `settings:manage` in aggregate later (Phase 8 usage page).
 - **Retention safety (owner decision, 6a-12a brief; built in 6a-12b).** The retention delete does **nothing** unless an explicit retention
   value is set: client question Q4 is still open, so **no default value may delete anything** (not the column default of 90, not a setting's
   default). It deletes in small batches, a dry-run count (what would be deleted, nothing deleted) is testable, and the audit rows hold
-  counts only, never text. How "explicit" is told apart from the column default is open (C35).
+  counts only, never text. **Decided in 6a-12b (owner, C35 option a, Q4):** "explicit" is a non-NULL `chat_retention_days`; the column is
+  nullable with no default (migration `0014`), so a tenant created without a choice is NULL and keeps everything. For a NULL (or a tenant
+  with no row) the worker deletes **nothing at all**: no conversation and no usage event (the `LLM_USAGE_RETENTION_DAYS` delete also waits
+  for a period), it opens no connection for the delete and writes no audit row. A period is a whole number of days from 30 to 3650; the
+  maintenance code refuses any other value (a bool, a float, 29, 3651) before it touches a connection. The value is read through an
+  `app_tenant` session (the maintenance role has no grant on `tenant_settings`). Marking stale pending answers and blanking citations of
+  purged documents are not retention deletes and run for every tenant. A run writes one `chat:retention_purge` row only when it changed
+  something, and a run that fails after some batches committed still audits what really went (`RetentionInterrupted`).
 - **Stale pending rows (review 6-0b, changed in 6-0c, C22):** each run, per tenant, the sweeper marks assistant rows with
   `outcome = 'pending'` and `created_at` older than `CHAT_PENDING_STALE_SECONDS` (120) as `interrupted` (`partial = true`,
   `completed_at` set) with **one UPDATE through `app_chat_maint`**, in the same tenant-set maintenance transaction as the other steps.
@@ -937,7 +944,7 @@ readable by `settings:manage` in aggregate later (Phase 8 usage page).
 |---|---|---|
 | `chat:settings_update` | admin | changed keys with old and new values (provider names, numbers) |
 | `chat:conversation_delete` | owner | conversation id, message count |
-| `chat:retention_purge` | system | conversations, messages, usage events deleted, stale pending rows marked `interrupted` (review 6-0b) |
+| `chat:retention_purge` | system | `{retention_days (null when none), conversations, messages, usage_events, stale_pending_marked}`: counts only (review 6-0b; 6a-12b). Target `tenant`. Written only when a run changed something |
 | `chat:citation_blank` | system | document id, citation count (written by the sweeper when it drains the blank queue after a document purge; review 6-0c) |
 Conversation creation, messages and feedback are **not** audited (high volume, the rows themselves are the record).
 
@@ -967,6 +974,11 @@ Conversation creation, messages and feedback are **not** audited (high volume, t
    assistant row or a user row, or any other column of a pending one (review 6-0c)**, cannot touch any other table), plus a queue test
    (`app_tenant` can INSERT and cannot SELECT, UPDATE or DELETE; `app_chat_maint` can SELECT and DELETE and cannot INSERT; another tenant's
    queue rows are invisible).
+2b. **`0014_chat_retention_optional.py` (6a-12b, owner decision C35 option a):** `tenant_settings.chat_retention_days` becomes nullable with no
+   default, and its CHECK becomes `NULL or BETWEEN 30 AND 3650`. **It never changes a row** (a static test reads its statements). It refuses
+   to run, changing nothing, when a row holds fewer than 30 days (the 6a-12a route accepted 1 to 729): the owner decides those. Its downgrade
+   refuses while any row holds NULL or more than 730 days (NULL must never become a deletion period). `0012` keeps its own frozen literals
+   (90, 1, 730); the model's constants moved with `0014`.
 3. Each migration runs `upgrade head` / `downgrade -1` / `upgrade head` in CI (existing job) and has a schema test
    (`test_phase6_schema.py`) for FORCE RLS, the policies, the grants per role and the FK actions.
 4. No data migration of existing tables. Both are additive (expand only); nothing to contract.
@@ -1026,7 +1038,9 @@ A small `app/scripts/chat_report.py` (development and operators) prints these pe
 | `test_chat_leaks.py` | db, security | canaries (11.2) |
 | `test_chat_route_matrix.py` | db, security | every chat route x role (admin, teacher in scope, teacher out of scope, student enrolled, student not enrolled, other tenant, custom role without `chat:use`): expected status, generated from the route table |
 | `test_chat_logs.py` | db, security | question, answer, chunk and key canaries never appear in captured logs on every path |
-| `test_chat_retention.py` | db | sweep deletes only expired, **only through the `app_chat_maint` connection** (the `app_tenant` role cannot delete another user's rows or any usage event), audit counts (written by an `app_tenant` session); purge blanking updates `snippet` and `heading_path` of other users' citations (the case the old design broke) and nothing else; stale `pending` rows are marked `interrupted` by the sweeper **through `app_chat_maint`** (fake clock), fresh ones are not (review 6-0b, 6-0c). **Review 6-0c, outbox:** the purge route inserts exactly one queue row in the purge transaction (and none when the purge rolls back); the sweeper blanks the citations of that document for all users, deletes the queue row, and a run that fails before commit leaves the row so the next run repeats it; the API process works with `CHAT_MAINT_DATABASE_URL` unset |
+| `test_chat_retention.py` | db | sweep deletes only expired, **only through the `app_chat_maint` connection** (the `app_tenant` role cannot delete another user's rows or any usage event), audit counts (written by an `app_tenant` session); purge blanking updates `snippet` and `heading_path` of other users' citations (the case the old design broke) and nothing else; stale `pending` rows are marked `interrupted` by the sweeper **through `app_chat_maint`** (fake clock), fresh ones are not (review 6-0b, 6-0c). **Review 6-0c, outbox:** the purge route inserts exactly one queue row in the purge transaction (and none when the purge rolls back); the sweeper blanks the citations of that document for all users, deletes the queue row, and a run that fails before commit leaves the row so the next run repeats it; the API process works with `CHAT_MAINT_DATABASE_URL` unset. **6a-12b additions (Q4, C35):** a NULL retention or a tenant with no row loses no conversation and no usage event and gets no audit row; a dry run counts and deletes nothing; every maintenance transaction refuses a superuser or `app_tenant` connection; batches and the per-run batch limit; a run that fails after some batches still audits what it deleted; one tenant's failure does not stop the next; a sweeper without the maintenance object leaves chat alone |
+| `test_chat_maintenance_pure.py` | fast, security | 6a-12b: the worker refuses a maintenance URL whose user is not `app_chat_maint` (no URL or password in the message), unset is allowed; a null retention does nothing and opens no connection; any period that is not a whole number 30 to 3650 is refused before a connection; settings, guard list, `.env.example` |
+| `test_chat_retention_migration_0014.py` | fast, security | 6a-12b: migration `0014` (nullable, no default, CHECK NULL or 30 to 3650) issues no UPDATE, INSERT or DELETE; refuses below-30 rows and an RLS-bound role; the downgrade refuses NULL |
 | `test_phase6_schema.py` | db, security | FORCE RLS, policies, grants per role (incl. `app_chat_maint`: SELECT, DELETE, the column UPDATEs on citations and on `messages`, no INSERT, no other table; `app_tenant`: INSERT only on the queue), FK actions, the partial unique index on assistant `reply_to_id`, isolation registry guard; source scans for the maintenance URL (worker only, the API never reads it) and for the retired `chat_maintenance` setting (review 6-0b, 6-0c). **Review 6-0c, maintenance-role UPDATE test:** as `app_chat_maint` with the tenant set, an UPDATE of a finished assistant row (any outcome but `pending`) changes zero rows, an UPDATE of a user row changes zero rows, an UPDATE of any column outside `outcome`, `partial`, `completed_at` (`content`, `role`, `user_id`, `tenant_id`) is refused by the grant, and marking a stale pending assistant row `interrupted` works |
 | `test_auth_released_session.py` | db, security | the B100 fix: no connection held after the permission check (pool introspection) |
 | `test_sse_transport.py` | db | stream not buffered through the middleware stack; disconnect reaches the generator (F11) |
@@ -1298,6 +1312,11 @@ scope of 6a-10 is the union of the three steps below; nothing was dropped.
      open): **no default value may delete anything.** It runs in small batches, a dry-run count is testable, and the audit rows hold counts
      only, never text (9.4). Open point for 6a-12b: `tenant_settings.chat_retention_days` is `NOT NULL DEFAULT 90` (migration `0012`), so a
      stored 90 cannot be told apart from an explicit 90 (C35).
+     **Decided by the owner at the 6a-12b brief (2026-11-27):** C35 option (a): migration `0014` makes the column nullable, NULL means
+     never delete; new tenants and tenants with no row are NULL. Q4: retention is optional per tenant, the default is keep everything, an
+     admin must set a period on purpose, valid values are whole days 30 to 3650 or null (anything else `invalid_setting`), setting null again
+     is allowed and audited as `chat:settings_update`; GET and PATCH show and accept null; the worker never deletes for a null. The
+     existing rows that hold the old default 90 are NOT changed without the owner's answer (build record, 6a-12b).
 
 **6a-13 Security suite, leaks, docs, B108 measurement** · depends on: 6a-11, 6a-12 (now 6a-12b) · risk **H** · **HE**
 - Builds: `test_chat_leaks.py`, `test_chat_logs.py`, `tests/security/test_prove_it_fails_chat.py`, `app/scripts/eval_chat.py`,
@@ -1388,7 +1407,7 @@ Where the plan text still says *(proposed)* for an answered question (Q3, Q6, Q7
 | Q1 | **Paid LLM tier.** The free tiers cannot carry 1,000 questions a day (cost section: roughly 2.4 million tokens a day against an assumed ~100,000-token daily free cap for a 70B model). Do we budget a small paid plan before the pilot, and which answer model? | Develop on the free tier; before the pilot use Groq pay-as-you-go with a daily platform cap. Choose between llama-3.3-70b (~USD 45/month at 1,000 questions/day) and gpt-oss-20b or llama-3.1-8b (~USD 5-10/month) from the 6a-6 Marathi measurement. All prices **UNVERIFIED** until checked on the pricing pages. Blocks 6a-3 config and every cost number | **Pending owner/client** |
 | Q2 | **Data processing and consent.** Questions of possibly minor students go to a US provider with zero retention. Is that acceptable to the pilot institution (consent, DPDP), and do you want the in-chat "AI, don't type personal information" notice? | Yes to the notice; get the institution's written OK before real students use it; keep the 6a-6 launch gate (ZDR attested). Blocks real data, not the build | **Pending owner/client** |
 | Q3 | **Status for a class the student is not enrolled in:** the plan's exit criterion says 403; CLAUDE.md and the Phase 5 design say the generic 404. | **404**, same body as every "not found" (no probing of class ids). I will update the plan's exit criterion wording | **Decided: 404** (generic, same body as every "not found") |
-| Q4 | **Retention and access:** default chat retention, student self-delete, admin reading. | 90 days default (1-730 per tenant), students may delete their own conversations at once, **no** admin or teacher reading in Phase 6 (plan section 5 default) | **Pending owner/client** |
+| Q4 | **Retention and access:** default chat retention, student self-delete, admin reading. | 90 days default (1-730 per tenant), students may delete their own conversations at once, **no** admin or teacher reading in Phase 6 (plan section 5 default) | **Pending owner/client** for the default period and admin reading. **Owner decision, 6a-12b brief (2026-11-27), recorded here:** retention is **optional per tenant** and the default is **keep everything** (`null`); a tenant admin must set a period on purpose, whole days from **30 to 3650**, and may set it back to `null` (audited as `chat:settings_update`). Anything else is `invalid_setting`. The retention worker never deletes anything for a tenant whose value is `null`. Student self-delete and "no admin or teacher reading" stand as proposed |
 | Q5 | **Languages at launch:** English and Marathi only, or Hindi too? The golden set and calibration have no Hindi rows. | English and Marathi; Hindi after it has golden-set rows and a 6a-6 measurement | **Pending owner/client** |
 | Q6 | **Acknowledged flagged chunks in chat:** include them marked (plan "flag, never drop") or exclude them until Phase 7? | Include, marked `flagged="true"`, and mark answers that cite only flagged sources for review | **Decided: include, marked** (`CHAT_FLAGGED_SOURCES = "mark"`) |
 | Q7 | **Retrieval-only fallback** when every provider is down or the budget is used up: show the best passages with the honest "may not answer it" sentence, or only "try again later"? | Show passages with the honest wording: zero cost and still useful; the wording addresses B108 | **Decided: show passages with the honest wording** (`CHAT_FALLBACK_RETRIEVAL_ONLY = true`) |
@@ -1483,7 +1502,7 @@ about USD 1.3 a day whatever happens.
 | C32 | **(6a-10c)** The 6a-10c brief asks for `budget_retrieval_only` (over budget) and `fallback_retrieval_only` (chain exhausted); section 12 puts the "retrieval-only fallback (all providers down, budget exhausted)" in 6a-11 | 6a-10c brief vs 12 (6a-11) | Built in 6a-10c as the brief asks (7.5 with `CHAT_FALLBACK_RETRIEVAL_ONLY`); 6a-11 keeps condensing, tenant `allowed_llm_providers` narrowing and one usage row per failed attempt |
 | C33 | **(6a-11)** 5.1 puts "the (PII-masked, condensed if a follow-up) question" in the final user message of the answer prompt; the owner's 6a-11 brief (decision 1) says the condensed text is for RETRIEVAL ONLY and is never placed in the answer prompt | 5.1 vs 6a-11 brief | Built as the owner decided: the answer prompt always holds the original masked question (and the history); the condensed line goes only to the embedding and `search_for_chat` and is stored in `messages.retrieval_query`. 5.1 left as written (owner to correct it) |
 | C34 | **(6a-11)** 2.1 [D] runs condense before the embedding, but the history and the tenant settings were read in T2 (after the search, 6a-10c) | 2.1 vs 6a-10c | A condense candidate reads history, institution name and LLM settings in one extra short transaction before the condense call (no transaction is open during the call); T2 then reuses them. A non-candidate turn is unchanged (no extra transaction) |
-| C35 | **(6a-12a)** Owner decision 3 (6a-12a brief) says the retention delete does nothing unless an explicit retention value is set and no default may delete anything; `tenant_settings.chat_retention_days` is `NOT NULL DEFAULT 90` (9.1, migration `0012`, backfilled for every tenant), so a stored 90 cannot be told apart from an explicit 90, and the settings route (6a-12a) reports 90 as the effective value | owner decision 3 vs 9.1 / `0012` | Not decided here (nothing deletes in 6a-12a). Options for 6a-12b, owner to choose: (a) a migration that makes the column NULL-able with NULL = no deletion (then GET shows `null` until an admin sets a value; a migration needs a test that proves it and an owner stop); (b) a platform switch (for example `CHAT_RETENTION_DELETE_ENABLED`, default false) plus the tenant value, so nothing deletes until the operator turns it on after Q4; (c) an explicit marker set only by PATCH. Recommendation: (a) if Q4 may leave some tenants without retention, else (b) |
+| C35 | **(6a-12a)** Owner decision 3 (6a-12a brief) says the retention delete does nothing unless an explicit retention value is set and no default may delete anything; `tenant_settings.chat_retention_days` is `NOT NULL DEFAULT 90` (9.1, migration `0012`, backfilled for every tenant), so a stored 90 cannot be told apart from an explicit 90, and the settings route (6a-12a) reports 90 as the effective value | owner decision 3 vs 9.1 / `0012` | **Decided by the owner (6a-12b brief, 2026-11-27): option (a)**, with the optional-retention rule of Q4 (below the options). Migration `0014` makes the column nullable with no default; new tenants and tenants with no row are `null`; GET and PATCH show and accept `null`. Existing rows that hold the old default of 90 are **not changed by the migration**: see the 6a-12b build record for how they can be told apart and the open question. Options as first written (for the record): (a) a migration that makes the column NULL-able with NULL = no deletion (then GET shows `null` until an admin sets a value; a migration needs a test that proves it and an owner stop); (b) a platform switch (for example `CHAT_RETENTION_DELETE_ENABLED`, default false) plus the tenant value, so nothing deletes until the operator turns it on after Q4; (c) an explicit marker set only by PATCH. Recommendation: (a) if Q4 may leave some tenants without retention, else (b) |
 
 ---
 
@@ -2697,3 +2716,80 @@ about USD 1.3 a day whatever happens.
 - The `db`-only files whose code paths changed (the gate does not select them): `run_tests full tests/test_chat_api.py
   tests/test_sse_transport.py tests/test_chat_schedule.py tests/test_tenant_settings.py`: `86 passed in 122.24s (0:02:02)`.
 - `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 143 source files`
+
+### 6a-12b Worker maintenance: retention, stale answers, citation blanking; optional retention · 2026-11-27 · not committed
+
+- **Owner decisions of the 6a-12b brief (recorded in 9.1, 9.4, 9.7, Q4 and C35):** C35 option (a): migration `0014` makes
+  `tenant_settings.chat_retention_days` nullable with no default, NULL = never delete; new tenants and tenants with no row are NULL. Q4:
+  retention is optional per tenant; an admin must set a period on purpose; valid values are whole days 30 to 3650 or null, anything else
+  `invalid_setting`; setting null again is allowed and audited as `chat:settings_update`; GET and PATCH show and accept null; the worker
+  never deletes anything for a null. `docs/implementation_plan.md:542` now says the generic 404 (was 403).
+- **Built:** migration `0014_chat_retention_optional.py`; `app/services/chat_maintenance.py` (`ChatMaintenance`, `check_url_user`,
+  `validate_retention_days`, `RetentionCounts`, `RetentionInterrupted`); settings `CHAT_MAINT_DATABASE_URL` (SecretStr, unset = no chat
+  maintenance in that worker) and `LLM_USAGE_RETENTION_DAYS` (400, 30 to 3650), the test-DB guard entry and `.env.example` lines;
+  `document_upload.schedule_citation_blanking` (the outbox insert), called by the purge route and by the sweeper's tombstone purge in
+  their own transactions; `Sweeper(maintenance=...)` with `_chat_maintenance` (stale marking, retention and usage delete, queue drain,
+  audit rows in a separate `app_tenant` session), `maintenance_problems`, `maintenance_from_settings`; the worker start refuses a URL whose
+  user is not `app_chat_maint` and checks the role with `SELECT current_user` before it starts; `chat_settings`, the schemas and the
+  `tenant_settings` model for null and the new bounds. `0012` keeps its own frozen literals (90, 1, 730). No frontend, no `.github`.
+- **How a stored 90 that nobody chose can be told apart (the C35 question; nothing was changed).** Before this step no route could write
+  the row (the settings route is 6a-12a, 2026-11-26), and every route write sets `updated_by` and writes a `chat:settings_update` audit
+  row that names `retention_days` with old and new values. A default row (backfill, `create_default_settings`) has `updated_by NULL`. So
+  "never chosen" = `chat_retention_days = 90 AND updated_by IS NULL AND no chat:settings_update audit row with retention_days in its
+  changes`. Limits: `updated_by` is NULL again if the admin user was deleted (FK `ON DELETE SET NULL`) and is set by ANY field change; a
+  PATCH of 90 when it already was 90 is a no-op that leaves no trace anywhere. Read-only query (run as the superuser, RLS is forced; I
+  ran it only on the test database): `SELECT count(*) FILTER (WHERE chat_retention_days = 90) AS rows_at_90, count(*) FILTER (WHERE
+  chat_retention_days = 90 AND updated_by IS NULL AND NOT EXISTS (SELECT 1 FROM app.audit_log a WHERE a.tenant_id = s.tenant_id AND
+  a.action = 'chat:settings_update' AND a.details->'changes' ? 'retention_days')) AS never_chosen_90, count(*) FILTER (WHERE
+  chat_retention_days < 30) AS blocks_migration FROM app.tenant_settings s;`. **Until the owner answers, the migration leaves every
+  stored 90 as it is, and the worker treats a stored 90 as a real 90-day period.** Deletion starts only where `CHAT_MAINT_DATABASE_URL` is
+  set in the worker (unset in every existing deployment), so nothing is deleted before the owner decides.
+- **Decisions where the plan or the brief was unclear (owner to confirm):** (1) A NULL retention also skips the `llm_usage_events`
+  delete (the brief says "never delete anything for a tenant whose value is null"); the plan's platform-wide 400-day delete therefore
+  only runs for tenants with a period. (2) Stale-answer marking and citation blanking run for every tenant (they are not retention
+  deletes). (3) The `chat:retention_purge` audit row is written only when a run changed something (hourly zero rows would drown the
+  log) and also carries `retention_days` and the stale count; a run that fails after some batches committed still audits them. (4) The
+  migration refuses to run when a row holds fewer than 30 days (the 6a-12a route accepted 1 to 729) instead of rewriting it, and its
+  downgrade refuses while a row holds NULL or more than 730 (NULL must never become 90). (5) An unset `CHAT_MAINT_DATABASE_URL` is not a
+  start error: that worker logs `chat_maint_off` and does no chat maintenance; a wrong user name stops the start. (6) Per run,
+  tenant and kind at most 50 batches of 500 (a large tenant finishes over several hours); the queue drain uses the same limits. (7)
+  Blanking sets both `snippet` and `heading_path` to `''` (the history route's rule). (8) A PATCH of null when it already is null is a
+  no-op: no audit row. (9) The scan test needed no change: the wiring helpers live in `sweeper.py`, and `ingest.py` never names the
+  maintenance module or URL.
+- **Tests (`tier_map.py`):** `test_chat_maintenance_pure.py` (`fast, security`), `test_chat_retention_migration_0014.py` (`fast,
+  security`), `test_chat_retention.py` (`db, security`), helpers `tests/fixtures/maint_world.py`; changed for the new rules:
+  `test_chat_settings_pure.py`, `test_chat_settings_api.py`, `test_phase6_schema.py` (default NULL, CHECK 30 to 3650 or null),
+  `test_worker_entry.py` (+2). The test connection is the superuser URL with `role=app_chat_maint` as a start-up setting.
+- **Red first:** the two new modules failed at import (`ImportError: cannot import name 'chat_maintenance' from 'app.services'`, `2
+  errors`); the other changed files `31 failed, 185 passed in 23.85s` (no migration 0014, the old 1 to 730 rule, default 90).
+- **Self-review** (harness: one break in the real file, the named tests run, the original bytes written back, SHA-256 compared after every
+  break and for all nine files at the end: identical, `ALL IDENTICAL: True`). 28 breaks. **Red (25):** the role check removed; a null
+  retention treated as 90 in the maintenance code and in the sweeper; the minimum lowered to 1; expiry `<=`; stale threshold 0; blanking
+  that leaves `heading_path`; a batch loop that stops after one batch; the batch limit ignored; queue rows not deleted; an interrupted run
+  that loses its counts; no `citation_blank` audit; wrong audit counts; no queue row from the tombstone purge; none from the purge route;
+  one tenant's failure stopping the run; the start check always passing and removed from the start; settings that refuse null; the
+  default 90 again; the usage default changed; the guard list without the URL; the migration keeping the default, rewriting stored 90s,
+  or skipping its below-30 check. **Green (3):** a bool accepted as a period (equivalent: `True` is 1, still below 30); the blanking
+  statement without its tenant filter (held by `chat_maint` RLS alone, as designed); the outer no-op audit guard removed (equivalent:
+  the inner guard also stops it). A first round skipped nine breaks because the pattern did not match files with CRLF line endings; the
+  harness was made line-ending aware and those nine ran again.
+- **Test database only:** 31 rows of old test runs held 1, 10, 12 or 29 days and made `0014` stop (as designed); they were set to 30 in
+  `ragplatform_test`, then `prepare_test_db` migrated it to 0014. The 59,716 rows holding 90 were unchanged. The dev database was not touched.
+- **First gate run: 2 regressions of this step, fixed.** `test_chat_source_scans.py::test_only_the_worker_side_names_...` (a log event
+  `chat_maintenance_off` in `ingest.py` matched the scan; renamed `chat_maint_off`) and two rows of `test_tenant_settings.py` that still
+  expected the default 90 (now NULL, the owner's rule). Then, rerun:
+- `run_tests gate` (run alone, test database only): `= 1 failed, 4381 passed, 12 skipped, 1173 deselected, 4 xfailed in 1248.79s
+  (0:20:48) =`. The failure is `security/test_prove_it_fails_retrieval.py::test_7a_rls_alone_holds_and_bypassing_it_is_caught`, the same
+  pre-existing failure as in the earlier records (investigated below, not touched).
+- The `db`-only files whose code paths changed: `run_tests full tests/test_ingest_sweeper.py tests/test_document_routes.py
+  tests/test_tenant_settings.py tests/test_chat_retention.py tests/test_phase6_schema.py tests/test_isolation.py tests/test_chat_api.py
+  tests/test_document_route_matrix.py tests/test_chat_route_matrix.py tests/test_chat_source_scans.py`: `347 passed in 301.38s (0:05:01)`.
+- `ruff check .`: `All checks passed!` · `mypy app`: `Success: no issues found in 144 source files`
+- **test_7a `search_timeout` (investigated, test not changed):** `test_7a_rls_alone_holds_and_bypassing_it_is_caught` fails alone in 7 s
+  with `SearchUnavailable: search_timeout`. It is a slow test, not a product bug: its second search runs as the superuser with the tenant
+  filter and the pair scope switched off, so the vector search scans every tenant's chunks; the test database holds 92,190 chunks
+  (59,742 tenants, 1.1 GB, left by earlier runs) and the scan takes about 25 s against `RETRIEVAL_STATEMENT_TIMEOUT_MS` = 5000. With
+  only that environment variable raised to 120000 the same test passes (`1 passed in 27.89s`). The production search with the filters
+  on stays fast. Proposed fix (needs the owner's go-ahead): give that one privileged call its own config,
+  `dataclasses.replace(search_config(), statement_timeout_ms=120_000)`, which `search_in_session` already accepts; the assertions stay.
+  Also worth a periodic `prepare_test_db --reset` (the failure grows with every full run).

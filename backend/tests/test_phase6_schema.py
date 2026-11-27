@@ -185,7 +185,8 @@ async def test_tenant_settings_columns_and_defaults(raw_db: AsyncSession) -> Non
     }
     assert cols["tenant_id"][:2] == ("uuid", "NO")
     assert cols["chat_enabled"][:2] == ("boolean", "NO")
-    assert cols["chat_retention_days"][:2] == ("integer", "NO")
+    # C35 (owner, 6a-12b): NULL = keep everything, and the column has no default at all.
+    assert cols["chat_retention_days"] == ("integer", "YES", None)
     assert cols["allowed_llm_providers"][:2] == ("ARRAY", "YES")
     assert cols["chat_daily_token_budget"][:2] == ("integer", "YES")
     assert cols["updated_by"][:2] == ("uuid", "YES")
@@ -201,7 +202,7 @@ async def test_tenant_settings_columns_and_defaults(raw_db: AsyncSession) -> Non
             {"t": t.id},
         )
     ).one()
-    assert tuple(row) == (True, 90, None, None, None)
+    assert tuple(row) == (True, None, None, None, None)
 
 
 async def test_tenant_settings_primary_key_is_the_tenant(raw_db: AsyncSession) -> None:
@@ -216,9 +217,14 @@ async def test_tenant_settings_primary_key_is_the_tenant(raw_db: AsyncSession) -
     "column,value,ok",
     [
         ("chat_retention_days", 0, False),
-        ("chat_retention_days", 1, True),
+        ("chat_retention_days", 1, False),
+        ("chat_retention_days", 29, False),
+        ("chat_retention_days", 30, True),
         ("chat_retention_days", 730, True),
-        ("chat_retention_days", 731, False),
+        ("chat_retention_days", 731, True),
+        ("chat_retention_days", 3650, True),
+        ("chat_retention_days", 3651, False),
+        ("chat_retention_days", -1, False),
         ("chat_daily_token_budget", 0, False),
         ("chat_daily_token_budget", -5, False),
         ("chat_daily_token_budget", 1, True),
@@ -232,6 +238,13 @@ async def test_tenant_settings_checks(column: str, value: int, ok: bool, raw_db:
     else:
         with pytest.raises(IntegrityError, match="check constraint"):
             await raw_db.execute(statement, {"t": t.id, "v": value})
+
+
+async def test_an_explicit_null_retention_is_stored_as_null(raw_db: AsyncSession) -> None:
+    t = await _tenant(raw_db)
+    await raw_db.execute(text("INSERT INTO app.tenant_settings (tenant_id, chat_retention_days) VALUES (:t, NULL)"), {"t": t.id})
+    value = (await raw_db.execute(text("SELECT chat_retention_days FROM app.tenant_settings WHERE tenant_id = :t"), {"t": t.id})).scalar_one_or_none()
+    assert value is None
 
 
 # ── llm_usage_events columns: numbers and names only, no content ──────────────────────────────────────

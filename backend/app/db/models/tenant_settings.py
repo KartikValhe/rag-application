@@ -21,9 +21,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models.base import Base
 
-CHAT_RETENTION_DAYS_DEFAULT: Final = 90
-CHAT_RETENTION_DAYS_MIN: Final = 1
-CHAT_RETENTION_DAYS_MAX: Final = 730
+# Q4 and C35 (owner, 6a-12b): chat retention is optional per tenant. NULL (the default, also for a tenant with no row)
+# means keep everything; a period is a whole number of days from 30 to 3650 and must be set by a tenant admin on purpose.
+CHAT_RETENTION_DAYS_MIN: Final = 30
+CHAT_RETENTION_DAYS_MAX: Final = 3650
 
 
 class TenantSettings(Base):
@@ -34,9 +35,8 @@ class TenantSettings(Base):
         UUID(as_uuid=True), ForeignKey("app.tenants.id", ondelete="CASCADE"), primary_key=True
     )
     chat_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    chat_retention_days: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text(str(CHAT_RETENTION_DAYS_DEFAULT))
-    )
+    # NULL = never delete (no server default: nothing may fill in a number). Migration 0014 made it nullable.
+    chat_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # NULL = the platform chain; {} = no LLM at all (retrieval-only); otherwise it can only narrow the chain.
     allowed_llm_providers: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     # NULL = the platform default (LLM_TENANT_DAILY_TOKENS); never above LLM_PLATFORM_DAILY_TOKENS.

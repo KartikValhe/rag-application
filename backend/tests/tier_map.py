@@ -114,6 +114,9 @@ TEST_FILE_TIERS: dict[str, tuple[str, ...]] = {
     "test_chat_feedback.py": ("db", "security"),  # 6a-12a: feedback upsert/delete on the caller's own answers only, cleaned comment, no audit, no logs
     "test_chat_settings_pure.py": ("fast", "security"),  # 6a-12a: settings validation (exact provider names, 6a-5 budget codes, unknown fields) and the change record
     "test_chat_settings_api.py": ("db", "security"),  # 6a-12a: settings GET (creates nothing) and PATCH (upsert, audited changes, tenant only)
+    "test_chat_maintenance_pure.py": ("fast", "security"),  # 6a-12b: the maintenance URL's user, null/invalid retention refused before any connection, settings and guard list
+    "test_chat_retention_migration_0014.py": ("fast", "security"),  # 6a-12b: migration 0014 (nullable retention, 30 to 3650 or null) never changes a row; refusals
+    "test_chat_retention.py": ("db", "security"),  # 6a-12b: retention only through app_chat_maint, null keeps everything, usage events, stale pending, blank queue and the purge outbox
     "test_sse_transport.py": ("db",),  # 6a-9b: F11, stream not buffered and disconnect reaching the generator through the stack
     "test_ml_fetch_model.py": ("fast",),
     "test_ml_loader_async.py": ("fast",),

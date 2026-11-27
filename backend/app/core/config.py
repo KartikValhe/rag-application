@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # process; required by the worker (step 5b). No default and no secret is stored here.
     WORKER_DATABASE_URL: str = ""
 
+    # Chat maintenance connection, role app_chat_maint (plan 9.2, 9.4; step 6a-12b). It lives in the WORKER's environment
+    # only: the API never reads it (a scan test enforces that). Empty = this worker does no chat maintenance (no
+    # retention delete, no stale-pending marking, no citation blanking). The user name must be app_chat_maint or the
+    # worker refuses to start. The role has no password in the repo: the deployment sets it outside the repo (plan 8.8).
+    CHAT_MAINT_DATABASE_URL: SecretStr = SecretStr("")
+
     # ── Redis ───────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: str = ""
@@ -242,8 +248,8 @@ class Settings(BaseSettings):
     CHAT_STREAM_HEARTBEAT_SECONDS: float = Field(default=15, gt=0, le=300)
     # Server-side cap of one answer stream; past it the stream ends with stream_interrupted.
     CHAT_STREAM_MAX_SECONDS: float = Field(default=60, gt=0, le=600)
-    # An assistant row still 'pending' after this many seconds is reported as 'interrupted' (the sweeper of 6a-12
-    # writes it; reads show it at once).
+    # An assistant row still 'pending' after this many seconds is reported as 'interrupted' (the sweeper marks it,
+    # step 6a-12b; reads show it at once).
     CHAT_PENDING_STALE_SECONDS: int = Field(default=120, ge=1, le=86_400)
     # Languages with fixed templates (Q5 pending: en and mr proposed). A detected language that is not listed gets
     # the English templates; the stored language is still the detected one.
@@ -271,6 +277,9 @@ class Settings(BaseSettings):
     # only after the owner answers Q1 (paid tier and answer model) and the 6a-6 token measurement. Do not
     # change them in code: set them in the environment.
     # Tokens one tenant may use per UTC day when its tenant_settings.chat_daily_token_budget is NULL (set after Q1).
+    # llm_usage_events older than this are deleted by the sweeper (plan 9.4), for tenants that have a chat retention
+    # period only (Q4, owner decision of the 6a-12b brief: nothing is deleted for a tenant that keeps everything).
+    LLM_USAGE_RETENTION_DAYS: int = Field(default=400, ge=30, le=3650)
     LLM_TENANT_DAILY_TOKENS: int = Field(default=300_000, ge=1, le=1_000_000_000)
     # Tokens all tenants together may use per UTC day; also the ceiling of a tenant override (set after Q1).
     LLM_PLATFORM_DAILY_TOKENS: int = Field(default=2_000_000, ge=1, le=10_000_000_000)

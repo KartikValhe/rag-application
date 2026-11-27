@@ -132,7 +132,7 @@ class ChatSettingsResponse(_Strict):
     platform default. `effective_daily_token_budget` is the limit the chat applies today."""
 
     chat_enabled: bool
-    retention_days: int
+    retention_days: int | None  # null: keep everything (the default); otherwise whole days from 30 to 3650
     allowed_llm_providers: list[str] | None
     daily_token_budget: int | None
     effective_daily_token_budget: int
@@ -141,7 +141,7 @@ class ChatSettingsResponse(_Strict):
 class ChatSettingsUpdateRequest(_Strict):
     """PATCH /api/v1/admin/chat/settings, as documented in the OpenAPI schema. The route checks the body itself
     (app/services/chat_settings.parse_update), so that every refusal is a stable code: at least one field; booleans
-    and whole numbers only (no strings, no 1.0); retention_days 1-730; allowed_llm_providers null or exact provider
+    and whole numbers only (no strings, no 1.0); retention_days null (keep everything) or 30-3650; allowed_llm_providers null or exact provider
     names of models.json without duplicates (provider_not_allowed); daily_token_budget null or 1 up to the platform
     ceiling (token_budget_invalid, token_budget_above_platform_ceiling); anything else is invalid_setting."""
 

@@ -39,11 +39,12 @@ from app.db.models.llm_usage import (
     USAGE_OUTCOMES,
     USAGE_PURPOSES,
 )
-from app.db.models.tenant_settings import (
-    CHAT_RETENTION_DAYS_DEFAULT,
-    CHAT_RETENTION_DAYS_MAX,
-    CHAT_RETENTION_DAYS_MIN,
-)
+
+# The retention column as THIS migration created it (NOT NULL DEFAULT 90, 1 to 730). Frozen here on purpose: migration
+# 0014 (6a-12b, C35) changed the column and the model's constants moved with it.
+CHAT_RETENTION_DAYS_DEFAULT = 90
+CHAT_RETENTION_DAYS_MIN = 1
+CHAT_RETENTION_DAYS_MAX = 730
 
 revision: str = "0012"
 down_revision: str | None = "0011"

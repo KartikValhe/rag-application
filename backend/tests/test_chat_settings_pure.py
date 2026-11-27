@@ -52,7 +52,7 @@ def test_an_empty_object_is_invalid_setting() -> None:
 
 
 @pytest.mark.parametrize("body", [
-    {"bot_name": "x"}, {"chat_retention_days": 30}, {"tenant_id": "x"}, {"Chat_enabled": True},
+    {"bot_name": "x"}, {"chat_retention_days": 30}, {"retention": 30},{"tenant_id": "x"}, {"Chat_enabled": True},
     {"chat_enabled": True, "extra": 1}, {"effective_daily_token_budget": 5},
 ])
 def test_unknown_fields_are_invalid_setting(body: dict[str, Any]) -> None:
@@ -64,14 +64,27 @@ def test_chat_enabled_must_be_a_boolean(value: object) -> None:
     assert _code({"chat_enabled": value}) == "invalid_setting"
 
 
-@pytest.mark.parametrize("value", [0, 731, -1, None, True, False, 30.0, "30", [30], 10**20])
-def test_retention_days_must_be_a_whole_number_from_1_to_730(value: object) -> None:
+@pytest.mark.parametrize(
+    "value", [0, 1, 29, 3651, 10_000, -1, -30, True, False, 30.0, 90.5, "30", "", "null", [30], {}, [], 10**20, float("nan")]
+)
+def test_retention_days_must_be_null_or_a_whole_number_from_30_to_3650(value: object) -> None:
+    """Q4 (owner): retention is optional; a period is a whole number of days from 30 to 3650, or null (keep everything)."""
     assert _code({"retention_days": value}) == "invalid_setting"
 
 
-@pytest.mark.parametrize("value", [1, 90, 730])
+@pytest.mark.parametrize("value", [30, 31, 90, 730, 731, 3649, 3650])
 def test_retention_days_in_range_are_accepted(value: int) -> None:
     assert parse_update({"retention_days": value}, PROVIDERS) == {"retention_days": value}
+
+
+def test_retention_days_null_is_accepted_and_means_keep_everything() -> None:
+    assert parse_update({"retention_days": None}, PROVIDERS) == {"retention_days": None}
+
+
+def test_the_retention_bounds_are_the_owners_30_and_3650() -> None:
+    from app.db.models.tenant_settings import CHAT_RETENTION_DAYS_MAX, CHAT_RETENTION_DAYS_MIN
+
+    assert (CHAT_RETENTION_DAYS_MIN, CHAT_RETENTION_DAYS_MAX) == (30, 3650)
 
 
 @pytest.mark.parametrize("value", ["groq", {"groq": True}, 1, True, [1], [None], [["groq"]], ["groq", "groq"]])
@@ -136,9 +149,19 @@ def test_the_change_record_holds_only_changed_fields_with_old_and_new_values() -
     assert changes(old, {"chat_enabled": True}) == {}
 
 
+def test_setting_retention_back_to_null_is_a_recorded_change_and_null_to_null_is_not() -> None:
+    kept = ChatSettings(chat_enabled=True, retention_days=90, allowed_llm_providers=None, daily_token_budget=None)
+    assert changes(kept, {"retention_days": None}) == {"retention_days": {"old": 90, "new": None}}
+    never = ChatSettings(chat_enabled=True, retention_days=None, allowed_llm_providers=None, daily_token_budget=None)
+    assert changes(never, {"retention_days": None}) == {}
+    assert changes(never, {"retention_days": 30}) == {"retention_days": {"old": None, "new": 30}}
+
+
 def test_the_defaults_are_the_column_defaults_and_the_effective_budget_follows_the_override() -> None:
-    expected = ChatSettings(chat_enabled=True, retention_days=90, allowed_llm_providers=None, daily_token_budget=None)
+    # Q4 (owner): the default is "keep everything", never a number of days.
+    expected = ChatSettings(chat_enabled=True, retention_days=None, allowed_llm_providers=None, daily_token_budget=None)
     assert expected == DEFAULTS
+    assert DEFAULTS.retention_days is None
     assert DEFAULTS.effective_daily_token_budget == settings.LLM_TENANT_DAILY_TOKENS
     custom = ChatSettings(chat_enabled=True, retention_days=90, allowed_llm_providers=(), daily_token_budget=1234)
     assert custom.effective_daily_token_budget == 1234

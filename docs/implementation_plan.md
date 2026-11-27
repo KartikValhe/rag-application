@@ -539,7 +539,7 @@ A registered student asks a question and gets an answer **grounded only in that 
 - [ ] "What's my next lecture?" (student), "what's my next lecture?" (teacher), and "what's the next lecture for all classes / for Class 10-A?" (admin) are answered from the timetable with **no LLM call** (test asserts it), with correct role scoping, and without citations or retrieval.
 - [ ] Student in Class A asking about a topic that exists only in Class B's documents gets the "not found in your class material" response. **Automated cross-class and cross-tenant leakage tests** seed distinctive canary strings in each scope and assert they never appear in another scope's answers or citations.
 - [ ] Answers stream with first token in under ~2 s on typical queries (p50), and citations resolve to the correct page.
-- [ ] A student not enrolled in the class gets 403 on both conversation creation and message send.
+- [ ] A student not enrolled in the class gets the generic 404 ("not found", the same answer as for an id that does not exist, so ids cannot be probed) on both conversation creation and message send.
 - [ ] Conversation history persists and is only visible to its owner (and tenant admin only if a policy says so).
 - [ ] Feedback is captured and visible in the database.
 

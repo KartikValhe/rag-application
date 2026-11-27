@@ -69,7 +69,8 @@ async def test_creating_a_tenant_gives_exactly_one_settings_row_with_the_default
     resp = await _create(client, platform_token, f"settings-{uuid.uuid4().hex[:12]}")
     assert resp.status_code == 201, resp.text
     tenant_id = uuid.UUID(resp.json()["id"])
-    assert await _rows(raw_db, tenant_id) == [(tenant_id, True, 90, None, None)]
+    # C35 (owner, 6a-12b): a new tenant keeps everything (retention NULL), never a default number of days
+    assert await _rows(raw_db, tenant_id) == [(tenant_id, True, None, None, None)]
 
 
 async def test_the_row_is_written_by_app_tenant_in_the_new_tenants_context(
@@ -110,7 +111,7 @@ async def test_other_tenants_rows_are_untouched_by_a_create(
     await raw_db.commit()
     resp = await _create(client, platform_token, f"settings-other-{uuid.uuid4().hex[:12]}")
     assert resp.status_code == 201
-    assert await _rows(raw_db, tenant_a.id) == [(tenant_a.id, True, 90, None, 777)]
+    assert await _rows(raw_db, tenant_a.id) == [(tenant_a.id, True, None, None, 777)]
 
 
 async def test_create_default_settings_is_idempotent(tenant_a: Tenant, raw_db: AsyncSession) -> None:

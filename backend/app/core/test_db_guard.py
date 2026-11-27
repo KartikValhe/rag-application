@@ -12,6 +12,7 @@ DB_URL_VARS = (
     "PLATFORM_DATABASE_URL",
     "WORKER_DATABASE_URL",
     "MIGRATION_DATABASE_URL",
+    "CHAT_MAINT_DATABASE_URL",
 )
 
 DEFAULT_URLS = {
@@ -19,6 +20,8 @@ DEFAULT_URLS = {
     "PLATFORM_DATABASE_URL": "postgresql+asyncpg://app_platform:platform_password@localhost:5433/ragplatform",
     "WORKER_DATABASE_URL": "postgresql+asyncpg://app_worker:worker_password@localhost:5433/ragplatform",
     "MIGRATION_DATABASE_URL": "postgresql+asyncpg://postgres:postgres@localhost:5433/ragplatform",
+    # The role has no password in the repo (tests reach it with SET ROLE from the superuser URL); the user name is checked.
+    "CHAT_MAINT_DATABASE_URL": "postgresql+asyncpg://app_chat_maint@localhost:5433/ragplatform",
 }
 
 # Hosts a test run may talk to: loopback and the docker-compose service names.
@@ -61,7 +64,7 @@ def check_test_urls(urls: Mapping[str, str], environment: str) -> None:
 
 
 def apply_test_database_env(env: MutableMapping[str, str]) -> None:
-    """Rewrite the four DB URLs in `env` to the test database, then run the hard guard."""
+    """Rewrite the DB URLs in `env` to the test database, then run the hard guard."""
     for var in DB_URL_VARS:
         env[var] = derive_test_url(env.get(var) or DEFAULT_URLS[var])
     env.setdefault("ENVIRONMENT", "development")

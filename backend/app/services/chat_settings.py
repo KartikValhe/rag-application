@@ -16,7 +16,9 @@ The tenant's chat settings as the admin route reads and changes them: GET and PA
       token_budget_invalid,
       token_budget_above_platform_ceiling   the 6a-5 codes of llm_budget.check_budget_override, kept for the budget.
     The first problem wins; nothing is written when any field is refused.
-  - The change record (the audit details) holds field names with their old and new values: booleans, numbers and
+  - retention_days is null (keep everything, the default: Q4 and C35, owner decisions of the 6a-12b brief) or whole days
+    from 30 to 3650. Setting it back to null is a change like any other and is audited.
+  - The change record (the audit details) holds field names with their old and new values: booleans, numbers, null and
     provider names. Never free text, never a secret.
 
 Rows are read and written in a tenant session (app_tenant: SELECT, INSERT, UPDATE on tenant_settings, plan 9.2);
@@ -36,7 +38,6 @@ from sqlalchemy import update as sql_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.tenant_settings import (
-    CHAT_RETENTION_DAYS_DEFAULT,
     CHAT_RETENTION_DAYS_MAX,
     CHAT_RETENTION_DAYS_MIN,
     TenantSettings,
@@ -81,7 +82,7 @@ class ChatSettings:
     """The effective settings of one tenant."""
 
     chat_enabled: bool
-    retention_days: int
+    retention_days: int | None  # None: keep everything (Q4, C35); otherwise whole days from 30 to 3650
     allowed_llm_providers: tuple[str, ...] | None  # None: the platform chain; (): no LLM (retrieval-only)
     daily_token_budget: int | None  # None: the platform default
 
@@ -91,7 +92,7 @@ class ChatSettings:
 
 
 DEFAULTS: Final = ChatSettings(
-    chat_enabled=True, retention_days=CHAT_RETENTION_DAYS_DEFAULT, allowed_llm_providers=None, daily_token_budget=None
+    chat_enabled=True, retention_days=None, allowed_llm_providers=None, daily_token_budget=None
 )
 
 
@@ -109,7 +110,10 @@ def _chat_enabled(value: object, _providers: frozenset[str]) -> bool:
     return value
 
 
-def _retention_days(value: object, _providers: frozenset[str]) -> int:
+def _retention_days(value: object, _providers: frozenset[str]) -> int | None:
+    """null (keep everything) or a whole number of days from 30 to 3650. Nothing else, not a string, a float or a bool."""
+    if value is None:
+        return None
     if type(value) is not int or not CHAT_RETENTION_DAYS_MIN <= value <= CHAT_RETENTION_DAYS_MAX:
         raise SettingsRefused("invalid_setting")
     return value
@@ -182,7 +186,7 @@ def _from_row(row: Any) -> ChatSettings:
     enabled, retention, providers, budget = row
     return ChatSettings(
         chat_enabled=bool(enabled),
-        retention_days=int(retention),
+        retention_days=None if retention is None else int(retention),
         allowed_llm_providers=None if providers is None else tuple(str(p) for p in providers),
         daily_token_budget=None if budget is None else int(budget),
     )
